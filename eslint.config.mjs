@@ -1,4 +1,4 @@
-import { dirname } from "path";
+﻿import { dirname } from "path";
 import { fileURLToPath } from "url";
 import { FlatCompat } from "@eslint/eslintrc";
 
@@ -17,9 +17,13 @@ const eslintConfig = [
       ".next/**",
       "out/**",
       "build/**",
+      ".scaffold/**",
+      "src/db/migrations/**",
       "next-env.d.ts",
     ],
   },
 ];
 
 export default eslintConfig;
+
+

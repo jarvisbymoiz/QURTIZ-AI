@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# leftover create-next-app temp scaffold (deletion pending user approval)
+.scaffold/
