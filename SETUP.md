@@ -58,6 +58,20 @@ npm run dev
 Open http://localhost:3000 → create an account → create your first
 workspace → fill the Brand Brain → chat with your agent.
 
+## 6. Meta integration (M4 — publishing)
+
+1. Create a Business-type app at developers.facebook.com; copy App ID +
+   App Secret into `.env.local` as `META_APP_ID` / `META_APP_SECRET`.
+2. Facebook Login → Settings → **Valid OAuth Redirect URI**:
+   `http://localhost:3000/api/meta/callback` (your real domain in production).
+3. App roles → add your Facebook account as Admin/Developer/Tester
+   (required until App Review is approved).
+4. Submit App Review for: `pages_show_list`, `pages_manage_posts`,
+   `pages_read_engagement`, `instagram_basic`, `instagram_content_publish`.
+5. Restart the dev server → Connections → **Connect with Facebook**.
+   Your Page + linked Instagram account link automatically; tokens are
+   stored AES-256-GCM encrypted.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -67,4 +81,5 @@ workspace → fill the Brand Brain → chat with your agent.
 | Migrations fail with auth.uid() error | You are not on a Supabase database — RLS policies require Supabase Postgres |
 | Chat shows Configuration Required | Add `GEMINI_API_KEY` and restart the dev server |
 | `relation already exists` | Schema already applied; skip migrating again |
+
 
