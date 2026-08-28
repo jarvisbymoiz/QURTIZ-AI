@@ -1,23 +1,12 @@
-﻿import "server-only";
-
-import { generateText } from "ai";
+﻿import { generateText } from "ai";
 import { z } from "zod";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, researchItems } from "@/db/schema";
 import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
-
-export const topicScoresSchema = z.object({
-  trend: z.number().min(0).max(10),
-  audience: z.number().min(0).max(10),
-  search: z.number().min(0).max(10),
-  competition: z.number().min(0).max(10),
-  business: z.number().min(0).max(10),
-  viral: z.number().min(0).max(10),
-  conversion: z.number().min(0).max(10),
-});
-export type TopicScores = z.infer<typeof topicScoresSchema>;
+import { overallOpportunity } from "@/lib/ai/scores";
+import { topicScoresSchema } from "@/lib/ai/research-types";
 
 const researchedTopicSchema = z.object({
   topic: z.string().min(4).max(200),
@@ -29,23 +18,6 @@ const researchedTopicSchema = z.object({
   sourceUrls: z.array(z.string().url()).max(3).default([]),
 });
 export type ResearchedTopic = z.infer<typeof researchedTopicSchema>;
-
-/**
- * AI-estimated overall opportunity score. Weights favor business relevance
- * and audience fit; competition is inverted (low competition = higher score).
- * Deterministic and pure — UI must label all scores as AI-estimated.
- */
-export function overallOpportunity(s: TopicScores): number {
-  const weighted =
-    s.trend * 0.15 +
-    s.audience * 0.2 +
-    s.search * 0.1 +
-    (10 - s.competition) * 0.1 +
-    s.business * 0.2 +
-    s.viral * 0.15 +
-    s.conversion * 0.1;
-  return Math.round(weighted * 10) / 10;
-}
 
 function extractJson(text: string): unknown {
   const stripped = text.replace(/```json|```/g, "").trim();
@@ -127,7 +99,6 @@ sourceUrls: ONLY real URLs you are confident exist from search results; empty ar
 ${ctx.notes ? `Extra context from the user: ${ctx.notes}` : ""}
 Research content opportunities: trending angles, audience questions, content gaps, seasonal hooks.`;
 
-  const groundedPrompt = `${system}\n\n${userPrompt}\nSearch the web for current information before answering.`;
 
   // Attempt grounded (live) research; fall back honestly when quota blocks it.
   let sourced = false;
@@ -201,3 +172,5 @@ Research content opportunities: trending angles, audience questions, content gap
 
   return { ok: true, sourced, note, count: rawTopics.length };
 }
+
+

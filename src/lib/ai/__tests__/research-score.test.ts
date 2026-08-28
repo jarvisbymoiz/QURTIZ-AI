@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from "vitest";
-import { overallOpportunity } from "@/lib/ai/research";
+import { overallOpportunity } from "@/lib/ai/scores";
 
 describe("overallOpportunity", () => {
   it("weights business relevance and audience fit highest", () => {
@@ -19,3 +19,4 @@ describe("overallOpportunity", () => {
     expect(overallOpportunity(s)).toBe(9); // competition inverted: (10-10)*0.1 = 0
   });
 });
+
