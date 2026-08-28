@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useTransition } from "react";
 import { toast } from "sonner";
 import { Loader2, Plug, RefreshCw, Sparkles } from "lucide-react";
 import { runPerformanceAnalysisAction, syncInsightsAction } from "@/server/actions/analytics";
@@ -17,7 +17,6 @@ export function AnalyticsClient({
   hours,
   connected,
   insight,
-  editable,
 }: {
   totals: Totals;
   byPlatform: { key: string; totals: Totals }[];
@@ -25,7 +24,6 @@ export function AnalyticsClient({
   hours: { hour: number; avgEngagement: number; posts: number }[];
   connected: string[];
   insight: string | null;
-  editable: boolean;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();

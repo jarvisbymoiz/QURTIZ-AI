@@ -178,6 +178,16 @@ export default async function DashboardPage() {
             )}
             <Button nativeButton={false} className="w-full" render={<Link href="/chat" />}><MessageSquare className="size-4" aria-hidden />
                 Open AI Chat</Button>
+            {latestInsight ? (
+              <div className="rounded-lg border p-3">
+                <div className="mb-1 flex items-center gap-1.5 text-xs font-medium">
+                  <Sparkles className="size-3.5 text-primary" aria-hidden /> Latest AI analysis
+                </div>
+                <div className="line-clamp-4 whitespace-pre-wrap text-xs text-muted-foreground">
+                  {latestInsight.content}
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </div>

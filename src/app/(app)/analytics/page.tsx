@@ -3,7 +3,6 @@ import { getDb } from "@/db";
 import { aiInsights, contentItems, platformConnections, postMetrics } from "@/db/schema";
 import { sumTotals, groupPerformance, bestPostingHours, type MetricsRow } from "@/lib/analytics/compute";
 import { requireWorkspace } from "@/lib/workspace";
-import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
 import { AnalyticsClient } from "@/components/analytics/analytics-client";
 
@@ -67,7 +66,6 @@ export default async function AnalyticsPage() {
         hours={hours}
         connected={connections.filter((c) => c.status === "connected").map((c) => c.platform)}
         insight={latestInsight?.content ?? null}
-        editable={can(ctx.role, "brand:write")}
       />
     </div>
   );
