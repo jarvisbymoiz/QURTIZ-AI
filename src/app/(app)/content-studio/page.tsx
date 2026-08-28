@@ -1,13 +1,51 @@
-﻿import { ComingSoon } from "@/components/layout/coming-soon";
+﻿import { desc, eq, inArray } from "drizzle-orm";
+import { getDb } from "@/db";
+import { contentItems, contentPillars, contentVariants } from "@/db/schema";
+import { isAiConfigured } from "@/lib/ai/provider";
+import { requireWorkspace } from "@/lib/workspace";
+import { can } from "@/lib/permissions";
+import { PageHeader } from "@/components/layout/page-header";
+import { StudioClient } from "@/components/studio/studio-client";
 
-export const metadata = { title: "content studio" };
+export const metadata = { title: "Content Studio" };
 
-export default function Page() {
+export default async function ContentStudioPage() {
+  const ctx = await requireWorkspace();
+  const db = getDb();
+
+  const items = await db
+    .select()
+    .from(contentItems)
+    .where(eq(contentItems.workspaceId, ctx.workspace.id))
+    .orderBy(desc(contentItems.createdAt))
+    .limit(50);
+
+  const itemIds = items.map((i) => i.id);
+  const variants = itemIds.length
+    ? await db
+        .select()
+        .from(contentVariants)
+        .where(inArray(contentVariants.contentItemId, itemIds))
+    : [];
+
+  const pillars = await db
+    .select()
+    .from(contentPillars)
+    .where(eq(contentPillars.workspaceId, ctx.workspace.id));
+
   return (
-    <ComingSoon
-      section="content studio"
-      milestone="M2"
-      description="The full content engine: generation, platform adaptation, QA, and the content lifecycle (draft → review → approved)."
-    />
+    <div className="space-y-6">
+      <PageHeader
+        title="Content Studio"
+        description="Generate, review, and manage posts. Every post is AI-estimated and QA-checked before review — nothing publishes from here."
+      />
+      <StudioClient
+        items={items}
+        variants={variants}
+        pillars={pillars}
+        aiConfigured={isAiConfigured()}
+        editable={can(ctx.role, "brand:write")}
+      />
+    </div>
   );
 }

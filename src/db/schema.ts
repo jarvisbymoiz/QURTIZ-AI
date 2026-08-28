@@ -54,6 +54,24 @@ export const platformConnectionStatusEnum = pgEnum(
   ["not_connected", "connected", "expired", "error"],
 );
 
+export const contentFormatEnum = pgEnum("content_format", [
+  "single_image",
+  "carousel",
+  "reel",
+  "story",
+  "text_post",
+]);
+
+export const contentVariantStatusEnum = pgEnum("content_variant_status", [
+  "generating",
+  "ready_for_review",
+  "approved",
+  "scheduled",
+  "published",
+  "failed",
+  "archived",
+]);
+
 /* ── Identity & workspaces ─────────────────────────────────────────── */
 
 export const workspaces = pgTable(
@@ -251,7 +269,46 @@ export const agentSteps = pgTable(
   (t) => [index("agent_steps_run_idx").on(t.runId, t.idx)],
 );
 
-/* ── Content (shell only — engine arrives in M2) ───────────────────── */
+/* ── Content engine (M2) ───────────────────────────────────────────── */
+
+export const contentPillars = pgTable(
+  "content_pillars",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    targetShare: integer("target_share").notNull().default(20),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("content_pillars_ws_idx").on(t.workspaceId, t.active)],
+);
+
+export const researchItems = pgTable(
+  "research_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    topic: text("topic").notNull(),
+    summary: text("summary").notNull().default(""),
+    sourceUrl: text("source_url"),
+    sourceName: text("source_name"),
+    category: text("category"),
+    scores: jsonb("scores").notNull().default({}),
+    recommendedFormats: text("recommended_formats").array().notNull().default([]),
+    status: text("status").notNull().default("new"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("research_items_ws_idx").on(t.workspaceId, t.createdAt)],
+);
 
 export const contentItems = pgTable(
   "content_items",
@@ -261,6 +318,21 @@ export const contentItems = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     topic: text("topic").notNull(),
+    objective: text("objective"),
+    pillarId: uuid("pillar_id").references(() => contentPillars.id, { onDelete: "set null" }),
+    format: contentFormatEnum("format").notNull().default("single_image"),
+    hook: text("hook"),
+    mainCopy: text("main_copy"),
+    caption: text("caption"),
+    cta: text("cta"),
+    hashtags: text("hashtags").array().notNull().default([]),
+    keywords: text("keywords").array().notNull().default([]),
+    visualConcept: text("visual_concept"),
+    aiScores: jsonb("ai_scores").notNull().default({}),
+    qa: jsonb("qa").notNull().default({}),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    researchItemId: uuid("research_item_id"),
     status: contentStatusEnum("status").notNull().default("draft"),
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -268,4 +340,28 @@ export const contentItems = pgTable(
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (t) => [index("content_items_ws_status_idx").on(t.workspaceId, t.status)],
+);
+
+export const contentVariants = pgTable(
+  "content_variants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    contentItemId: uuid("content_item_id")
+      .notNull()
+      .references(() => contentItems.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    platform: platformEnum("platform").notNull(),
+    format: contentFormatEnum("format").notNull(),
+    caption: text("caption").notNull().default(""),
+    script: jsonb("script").notNull().default({}),
+    hashtags: text("hashtags").array().notNull().default([]),
+    cta: text("cta"),
+    status: contentVariantStatusEnum("status").notNull().default("generating"),
+    qa: jsonb("qa").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("content_variants_item_idx").on(t.contentItemId, t.platform)],
 );

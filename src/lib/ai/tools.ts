@@ -3,6 +3,7 @@ import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands } from "@/db/schema";
+import { generateAndPersistContent } from "@/lib/ai/content";
 
 export type BrandBrainRow = typeof brands.$inferSelect;
 
@@ -130,10 +131,42 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
+  const createContent = tool({
+    description:
+      "Generate one complete social media post (copy + platform-adapted variants + hashtags + CTA) for this workspace. Use when the user asks to create a post or content about a topic. The post goes to Content Studio as Ready for Review — it is NOT published.",
+    inputSchema: z.object({
+      topic: z.string().min(4).max(500).describe("What the post is about"),
+      platforms: z.array(z.enum(["facebook", "instagram"])).min(1).describe("Target platforms"),
+      objective: z.string().max(300).optional().describe("e.g. engagement, leads, sales"),
+    }),
+    execute: async (input) => {
+      const { itemId, qa } = await generateAndPersistContent({
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        input: {
+          topic: input.topic,
+          objective: input.objective ?? null,
+          platforms: input.platforms,
+          preferredFormat: null,
+        },
+      });
+      await logStep("create_content", input, { itemId, qaScore: qa.score });
+      return {
+        created: true,
+        itemId,
+        qaScore: qa.score,
+        qaIssues: qa.issues,
+        message: `Content created (QA ${qa.score}/100) and saved to Content Studio as ${qa.passed ? "Ready for Review" : "Draft (QA issues found)"}.`,
+      };
+    },
+  });
+
   return {
     get_brand_brain: getBrandBrain,
+    create_content: createContent,
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };
 }
+
 

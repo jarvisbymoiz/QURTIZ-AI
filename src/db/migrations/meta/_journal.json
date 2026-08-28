@@ -15,6 +15,20 @@
       "when": 1787848221043,
       "tag": "0001_rls_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787885286773,
+      "tag": "0002_omniscient_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787885356925,
+      "tag": "0003_rls_m2",
+      "breakpoints": true
     }
   ]
 }
