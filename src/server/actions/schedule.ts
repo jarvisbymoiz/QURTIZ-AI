@@ -5,10 +5,11 @@ import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, jobs, publishingJobs, workspaces } from "@/db/schema";
+import { contentItems, contentVariants, publishingJobs, jobs, workspaces } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
-import { defaultSlotFor } from "@/lib/scheduling/time";
+
 import { planContentDays } from "@/lib/scheduling/time";
+import { scheduleItem } from "@/lib/scheduling/engine";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
@@ -54,39 +55,14 @@ export async function scheduleContentAction(input: { itemId: string; dateIso: st
     return { ok: false, error: "Only content in review or approved can be scheduled. Review it first." };
   }
 
-  const scheduledAt = input.timeStr
-    ? (() => { const [h, m] = timeStr.split(":").map(Number); const [y, mo, d] = input.dateIso.split("-").map(Number); return import("@/lib/scheduling/time").then((t) => t.zonedToUtc(y, mo, d, h, m, ctx.timezone)); })()
-    : defaultSlotFor(input.dateIso, ctx.timezone);
-
-  const variants = await db
-    .select({ id: contentVariants.id, platform: contentVariants.platform })
-    .from(contentVariants)
-    .where(and(eq(contentVariants.contentItemId, item.id), eq(contentVariants.workspaceId, ctx.workspaceId)));
-  if (variants.length === 0) return { ok: false, error: "This item has no platform variants to schedule." };
-
-  for (const v of variants) {
-    // Replace any pending jobs for this variant (reschedule semantics).
-    await db
-      .delete(publishingJobs)
-      .where(and(eq(publishingJobs.contentVariantId, v.id), eq(publishingJobs.status, "pending")));
-    await db.insert(publishingJobs).values({
-      workspaceId: ctx.workspaceId,
-      contentItemId: item.id,
-      contentVariantId: v.id,
-      platform: v.platform,
-      scheduledAt: await scheduledAt,
-      status: "pending",
-    });
-  }
-
-  await db
-    .update(contentItems)
-    .set({ status: "scheduled", scheduledAt: await scheduledAt, updatedAt: new Date() })
-    .where(eq(contentItems.id, item.id));
-  await db
-    .update(contentVariants)
-    .set({ status: "scheduled", updatedAt: new Date() })
-    .where(eq(contentVariants.contentItemId, item.id));
+  const result = await scheduleItem({
+    workspaceId: ctx.workspaceId,
+    itemId: input.itemId,
+    dateIso: input.dateIso,
+    timeStr: input.timeStr || undefined,
+    timezone: ctx.timezone,
+  });
+  if (!result.ok) return { ok: false, error: result.message };
 
   revalidatePath("/calendar");
   revalidatePath("/content-studio");

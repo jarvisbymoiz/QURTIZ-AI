@@ -37,6 +37,13 @@ function MessageParts({ message }: { message: UIMessage }) {
             </p>
           );
         }
+        if (part.type === "tool-schedule_content") {
+          return (
+            <p key={i} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Brain className="size-3.5" aria-hidden /> Scheduled content on the calendar
+            </p>
+          );
+        }
         if (part.type === "tool-research_niche") {
           return (
             <p key={i} className="flex items-center gap-2 text-xs text-muted-foreground">

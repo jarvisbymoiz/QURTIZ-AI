@@ -2,8 +2,10 @@
 import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentSteps, brandMemory, brands } from "@/db/schema";
+import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { scheduleItem } from "@/lib/scheduling/engine";
+import { workspaces } from "@/db/schema";
 import { researchTopics } from "@/lib/ai/research";
 
 export type BrandBrainRow = typeof brands.$inferSelect;
@@ -187,10 +189,55 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
+  const scheduleContent = tool({
+    description:
+      "Schedule an existing content item for publishing on a specific date (and optional time, default 18:30 workspace time). Use after create_content when the user names a date/time. Publishing requires connected accounts; scheduling itself always works.",
+    inputSchema: z.object({
+      itemId: z.string().uuid().optional().describe("The content item id (returned by create_content). If omitted, the most recent Ready-for-Review item is used."),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Schedule date, YYYY-MM-DD"),
+      time: z.string().regex(/^\d{2}:\d{2}$/).optional().describe("Optional time HH:mm in workspace timezone"),
+    }),
+    execute: async (input) => {
+      const db = getDb();
+      let itemId: string | null = input.itemId ?? null;
+      if (!itemId) {
+        const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+        const latest = await db
+          .select({ id: contentItems.id, status: contentItems.status, createdAt: contentItems.createdAt })
+          .from(contentItems)
+          .where(and(eq(contentItems.workspaceId, ctx.workspaceId), eq(contentItems.status, "ready_for_review")))
+          .orderBy(desc(contentItems.createdAt))
+          .limit(1);
+        if (latest.length === 0) {
+          await logStep("schedule_content", input, { ok: false });
+          return { scheduled: false, message: "No Ready-for-Review content found. Create content first." };
+        }
+        itemId = latest[0].id ?? null;
+      }
+      const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+      const result = await scheduleItem({
+        workspaceId: ctx.workspaceId,
+        itemId,
+        dateIso: input.date,
+        timeStr: input.time,
+        timezone: ws?.timezone ?? "Asia/Karachi",
+      });
+      await logStep("schedule_content", input, { ok: result.ok });
+      if (!result.ok) return { scheduled: false, message: result.message };
+      return {
+        scheduled: true,
+        scheduledAt: result.scheduledAt.toISOString(),
+        variants: result.variants,
+        message: `Scheduled for ${input.date} ${input.time ?? "18:30"} (workspace time) across ${result.variants} platform variants. It will publish automatically if the platform is connected.`,
+      };
+    },
+  });
+
   return {
     get_brand_brain: getBrandBrain,
     research_niche: researchNiche,
     create_content: createContent,
+    schedule_content: scheduleContent,
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };
