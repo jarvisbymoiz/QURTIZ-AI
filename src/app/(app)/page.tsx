@@ -11,6 +11,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { getDb } from "@/db";
+import { aiInsights } from "@/db/schema";
 import { agentRuns, chatThreads, contentItems, platformConnections } from "@/db/schema";
 import { isAiConfigured, getModelId } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
@@ -42,6 +43,13 @@ export default async function DashboardPage() {
     .where(eq(chatThreads.workspaceId, ctx.workspace.id))
     .orderBy(desc(chatThreads.updatedAt))
     .limit(3);
+
+  const [latestInsight] = await db
+    .select({ content: aiInsights.content })
+    .from(aiInsights)
+    .where(eq(aiInsights.workspaceId, ctx.workspace.id))
+    .orderBy(desc(aiInsights.createdAt))
+    .limit(1);
 
   const recentRuns = await db
     .select({ id: agentRuns.id, status: agentRuns.status, model: agentRuns.model, finishedAt: agentRuns.finishedAt })

@@ -559,3 +559,37 @@ export const campaignItems = pgTable(
 );
 
 
+
+/* ── Analytics (M5) ────────────────────────────────────────────────── */
+
+export const postMetrics = pgTable(
+  "post_metrics",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    platform: platformEnum("platform").notNull(),
+    contentItemId: uuid("content_item_id").references(() => contentItems.id, { onDelete: "set null" }),
+    externalPostId: text("external_post_id").notNull(),
+    metrics: jsonb("metrics").notNull().default({}),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    collectedAt: timestamp("collected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("post_metrics_external_uq").on(t.workspaceId, t.platform, t.externalPostId)],
+);
+
+export const aiInsights = pgTable(
+  "ai_insights",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull().default("performance"),
+    content: text("content").notNull(),
+    data: jsonb("data").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_insights_ws_idx").on(t.workspaceId, t.createdAt)],
+);

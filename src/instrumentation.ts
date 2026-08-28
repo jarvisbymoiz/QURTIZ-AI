@@ -11,6 +11,7 @@ export async function register() {
     await registerWorkers(boss);
     // Scan for due publishing jobs every minute.
     await boss.schedule(QUEUES.publishScan, "* * * * *");
+    await boss.schedule(QUEUES.syncInsights, "0 */4 * * *"); // every 4 hours
     console.log("[qurtiz] background scheduler started");
   } catch (e) {
     // Do not crash the server if the queue is unavailable (e.g. no DATABASE_URL yet).

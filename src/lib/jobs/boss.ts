@@ -28,5 +28,6 @@ export const QUEUES = {
   publishScan: "publish-due-scan",
   bulkGenerate: "bulk-generate",
   campaignGenerate: "campaign-generate",
+  syncInsights: "sync-insights",
 } as const;
 

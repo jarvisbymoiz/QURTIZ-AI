@@ -15,6 +15,7 @@ import {
 import { QUEUES } from "./boss";
 import { decryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
+import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { campaigns, campaignItems } from "@/db/schema";
 import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
@@ -307,6 +308,24 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(Q.campaignGenerate, async (job) => {
     const data = (job as { data?: { campaignId?: string } }).data;
     if (data?.campaignId) await generateCampaign(data.campaignId);
+  });
+  await boss.work(Q.syncInsights, async () => {
+    // The cron schedule passes workspace scoping by iterating all connected
+    // workspaces via platform_connections (service-style scan).
+    const { getDb } = await import("@/db");
+    const { platformConnections } = await import("@/db/schema");
+    const db = getDb();
+    const conns = await db
+      .selectDistinct({ workspaceId: platformConnections.workspaceId })
+      .from(platformConnections)
+      .where(eq(platformConnections.status, "connected"));
+    for (const row of conns) {
+      try {
+        await syncInsightsForWorkspace(row.workspaceId);
+      } catch (e) {
+        console.error("[sync-insights]", e instanceof Error ? e.message : e);
+      }
+    }
   });
   console.log("[qurtiz] workers registered");
 }
