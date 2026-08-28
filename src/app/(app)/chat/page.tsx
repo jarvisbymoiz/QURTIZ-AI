@@ -30,7 +30,7 @@ export default async function ChatIndexPage() {
       />
       <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
         <aside className="space-y-2">
-          <Button variant="outline" className="w-full justify-start gap-2" render={<Link href="/chat" />}><Plus className="size-4" aria-hidden /> New chat</Button>
+          <Button nativeButton={false} variant="outline" className="w-full justify-start gap-2" render={<Link href="/chat" />}><Plus className="size-4" aria-hidden /> New chat</Button>
           {threads.length === 0 ? (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
               No conversations yet.
@@ -62,5 +62,6 @@ export default async function ChatIndexPage() {
     </div>
   );
 }
+
 
 

@@ -18,6 +18,8 @@ const eslintConfig = [
       "out/**",
       "build/**",
       ".scaffold/**",
+      ".next-dev-test/**",
+      ".next-build-verify/**",
       "src/db/migrations/**",
       "next-env.d.ts",
     ],

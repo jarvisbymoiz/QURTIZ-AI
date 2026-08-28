@@ -168,7 +168,7 @@ export default async function DashboardPage() {
                 ))}
               </ul>
             )}
-            <Button className="w-full" render={<Link href="/chat" />}><MessageSquare className="size-4" aria-hidden />
+            <Button nativeButton={false} className="w-full" render={<Link href="/chat" />}><MessageSquare className="size-4" aria-hidden />
                 Open AI Chat</Button>
           </CardContent>
         </Card>
@@ -187,7 +187,7 @@ export default async function DashboardPage() {
               Nothing scheduled yet. The content calendar and scheduling engine ship in M3;
               content generation arrives in M2.
             </p>
-            <Button variant="outline" render={<Link href="/brand-brain" />}>Fill your Brand Brain first</Button>
+            <Button nativeButton={false} variant="outline" render={<Link href="/brand-brain" />}>Fill your Brand Brain first</Button>
           </div>
         </CardContent>
       </Card>
@@ -219,6 +219,8 @@ export default async function DashboardPage() {
     </div>
   );
 }
+
+
 
 
 

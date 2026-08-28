@@ -57,7 +57,7 @@ export default function SignupPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button variant="outline" className="w-full" render={<Link href="/login" />}>Back to sign in</Button>
+          <Button nativeButton={false} variant="outline" className="w-full" render={<Link href="/login" />}>Back to sign in</Button>
         </CardContent>
       </Card>
     );
@@ -110,4 +110,5 @@ export default function SignupPage() {
     </Card>
   );
 }
+
 

@@ -52,7 +52,7 @@ export default async function ThreadPage({ params }: { params: Promise<{ threadI
       <PageHeader title={thread.title} description="Conversation with your workspace agent." />
       <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
         <aside className="space-y-2">
-          <Button variant="outline" className="w-full justify-start gap-2" render={<Link href="/chat" />}>
+          <Button nativeButton={false} variant="outline" className="w-full justify-start gap-2" render={<Link href="/chat" />}>
             <Plus className="size-4" aria-hidden /> New chat
           </Button>
           <ul className="space-y-1">
