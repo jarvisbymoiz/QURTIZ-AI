@@ -120,7 +120,7 @@ export function ConnectionsClient({
                     ) : null}
                   </div>
                 ) : (
-                  <Button render={<a href="/api/meta/connect" />} disabled={!configured || !canManage}>
+                  <Button nativeButton={false} render={<a href="/api/meta/connect" />} disabled={!configured || !canManage}>
                     Connect with Facebook
                   </Button>
                 )}
