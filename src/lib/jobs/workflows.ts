@@ -1,6 +1,6 @@
 ﻿import "server-only";
 
-import { and, eq, lte } from "drizzle-orm";
+import { and, desc, eq, lte } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   agentRuns,
@@ -10,8 +10,13 @@ import {
   notifications,
   platformConnections,
   publishingJobs,
+  visualAssets,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
+import { decryptToken } from "@/lib/crypto/tokens";
+import { publishPost } from "@/lib/meta/publish";
+import { campaigns, campaignItems } from "@/db/schema";
+import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
 import { planContentDays } from "@/lib/scheduling/time";
 import { generateAndPersistContent } from "@/lib/ai/content";
@@ -41,28 +46,118 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       ),
     );
 
-  if (!conn || conn.status !== "connected") {
-    const reason = `${job.platform === "facebook" ? "Facebook Page" : "Instagram"} is not connected — official Meta integration ships in M4. Schedule kept; publish will retry once connected.`;
+  if (!conn || conn.status !== "connected" || !conn.encryptedToken) {
+    const reason = `${job.platform === "facebook" ? "Facebook Page" : "Instagram"} is not connected. Connect it on the Connections page${process.env.META_APP_ID ? "" : " (Meta app credentials missing in .env.local)"}.`;
     await db
       .update(publishingJobs)
       .set({ status: "failed", lastError: reason, updatedAt: new Date() })
       .where(eq(publishingJobs.id, job.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: (await db.select({ v: contentVariants.id }).from(contentVariants).where(eq(contentVariants.id, job.contentVariantId)).limit(1)).length > 0 ? job.workspaceId : job.workspaceId, // owner notification; refined with member targeting in M4
+      userId: job.workspaceId,
       kind: "publishing_failed",
       title: "Publishing failed",
       body: reason,
-      link: "/content-studio",
+      link: "/connections",
     });
     return;
   }
 
-  // Real Meta adapter lands in M4.
-  await db
-    .update(publishingJobs)
-    .set({ status: "failed", lastError: "Publishing adapter not yet implemented (M4).", updatedAt: new Date() })
-    .where(eq(publishingJobs.id, job.id));
+  // Load variant + item + latest visual
+  const [variant] = await db.select().from(contentVariants).where(eq(contentVariants.id, job.contentVariantId));
+  if (!variant) {
+    await db.update(publishingJobs).set({ status: "failed", lastError: "Variant not found.", updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+    return;
+  }
+  const [item] = await db.select().from(contentItems).where(eq(contentItems.id, variant.contentItemId));
+
+  // Latest template or AI visual for this item
+  const [visual] = await db
+    .select()
+    .from(visualAssets)
+    .where(eq(visualAssets.contentItemId, variant.contentItemId))
+    .orderBy(desc(visualAssets.createdAt))
+    .limit(1);
+
+  // Signed public URL for the image (IG requires a reachable URL)
+  let imageUrl: string | null = null;
+  if (visual) {
+    const { createClient } = await import("@/lib/supabase/server");
+    const supabase = await createClient();
+    const { data } = await supabase.storage.from("brand-assets").createSignedUrl(visual.storagePath, 60 * 60 * 24 * 6);
+    imageUrl = data?.signedUrl ?? null;
+  }
+
+  const token = decryptToken(conn.encryptedToken);
+  if (!token) {
+    const reason = "Stored access token could not be decrypted — reconnect the account.";
+    await db.update(publishingJobs).set({ status: "failed", lastError: reason, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.workspaceId,
+      kind: "auth_expired",
+      title: "Reconnection required",
+      body: reason,
+      link: "/connections",
+    });
+    return;
+  }
+
+  const meta = (conn.meta ?? {}) as Record<string, string>;
+  const message = [item?.caption ?? variant.caption, (variant.hashtags ?? []).map((h) => `#${h}`).join(" ")]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const result = await publishPost({
+    pageToken: token,
+    pageId: conn.platform === "instagram" ? String(meta.pageId ?? "") : String(meta.pageId ?? ""),
+    igUserId: meta.igUserId ?? null,
+    platform: job.platform,
+    message,
+    imageUrl,
+  });
+
+  if (result.ok) {
+    await db
+      .update(publishingJobs)
+      .set({ status: "published", result: { postId: result.postId, permalink: result.permalink }, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db
+      .update(contentVariants)
+      .set({ status: "published", updatedAt: new Date() })
+      .where(eq(contentVariants.id, variant.id));
+    const allPublished = (await db
+      .select({ status: contentVariants.status })
+      .from(contentVariants)
+      .where(eq(contentVariants.contentItemId, variant.contentItemId))).every((v) => v.status === "published");
+    if (allPublished) {
+      await db
+        .update(contentItems)
+        .set({ status: "published", publishedAt: new Date(), updatedAt: new Date() })
+        .where(eq(contentItems.id, variant.contentItemId));
+    }
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.workspaceId,
+      kind: "publishing_completed",
+      title: "Published successfully",
+      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} post is live${result.permalink ? `: ${result.permalink}` : "."}`,
+      link: "/content-studio",
+    });
+  } else {
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: result.message, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.workspaceId,
+      kind: "publishing_failed",
+      title: "Publishing failed",
+      body: result.message,
+      link: "/content-studio",
+    });
+  }
 }
 
 /** Scan for due publishing jobs (runs every minute via pg-boss cron). */
@@ -151,6 +246,54 @@ async function bulkGenerate(jobId: string): Promise<void> {
   }
 }
 
+/**
+ * Campaign generation: produce content for each day of the arc.
+ */
+async function generateCampaign(campaignId: string): Promise<void> {
+  const db = getDb();
+  const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
+  if (!campaign || campaign.status !== "generating") return;
+
+  const days = await db
+    .select()
+    .from(campaignItems)
+    .where(eq(campaignItems.campaignId, campaignId));
+  const pending = days.filter((d) => !d.contentItemId).sort((a, b) => a.dayIndex - b.dayIndex);
+
+  const platforms = (campaign.platforms ?? ["facebook", "instagram"]) as ("facebook" | "instagram")[];
+
+  for (const day of pending) {
+    try {
+      const { itemId } = await generateAndPersistContent({
+        workspaceId: campaign.workspaceId,
+        userId: (campaign.createdBy ?? campaign.workspaceId),
+        input: {
+          topic: `Campaign "${campaign.name}" — Day ${day.dayIndex}: ${day.theme}${campaign.offer ? ` (offer: ${campaign.offer})` : ""}`,
+          objective: `Campaign day ${day.dayIndex}/${campaign.durationDays}: ${day.theme}`,
+          platforms,
+          preferredFormat: null,
+        },
+      });
+      await db
+        .update(campaignItems)
+        .set({ contentItemId: itemId })
+        .where(eq(campaignItems.id, day.id));
+    } catch (e) {
+      console.error("[campaign] day failed", e instanceof Error ? e.message : e);
+    }
+  }
+
+  await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, campaignId));
+  await db.insert(notifications).values({
+    workspaceId: campaign.workspaceId,
+    userId: campaign.createdBy ?? campaign.workspaceId,
+    kind: "job_completed",
+    title: "Campaign content ready",
+    body: `${campaign.name}: ${pending.length} posts generated.`,
+    link: "/campaigns",
+  });
+}
+
 /** Register all workers. Called once at server start. */
 export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.publishScan, async () => {
@@ -160,6 +303,10 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
     const data = (job as { data?: { jobId?: string } }).data;
     const jobId = data?.jobId;
     if (jobId) await bulkGenerate(jobId);
+  });
+  await boss.work(Q.campaignGenerate, async (job) => {
+    const data = (job as { data?: { campaignId?: string } }).data;
+    if (data?.campaignId) await generateCampaign(data.campaignId);
   });
   console.log("[qurtiz] workers registered");
 }

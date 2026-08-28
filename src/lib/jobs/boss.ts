@@ -27,5 +27,6 @@ export async function getBoss(): Promise<PgBoss> {
 export const QUEUES = {
   publishScan: "publish-due-scan",
   bulkGenerate: "bulk-generate",
+  campaignGenerate: "campaign-generate",
 } as const;
 

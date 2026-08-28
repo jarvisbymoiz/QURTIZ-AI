@@ -185,6 +185,7 @@ export const platformConnections = pgTable(
     platform: platformEnum("platform").notNull(),
     status: platformConnectionStatusEnum("status").notNull().default("not_connected"),
     meta: jsonb("meta").notNull().default({}),
+    encryptedToken: text("encrypted_token"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -505,3 +506,56 @@ export const notifications = pgTable(
   },
   (t) => [index("notifications_ws_idx").on(t.workspaceId, t.createdAt)],
 );
+
+/* ── Campaigns (M3) ────────────────────────────────────────────────── */
+
+export const campaignStatusEnum = pgEnum("campaign_status", [
+  "planning",
+  "generating",
+  "active",
+  "completed",
+  "cancelled",
+]);
+
+export const campaigns = pgTable(
+  "campaigns",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    goal: text("goal"),
+    offer: text("offer"),
+    audience: text("audience"),
+    durationDays: integer("duration_days").notNull().default(7),
+    platforms: text("platforms").array().notNull().default([]),
+    cta: text("cta"),
+    status: campaignStatusEnum("status").notNull().default("planning"),
+    jobId: uuid("job_id"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("campaigns_ws_idx").on(t.workspaceId, t.createdAt)],
+);
+
+export const campaignItems = pgTable(
+  "campaign_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    campaignId: uuid("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    dayIndex: integer("day_index").notNull(),
+    theme: text("theme").notNull(),
+    contentItemId: uuid("content_item_id").references(() => contentItems.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("campaign_items_campaign_idx").on(t.campaignId, t.dayIndex)],
+);
+
+
