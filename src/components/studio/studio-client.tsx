@@ -4,7 +4,8 @@ import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Loader2, Plus, Sparkles, Trash2, Wand2 } from "lucide-react";
-import type { contentItems, contentPillars, contentVariants } from "@/db/schema";
+import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
+import { generateVisualAction } from "@/server/actions/visuals";
 import {
   createContentAction,
   deleteContentAction,
@@ -32,6 +33,7 @@ import { cn } from "@/lib/utils";
 type Item = typeof contentItems.$inferSelect;
 type Variant = typeof contentVariants.$inferSelect;
 type Pillar = typeof contentPillars.$inferSelect;
+type Visual = typeof visualAssets.$inferSelect;
 
 const STATUS_STYLE: Record<string, string> = {
   draft: "bg-muted text-muted-foreground",
@@ -194,10 +196,20 @@ function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boo
   );
 }
 
-function ItemCard({ item, variants, editable }: {
+function ItemCard({
+  item,
+  variants,
+  visuals,
+  visualUrls,
+  editable,
+  aiConfigured,
+}: {
   item: Item;
   variants: Variant[];
+  visuals: Visual[];
+  visualUrls: Record<string, string | null>;
   editable: boolean;
+  aiConfigured: boolean;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -268,6 +280,7 @@ function ItemCard({ item, variants, editable }: {
                     <p className="text-sm text-muted-foreground">No variants stored.</p>
                   ) : null}
                 </Tabs>
+                <VisualSection itemId={item.id} visuals={visuals} visualUrls={visualUrls} editable={editable} aiConfigured={aiConfigured} />
                 <div className="flex flex-wrap justify-end gap-2">
                   {item.status !== "approved" ? (
                     <Button variant="outline" disabled={pending || !editable}
@@ -351,12 +364,16 @@ export function StudioClient({
   items,
   variants,
   pillars,
+  visuals,
+  visualUrls,
   aiConfigured,
   editable,
 }: {
   items: Item[];
   variants: Variant[];
   pillars: Pillar[];
+  visuals: Visual[];
+  visualUrls: Record<string, string | null>;
   aiConfigured: boolean;
   editable: boolean;
 }) {
@@ -396,11 +413,84 @@ export function StudioClient({
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {items.map((item) => (
-            <ItemCard key={item.id} item={item} variants={byItem.get(item.id) ?? []} editable={editable} />
+            <ItemCard
+              key={item.id}
+              item={item}
+              variants={byItem.get(item.id) ?? []}
+              visuals={visuals.filter((v) => v.contentItemId === item.id)}
+              visualUrls={visualUrls}
+              editable={editable}
+              aiConfigured={aiConfigured}
+            />
           ))}
         </div>
       )}
     </div>
   );
 }
+
+function VisualSection({
+  itemId,
+  visuals,
+  visualUrls,
+  editable,
+  aiConfigured,
+}: {
+  itemId: string;
+  visuals: Visual[];
+  visualUrls: Record<string, string | null>;
+  editable: boolean;
+  aiConfigured: boolean;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+
+  function generate(mode: "template" | "ai") {
+    start(async () => {
+      const r = await generateVisualAction(itemId, mode);
+      if (r.ok) {
+        toast.success(r.model && r.model !== "satori-template" ? `AI visual created (${r.model})` : "Template visual created");
+        router.refresh();
+      } else toast.error(r.error);
+    });
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Visual</span>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" disabled={pending || !editable}
+            onClick={() => generate("template")}>
+            {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />}
+            Template
+          </Button>
+          <Button size="sm" variant="ghost" disabled={pending || !editable || !aiConfigured}
+            onClick={() => generate("ai")}>
+            AI photo
+          </Button>
+        </div>
+      </div>
+      {visuals.length > 0 ? (
+        <div className="flex flex-wrap gap-3">
+          {visuals.map((v) => {
+            const url = visualUrls[v.storagePath];
+            return url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img key={v.id} src={url} alt={v.kind} className="max-h-64 rounded-lg border object-contain" />
+            ) : (
+              <div key={v.id} className="h-32 w-32 rounded-lg border bg-muted" />
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          No visual yet. Template = free, brand-safe graphic with your logo. AI photo = photographic image
+          with your avatar/style references (requires paid AI billing).
+        </p>
+      )}
+    </div>
+  );
+}
+
 

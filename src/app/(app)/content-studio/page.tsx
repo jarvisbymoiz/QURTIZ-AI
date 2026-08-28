@@ -1,6 +1,7 @@
 ﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contentItems, contentPillars, contentVariants } from "@/db/schema";
+import { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
+import { listAssetSignedUrls } from "@/server/actions/visuals";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
@@ -33,6 +34,15 @@ export default async function ContentStudioPage() {
     .from(contentPillars)
     .where(eq(contentPillars.workspaceId, ctx.workspace.id));
 
+  const visuals = itemIds.length
+    ? await db
+        .select()
+        .from(visualAssets)
+        .where(inArray(visualAssets.contentItemId, itemIds))
+    : [];
+  const visualUrls = visuals.length
+    ? await listAssetSignedUrls(visuals.map((v) => v.storagePath))
+    : {};
   return (
     <div className="space-y-6">
       <PageHeader
@@ -43,6 +53,8 @@ export default async function ContentStudioPage() {
         items={items}
         variants={variants}
         pillars={pillars}
+        visuals={visuals}
+        visualUrls={visualUrls}
         aiConfigured={isAiConfigured()}
         editable={can(ctx.role, "brand:write")}
       />

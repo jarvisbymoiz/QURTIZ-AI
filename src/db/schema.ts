@@ -365,3 +365,51 @@ export const contentVariants = pgTable(
   },
   (t) => [index("content_variants_item_idx").on(t.contentItemId, t.platform)],
 );
+
+/* ── Brand assets & visuals (M2c) ──────────────────────────────────── */
+
+export const brandAssetKindEnum = pgEnum("brand_asset_kind", [
+  "logo",
+  "avatar",
+  "reference",
+]);
+
+export const brandAssets = pgTable(
+  "brand_assets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    kind: brandAssetKindEnum("kind").notNull(),
+    label: text("label"),
+    storagePath: text("storage_path").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("brand_assets_ws_idx").on(t.workspaceId, t.kind)],
+);
+
+export const visualAssets = pgTable(
+  "visual_assets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    contentItemId: uuid("content_item_id")
+      .notNull()
+      .references(() => contentItems.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull().default("template"),
+    storagePath: text("storage_path").notNull(),
+    mimeType: text("mime_type").notNull().default("image/png"),
+    width: integer("width"),
+    height: integer("height"),
+    meta: jsonb("meta").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("visual_assets_item_idx").on(t.contentItemId, t.createdAt)],
+);

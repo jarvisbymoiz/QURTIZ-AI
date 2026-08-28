@@ -1,6 +1,7 @@
-﻿import { desc, eq } from "drizzle-orm";
+﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { brandMemory, brands } from "@/db/schema";
+import { brandAssets, brandMemory, brands } from "@/db/schema";
+import { listAssetSignedUrls } from "@/server/actions/visuals";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -21,6 +22,14 @@ export default async function BrandBrainPage() {
     .where(eq(brandMemory.workspaceId, ctx.workspace.id))
     .orderBy(desc(brandMemory.createdAt));
 
+  const assets = await db
+    .select()
+    .from(brandAssets)
+    .where(eq(brandAssets.workspaceId, ctx.workspace.id))
+    .orderBy(desc(brandAssets.createdAt));
+  const signedUrls = assets.length
+    ? await listAssetSignedUrls(assets.map((a) => a.storagePath))
+    : {};
   const editable = can(ctx.role, "brand:write");
 
   return (
@@ -39,7 +48,8 @@ export default async function BrandBrainPage() {
           </AlertDescription>
         </Alert>
       ) : null}
-      <BrandBrainTabs brand={brand ?? null} memories={memories} editable={editable} />
+      <BrandBrainTabs brand={brand ?? null} memories={memories} assets={assets} assetUrls={signedUrls} editable={editable} />
     </div>
   );
 }
+
