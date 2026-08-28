@@ -1,6 +1,6 @@
-﻿import { desc, eq } from "drizzle-orm";
+﻿import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { researchItems } from "@/db/schema";
+import { aiInsights, researchItems } from "@/db/schema";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
@@ -20,6 +20,13 @@ export default async function ResearchLabPage() {
     .orderBy(desc(researchItems.createdAt))
     .limit(60);
 
+  const [growthPlan] = await db
+    .select()
+    .from(aiInsights)
+    .where(and(eq(aiInsights.workspaceId, ctx.workspace.id), eq(aiInsights.kind, "growth_plan")))
+    .orderBy(desc(aiInsights.createdAt))
+    .limit(1);
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -30,6 +37,7 @@ export default async function ResearchLabPage() {
         items={items}
         aiConfigured={isAiConfigured()}
         editable={can(ctx.role, "brand:write")}
+        growthPlan={growthPlan?.content ?? null}
       />
     </div>
   );

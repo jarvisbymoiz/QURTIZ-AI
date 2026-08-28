@@ -4,18 +4,23 @@ import { and, desc, eq, lte } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   agentRuns,
+  settings,
   contentItems,
   contentVariants,
+  workspaces,
   jobs,
   notifications,
   platformConnections,
   publishingJobs,
   visualAssets,
+  researchItems,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
 import { decryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
+import { researchTopics } from "@/lib/ai/research";
+import { defaultSlotFor } from "@/lib/scheduling/time";
 import { campaigns, campaignItems } from "@/db/schema";
 import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
@@ -295,6 +300,87 @@ async function generateCampaign(campaignId: string): Promise<void> {
   });
 }
 
+/**
+ * Daily autonomous loop for workspaces with autopilot enabled.
+ * Guardrails: max posts per run (1-3), approval default on, one slot per day.
+ */
+async function autopilotLoop(): Promise<void> {
+  const db = getDb();
+  const rows = await db
+    .select({ workspaceId: settings.workspaceId, value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, "autopilot"));
+  for (const row of rows) {
+    const cfg = (row.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: number };
+    if (!cfg.enabled) continue;
+    try {
+      const [ws] = await db.select({ createdBy: workspaces.createdBy, timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, row.workspaceId));
+      if (!ws) continue;
+
+      const research = await researchTopics({
+        workspaceId: row.workspaceId,
+        userId: ws.createdBy,
+        niche: cfg.nicheFocus || "the brand's niche",
+        notes: "Autopilot daily loop",
+      });
+      if (!research.ok) continue;
+
+      const items = await db
+      .select()
+      .from(researchItems)
+      .where(and(eq(researchItems.workspaceId, row.workspaceId), eq(researchItems.status, "new")));
+      const top = items
+        .map((i) => ({ item: i, score: ((i.scores ?? {}) as Record<string, number>).overall ?? 0 }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, cfg.maxPostsPerRun ?? 1);
+
+      for (const t of top) {
+        const { itemId } = await generateAndPersistContent({
+          workspaceId: row.workspaceId,
+          userId: ws.createdBy,
+          input: { topic: t.item.topic, objective: "Autopilot daily plan", platforms: ["facebook", "instagram"], preferredFormat: null },
+        });
+        await db.update(researchItems).set({ status: "converted", updatedAt: new Date() }).where(eq(researchItems.id, t.item.id));
+
+        if (cfg.requireApproval === false) {
+          await db.update(contentItems).set({ status: "approved", updatedAt: new Date() }).where(eq(contentItems.id, itemId));
+          await db.update(contentVariants).set({ status: "approved", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, itemId));
+          const slot = defaultSlotFor(new Date(Date.now() + 86400000).toISOString().slice(0, 10), ws.timezone);
+          const variants = await db.select({ id: contentVariants.id, platform: contentVariants.platform }).from(contentVariants).where(eq(contentVariants.contentItemId, itemId));
+          for (const v of variants) {
+            await db.insert(publishingJobs).values({
+              workspaceId: row.workspaceId,
+              contentItemId: itemId,
+              contentVariantId: v.id,
+              platform: v.platform,
+              scheduledAt: slot,
+            });
+          }
+          await db.update(contentItems).set({ status: "scheduled", scheduledAt: slot, updatedAt: new Date() }).where(eq(contentItems.id, itemId));
+          await db.insert(notifications).values({
+            workspaceId: row.workspaceId,
+            userId: ws.createdBy,
+            kind: "content_ready",
+            title: "Autopilot scheduled a post",
+            body: "Tomorrow at 18:30: " + t.item.topic,
+            link: "/calendar",
+          });
+        } else {
+          await db.insert(notifications).values({
+            workspaceId: row.workspaceId,
+            userId: ws.createdBy,
+            kind: "content_ready",
+            title: "Autopilot created content for review",
+            body: t.item.topic,
+            link: "/content-studio",
+          });
+        }
+      }
+    } catch (e) {
+      console.error("[autopilot]", e instanceof Error ? e.message : e);
+    }
+  }
+}
 /** Register all workers. Called once at server start. */
 export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.publishScan, async () => {
@@ -326,6 +412,9 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
         console.error("[sync-insights]", e instanceof Error ? e.message : e);
       }
     }
+  });
+  await boss.work(Q.autopilotLoop, async () => {
+    await autopilotLoop();
   });
   console.log("[qurtiz] workers registered");
 }

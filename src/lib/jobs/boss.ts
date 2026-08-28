@@ -29,5 +29,6 @@ export const QUEUES = {
   bulkGenerate: "bulk-generate",
   campaignGenerate: "campaign-generate",
   syncInsights: "sync-insights",
+  autopilotLoop: "autopilot-loop",
 } as const;
 

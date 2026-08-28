@@ -1,6 +1,9 @@
 ﻿import { can } from "@/lib/permissions";
 import { isAiConfigured, getModelId } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
+import { and, eq } from "drizzle-orm";
+import { getDb } from "@/db";
+import { settings } from "@/db/schema";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
 import { Badge } from "@/components/ui/badge";
@@ -8,8 +11,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 export const metadata = { title: "Settings" };
 
+import { AutopilotCard } from "@/components/settings/autopilot-card";
+
 export default async function SettingsPage() {
   const ctx = await requireWorkspace();
+  const db = getDb();
+  const [autopilotRow] = await db
+    .select()
+    .from(settings)
+    .where(and(eq(settings.workspaceId, ctx.workspace.id), eq(settings.key, "autopilot")));
+  const autopilot = (autopilotRow?.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: number };
 
   return (
     <div className="space-y-6">
@@ -19,6 +30,10 @@ export default async function SettingsPage() {
         initialName={ctx.workspace.name}
         initialTimezone={ctx.workspace.timezone}
         editable={can(ctx.role, "workspace:manage")}
+      />
+
+      <AutopilotCard
+        initial={{ enabled: autopilot.enabled ?? false, requireApproval: autopilot.requireApproval ?? true, nicheFocus: autopilot.nicheFocus ?? "", maxPostsPerRun: autopilot.maxPostsPerRun ?? 1 }}
       />
 
       <Card>

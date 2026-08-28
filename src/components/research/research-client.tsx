@@ -3,17 +3,18 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Loader2, PenSquare, Search, Sparkles, X } from "lucide-react";
+import { ExternalLink, Loader2, PenSquare, Search, Sparkles, TrendingUp, X } from "lucide-react";
 import type { researchItems } from "@/db/schema";
 import {
   createContentFromResearchAction,
   runResearchAction,
   setResearchStatusAction,
 } from "@/server/actions/research";
+import { runGrowthSynthesisAction } from "@/server/actions/intelligence";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -138,10 +139,12 @@ export function ResearchClient({
   items,
   aiConfigured,
   editable,
+  growthPlan,
 }: {
   items: Item[];
   aiConfigured: boolean;
   editable: boolean;
+  growthPlan: string | null;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -185,6 +188,44 @@ export function ResearchClient({
           <AlertDescription>{banner}</AlertDescription>
         </Alert>
       ) : null}
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <TrendingUp className="size-4 text-primary" aria-hidden /> Growth plan
+              </CardTitle>
+              <CardDescription>
+                Synthesizes your research + competitor analyses + measured patterns into prioritized actions (AI-generated).
+              </CardDescription>
+            </div>
+            {editable && aiConfigured ? (
+              <Button size="sm" variant="outline" disabled={pending} onClick={() => {
+                start(async () => {
+                  const r = await runGrowthSynthesisAction();
+                  if (r.ok) { toast.success("Growth plan updated"); setBanner(null); router.refresh(); }
+                  else toast.error(r.error);
+                });
+              }}>
+                {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+                Synthesize
+              </Button>
+            ) : null}
+          </div>
+        </CardHeader>
+        {growthPlan ? (
+          <CardContent>
+            <div className="whitespace-pre-wrap text-sm leading-relaxed">{growthPlan}</div>
+          </CardContent>
+        ) : (
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Run research and add competitors first — then synthesize a prioritized growth plan here.
+            </p>
+          </CardContent>
+        )}
+      </Card>
 
       <Card>
         <CardContent className="p-4">

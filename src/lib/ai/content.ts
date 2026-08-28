@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
+import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
 import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
@@ -76,6 +76,18 @@ export async function generateAndPersistContent(ctx: {
     .orderBy(desc(contentItems.createdAt))
     .limit(50);
   const existingCaptions = existing.map((e) => e.caption ?? "").filter((c) => c.length > 0);
+
+
+  // Adaptive learning: inject the latest measured strategy memory.
+  const [strategyRow] = await db
+    .select({ content: aiInsights.content })
+    .from(aiInsights)
+    .where(and(eq(aiInsights.workspaceId, ctx.workspaceId), eq(aiInsights.kind, "strategy")))
+    .orderBy(desc(aiInsights.createdAt))
+    .limit(1);
+  const strategyLine = strategyRow
+    ? "\n## Measured strategy insights (from this brand\u2019s own performance data)\n" + strategyRow.content
+    : "";
 
   const [run] = await db
     .insert(agentRuns)

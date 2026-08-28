@@ -593,3 +593,43 @@ export const aiInsights = pgTable(
   },
   (t) => [index("ai_insights_ws_idx").on(t.workspaceId, t.createdAt)],
 );
+
+/* ── Competitors (M6) ──────────────────────────────────────────────── */
+
+export const competitors = pgTable(
+  "competitors",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    platform: platformEnum("platform").notNull().default("instagram"),
+    handle: text("handle").notNull(), // IG username (business discovery)
+    notes: text("notes"),
+    lastAnalyzedAt: timestamp("last_analyzed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("competitors_ws_handle_uq").on(t.workspaceId, t.platform, t.handle)],
+);
+
+export const competitorSnapshots = pgTable(
+  "competitor_snapshots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    competitorId: uuid("competitor_id")
+      .notNull()
+      .references(() => competitors.id, { onDelete: "cascade" }),
+    followers: integer("followers"),
+    postsCount: integer("posts_count"),
+    recentPosts: jsonb("recent_posts").notNull().default([]),
+    avgEngagement: real("avg_engagement"),
+    analysis: text("analysis"),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("competitor_snapshots_comp_idx").on(t.competitorId, t.capturedAt)],
+);
