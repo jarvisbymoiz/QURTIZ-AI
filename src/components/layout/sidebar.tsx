@@ -55,13 +55,6 @@ export type SidebarWorkspace = {
   name: string;
 };
 
-export type SidebarNotification = {
-  id: string;
-  title: string;
-  body: string | null;
-  kind: string;
-  read: boolean;
-};
 
 export function Sidebar({
   workspaces,
@@ -69,7 +62,6 @@ export function Sidebar({
   activeWorkspaceName,
   userEmail,
   role,
-  notifications,
   unreadCount,
 }: {
   workspaces: SidebarWorkspace[];
@@ -77,7 +69,6 @@ export function Sidebar({
   activeWorkspaceName: string;
   userEmail: string;
   role: string;
-  notifications: SidebarNotification[];
   unreadCount: number;
 }) {
   const pathname = usePathname();
