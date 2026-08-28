@@ -1,0 +1,220 @@
+﻿"use server";
+
+import { cookies } from "next/headers";
+import { revalidatePath } from "next/cache";
+import { and, eq } from "drizzle-orm";
+import { z } from "zod";
+import { getDb } from "@/db";
+import { contentItems, contentVariants, jobs, publishingJobs, workspaces } from "@/db/schema";
+import { can, type Capability } from "@/lib/permissions";
+import { defaultSlotFor } from "@/lib/scheduling/time";
+import { planContentDays } from "@/lib/scheduling/time";
+import { ensureDefaultPillars } from "@/lib/content/pillars";
+import { getSessionUser, getMembership } from "@/lib/workspace";
+
+export type ActionResult = { ok: true } | { ok: false; error: string };
+
+type Ctx = { error: string } | { userId: string; workspaceId: string; timezone: string };
+
+async function activeContext(capability: Capability): Promise<Ctx> {
+  const user = await getSessionUser();
+  if (!user) return { error: "You must be signed in." };
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  if (!workspaceId) return { error: "No active workspace." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership) return { error: "You are not a member of this workspace." };
+  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
+  const db = getDb();
+  const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, workspaceId));
+  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
+}
+
+/**
+ * Schedule an approved (or ready) content item: creates one publishing job
+ * per variant at the requested slot and flips statuses to scheduled.
+ * Approval gate: the item must be ready_for_review or approved — it cannot
+ * jump from draft to scheduled (Manual mode safety).
+ */
+export async function scheduleContentAction(input: { itemId: string; dateIso: string; timeStr?: string }): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(input.dateIso);
+  const timeStr = input.timeStr && /^\d{2}:\d{2}$/.test(input.timeStr) ? input.timeStr : "18:30";
+  if (!dateOk) return { ok: false, error: "Invalid date." };
+
+  const db = getDb();
+  const [item] = await db
+    .select()
+    .from(contentItems)
+    .where(and(eq(contentItems.id, input.itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (!item) return { ok: false, error: "Content item not found." };
+  if (!["ready_for_review", "approved", "scheduled"].includes(item.status)) {
+    return { ok: false, error: "Only content in review or approved can be scheduled. Review it first." };
+  }
+
+  const scheduledAt = input.timeStr
+    ? (() => { const [h, m] = timeStr.split(":").map(Number); const [y, mo, d] = input.dateIso.split("-").map(Number); return import("@/lib/scheduling/time").then((t) => t.zonedToUtc(y, mo, d, h, m, ctx.timezone)); })()
+    : defaultSlotFor(input.dateIso, ctx.timezone);
+
+  const variants = await db
+    .select({ id: contentVariants.id, platform: contentVariants.platform })
+    .from(contentVariants)
+    .where(and(eq(contentVariants.contentItemId, item.id), eq(contentVariants.workspaceId, ctx.workspaceId)));
+  if (variants.length === 0) return { ok: false, error: "This item has no platform variants to schedule." };
+
+  for (const v of variants) {
+    // Replace any pending jobs for this variant (reschedule semantics).
+    await db
+      .delete(publishingJobs)
+      .where(and(eq(publishingJobs.contentVariantId, v.id), eq(publishingJobs.status, "pending")));
+    await db.insert(publishingJobs).values({
+      workspaceId: ctx.workspaceId,
+      contentItemId: item.id,
+      contentVariantId: v.id,
+      platform: v.platform,
+      scheduledAt: await scheduledAt,
+      status: "pending",
+    });
+  }
+
+  await db
+    .update(contentItems)
+    .set({ status: "scheduled", scheduledAt: await scheduledAt, updatedAt: new Date() })
+    .where(eq(contentItems.id, item.id));
+  await db
+    .update(contentVariants)
+    .set({ status: "scheduled", updatedAt: new Date() })
+    .where(eq(contentVariants.contentItemId, item.id));
+
+  revalidatePath("/calendar");
+  revalidatePath("/content-studio");
+  revalidatePath("/");
+  return { ok: true };
+}
+
+export async function unscheduleContentAction(itemId: string): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const db = getDb();
+  await db
+    .delete(publishingJobs)
+    .where(and(eq(publishingJobs.contentItemId, itemId), eq(publishingJobs.workspaceId, ctx.workspaceId), eq(publishingJobs.status, "pending")));
+
+  const [item] = await db
+    .select({ status: contentItems.status })
+    .from(contentItems)
+    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (item?.status === "scheduled") {
+    await db
+      .update(contentItems)
+      .set({ status: "approved", scheduledAt: null, updatedAt: new Date() })
+      .where(eq(contentItems.id, itemId));
+    await db
+      .update(contentVariants)
+      .set({ status: "approved", updatedAt: new Date() })
+      .where(eq(contentVariants.contentItemId, itemId));
+  }
+
+  revalidatePath("/calendar");
+  revalidatePath("/content-studio");
+  return { ok: true };
+}
+
+/** Bulk approve everything currently Ready for Review. */
+export async function bulkApproveReadyAction(): Promise<ActionResult & { count?: number }> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const db = getDb();
+  const ready = await db
+    .select({ id: contentItems.id })
+    .from(contentItems)
+    .where(and(eq(contentItems.workspaceId, ctx.workspaceId), eq(contentItems.status, "ready_for_review")));
+
+  for (const item of ready) {
+    await db
+      .update(contentItems)
+      .set({ status: "approved", updatedAt: new Date() })
+      .where(eq(contentItems.id, item.id));
+    await db
+      .update(contentVariants)
+      .set({ status: "approved", updatedAt: new Date() })
+      .where(eq(contentVariants.contentItemId, item.id));
+  }
+
+  revalidatePath("/content-studio");
+  revalidatePath("/calendar");
+  revalidatePath("/");
+  return { ok: true, count: ready.length };
+}
+
+const bulkPlanSchema = z.object({
+  count: z.number().int().min(4).max(30).default(12),
+  niche: z.string().trim().max(300).optional().or(z.literal("")),
+});
+
+/**
+ * Bulk content plan: enqueue a background job that generates posts spread
+ * over upcoming weekdays and returns immediately. Progress is polled via
+ * getJobStatusAction.
+ */
+export async function startBulkPlanAction(input: { count?: number; niche?: string }): Promise<ActionResult & { jobId?: string }> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const parsed = bulkPlanSchema.safeParse({ count: input.count ?? 12, niche: input.niche ?? "" });
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+
+  await ensureDefaultPillars(ctx.workspaceId);
+
+  const db = getDb();
+  const days = planContentDays(new Date(), parsed.data.count);
+  const [job] = await db
+    .insert(jobs)
+    .values({
+      workspaceId: ctx.workspaceId,
+      userId: ctx.userId,
+      type: "bulk_plan",
+      status: "queued",
+      total: parsed.data.count,
+      input: { count: parsed.data.count, days, niche: parsed.data.niche || undefined },
+    })
+    .returning();
+
+  const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+  const boss = await getBoss();
+  await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
+
+  revalidatePath("/calendar");
+  revalidatePath("/");
+  return { ok: true, jobId: job.id };
+}
+
+export async function getJobStatusAction(jobId: string): Promise<{
+  ok: boolean;
+  status?: "queued" | "running" | "completed" | "failed" | "cancelled";
+  progress?: number;
+  total?: number;
+  error?: string;
+}> {
+  const user = await getSessionUser();
+  if (!user) return { ok: false };
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  if (!workspaceId) return { ok: false };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership) return { ok: false };
+
+  const db = getDb();
+  const [job] = await db
+    .select({ status: jobs.status, progress: jobs.progress, total: jobs.total, error: jobs.error })
+    .from(jobs)
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, workspaceId)));
+  if (!job) return { ok: false };
+  return { ok: true, status: job.status, progress: job.progress, total: job.total, error: job.error ?? undefined };
+}
+
+

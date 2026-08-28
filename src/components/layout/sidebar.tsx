@@ -5,21 +5,23 @@ import { usePathname, useRouter } from "next/navigation";
 import { useTransition } from "react";
 import {
   BarChart3,
+  Bell,
   Brain,
   CalendarDays,
   ChevronDown,
   FlaskConical,
   LayoutDashboard,
+  LogOut,
   Megaphone,
   MessageSquare,
   PenSquare,
   Plug,
+  Plus,
   Settings,
   Target,
-  LogOut,
-  Plus,
 } from "lucide-react";
 import { switchWorkspaceAction } from "@/server/actions/workspace";
+import { markAllNotificationsReadAction } from "@/server/actions/notifications";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -54,18 +56,30 @@ export type SidebarWorkspace = {
   name: string;
 };
 
+export type SidebarNotification = {
+  id: string;
+  title: string;
+  body: string | null;
+  kind: string;
+  read: boolean;
+};
+
 export function Sidebar({
   workspaces,
   activeWorkspaceId,
   activeWorkspaceName,
   userEmail,
   role,
+  notifications,
+  unreadCount,
 }: {
   workspaces: SidebarWorkspace[];
   activeWorkspaceId: string;
   activeWorkspaceName: string;
   userEmail: string;
   role: string;
+  notifications: SidebarNotification[];
+  unreadCount: number;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -210,3 +224,5 @@ export function Sidebar({
     </aside>
   );
 }
+
+

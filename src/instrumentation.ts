@@ -1,0 +1,19 @@
+﻿/**
+ * Runs once when the Next.js server process starts.
+ * Boots the pg-boss queue and registers background workers.
+ */
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  try {
+    const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+    const { registerWorkers } = await import("@/lib/jobs/workflows");
+    const boss = await getBoss();
+    await registerWorkers(boss);
+    // Scan for due publishing jobs every minute.
+    await boss.schedule(QUEUES.publishScan, "* * * * *");
+    console.log("[qurtiz] background scheduler started");
+  } catch (e) {
+    // Do not crash the server if the queue is unavailable (e.g. no DATABASE_URL yet).
+    console.error("[qurtiz] scheduler init skipped:", e instanceof Error ? e.message : e);
+  }
+}

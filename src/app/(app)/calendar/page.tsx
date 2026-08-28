@@ -1,13 +1,60 @@
-﻿import { ComingSoon } from "@/components/layout/coming-soon";
+﻿import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { getDb } from "@/db";
+import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
+import { requireWorkspace } from "@/lib/workspace";
+import { can } from "@/lib/permissions";
+import { PageHeader } from "@/components/layout/page-header";
+import { CalendarClient } from "@/components/calendar/calendar-client";
 
-export const metadata = { title: "calendar" };
+export const metadata = { title: "Content Calendar" };
 
-export default function Page() {
+export default async function CalendarPage() {
+  const ctx = await requireWorkspace();
+  const db = getDb();
+
+  const items = await db
+    .select()
+    .from(contentItems)
+    .where(and(eq(contentItems.workspaceId, ctx.workspace.id)))
+    .orderBy(desc(contentItems.createdAt))
+    .limit(120);
+
+  const itemIds = items.map((i) => i.id);
+  const variants = itemIds.length
+    ? await db.select().from(contentVariants).where(inArray(contentVariants.contentItemId, itemIds))
+    : [];
+
+  // Publishing jobs in a window around today for failure visibility
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 31);
+  const windowEnd = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 62);
+  const pJobs = itemIds.length
+    ? await db
+        .select()
+        .from(publishingJobs)
+        .where(
+          and(
+            eq(publishingJobs.workspaceId, ctx.workspace.id),
+            inArray(publishingJobs.contentItemId, itemIds),
+            gte(publishingJobs.scheduledAt, windowStart),
+            lte(publishingJobs.scheduledAt, windowEnd),
+          ),
+        )
+    : [];
+
   return (
-    <ComingSoon
-      section="calendar"
-      milestone="M3"
-      description="Month/week/day calendar with drag-and-drop rescheduling, bulk generation, and the approval center."
-    />
+    <div className="space-y-6">
+      <PageHeader
+        title="Content Calendar"
+        description="Drag content onto a day to schedule it (default slot 18:30 in your workspace timezone). Publishing runs through official integrations from M4 — failed publishes show honestly."
+      />
+      <CalendarClient
+        items={items}
+        variants={variants}
+        pJobs={pJobs}
+        timezone={ctx.workspace.timezone}
+        editable={can(ctx.role, "brand:write")}
+      />
+    </div>
   );
 }

@@ -413,3 +413,95 @@ export const visualAssets = pgTable(
   },
   (t) => [index("visual_assets_item_idx").on(t.contentItemId, t.createdAt)],
 );
+
+/* ── Jobs, publishing & notifications (M3) ─────────────────────────── */
+
+export const jobStatusEnum = pgEnum("job_status", [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    type: text("type").notNull(),
+    status: jobStatusEnum("status").notNull().default("queued"),
+    progress: integer("progress").notNull().default(0),
+    total: integer("total").notNull().default(0),
+    input: jsonb("input").notNull().default({}),
+    result: jsonb("result").notNull().default({}),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("jobs_ws_idx").on(t.workspaceId, t.createdAt)],
+);
+
+export const publishingJobStatusEnum = pgEnum("publishing_job_status", [
+  "pending",
+  "processing",
+  "published",
+  "failed",
+  "cancelled",
+]);
+
+export const publishingJobs = pgTable(
+  "publishing_jobs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    contentItemId: uuid("content_item_id")
+      .notNull()
+      .references(() => contentItems.id, { onDelete: "cascade" }),
+    contentVariantId: uuid("content_variant_id")
+      .notNull()
+      .references(() => contentVariants.id, { onDelete: "cascade" }),
+    platform: platformEnum("platform").notNull(),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
+    status: publishingJobStatusEnum("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    result: jsonb("result").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("publishing_jobs_due_idx").on(t.status, t.scheduledAt)],
+);
+
+export const notificationKindEnum = pgEnum("notification_kind", [
+  "content_ready",
+  "generation_completed",
+  "publishing_completed",
+  "publishing_failed",
+  "auth_expired",
+  "job_completed",
+  "system",
+]);
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    kind: notificationKindEnum("kind").notNull().default("system"),
+    title: text("title").notNull(),
+    body: text("body"),
+    link: text("link"),
+    read: boolean("read").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("notifications_ws_idx").on(t.workspaceId, t.createdAt)],
+);

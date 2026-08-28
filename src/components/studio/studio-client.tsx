@@ -12,6 +12,7 @@ import {
   setContentStatusAction,
   updateVariantCaptionAction,
 } from "@/server/actions/content";
+import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -377,6 +378,13 @@ export function StudioClient({
   aiConfigured: boolean;
   editable: boolean;
 }) {
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const filtered = useMemo(
+    () => (statusFilter === "all" ? items : items.filter((i) => i.status === statusFilter)),
+    [items, statusFilter],
+  );
+  const readyCount = items.filter((i) => i.status === "ready_for_review").length;
+
   const byItem = useMemo(() => {
     const map = new Map<string, Variant[]>();
     for (const v of variants) {
@@ -399,8 +407,31 @@ export function StudioClient({
           </AlertDescription>
         </Alert>
       ) : null}
-      <div className="flex justify-end">
-        <NewPostDialog pillars={pillars} editable={editable && aiConfigured} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-1.5">
+          {["all", "ready_for_review", "approved", "scheduled", "published", "draft"].map((s) => (
+            <button
+              key={s}
+              type="button"
+              aria-pressed={statusFilter === s}
+              onClick={() => setStatusFilter(s)}
+              className={cn(
+                "rounded-full border px-3 py-1 text-xs transition-colors",
+                statusFilter === s
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {s === "ready_for_review" ? `Ready for review (${readyCount})` : s.replaceAll("_", " ")}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          {readyCount > 0 && editable ? (
+            <BulkApproveButton />
+          ) : null}
+          <NewPostDialog pillars={pillars} editable={editable && aiConfigured} />
+        </div>
       </div>
       {items.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-10 text-center">
@@ -412,7 +443,7 @@ export function StudioClient({
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {items.map((item) => (
+          {filtered.map((item) => (
             <ItemCard
               key={item.id}
               item={item}
@@ -493,4 +524,27 @@ function VisualSection({
   );
 }
 
+function BulkApproveButton() {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={pending}
+      onClick={() =>
+        start(async () => {
+          const r = await bulkApproveReadyAction();
+          if (r.ok) {
+            toast.success(`Approved ${r.count ?? 0} posts`);
+            router.refresh();
+          } else toast.error(r.error);
+        })
+      }
+    >
+      {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+      Approve all ready
+    </Button>
+  );
+}
 
