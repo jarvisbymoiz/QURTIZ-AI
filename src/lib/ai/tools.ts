@@ -4,6 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { researchTopics } from "@/lib/ai/research";
 
 export type BrandBrainRow = typeof brands.$inferSelect;
 
@@ -161,12 +162,39 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
+  const researchNiche = tool({
+    description:
+      "Research content opportunities for a niche or topic: finds topics, scores opportunities (AI-estimated), and saves them to the Research Lab. Use when the user asks what to post about, trends in their niche, or content ideas.",
+    inputSchema: z.object({
+      niche: z.string().min(4).max(300).describe("The niche, topic, or business area to research"),
+      notes: z.string().max(1000).optional().describe("Optional focus from the user"),
+    }),
+    execute: async (input) => {
+      const result = await researchTopics({
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        niche: input.niche,
+        notes: input.notes ?? null,
+      });
+      await logStep("research_niche", input, { ok: result.ok, count: result.ok ? result.count : undefined });
+      if (!result.ok) return { found: false, message: result.message };
+      return {
+        found: true,
+        count: result.count,
+        sourced: result.sourced,
+        message: `${result.count} opportunities saved to the Research Lab${result.sourced ? " with live web sources" : " (AI estimates — no live sources on current plan)"}.`,
+      };
+    },
+  });
+
   return {
     get_brand_brain: getBrandBrain,
+    research_niche: researchNiche,
     create_content: createContent,
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };
 }
+
 
 

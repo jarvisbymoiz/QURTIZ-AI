@@ -37,7 +37,13 @@ function MessageParts({ message }: { message: UIMessage }) {
             </p>
           );
         }
-        if (part.type === "tool-list_workspace_facts") {
+        if (part.type === "tool-research_niche") {
+          return (
+            <p key={i} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Brain className="size-3.5" aria-hidden /> Researched niche — results in Research Lab
+            </p>
+          );
+        }        if (part.type === "tool-list_workspace_facts") {
           return (
             <p key={i} className="flex items-center gap-2 text-xs text-muted-foreground">
               <Brain className="size-3.5" aria-hidden /> Listed brand memory
@@ -227,4 +233,6 @@ export function ChatPanel({
     </div>
   );
 }
+
+
 
