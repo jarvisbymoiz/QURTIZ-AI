@@ -7,7 +7,7 @@ import { z } from "zod";
 import { generateText } from "ai";
 import { getDb } from "@/db";
 import { campaigns, campaignItems, jobs } from "@/db/schema";
-import { getModel, getModelId } from "@/lib/ai/provider";
+import { getModel } from "@/lib/ai/provider";
 import { can, type Capability } from "@/lib/permissions";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
