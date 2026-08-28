@@ -95,7 +95,7 @@ export async function generateAndPersistContent(ctx: {
     .returning();
 
   const rules = (brand?.contentRules ?? {}) as Partial<ContentRulesInput>;
-  const memoryLines = memories.map((m) => `- [${m.type}] ${m.content}`).join("\n");
+  const memoryLines = memories.map((m) => `- [${m.type}] ${m.content}`).join("\n") + (strategyLine || "");
 
   const system = `You are the QURTIZ AI content engine for "${brand?.businessName ?? ctx.workspaceId}".
 

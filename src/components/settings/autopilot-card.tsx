@@ -10,8 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
-const initial = { ok: true } as const;
-
 export function AutopilotCard({
   initial,
   editable,
