@@ -1,4 +1,4 @@
-﻿-- RLS for M2 tables (same member-based pattern as 0001).
+-- RLS for M2 tables (same member-based pattern as 0001).
 DO $$
 DECLARE
   t text;

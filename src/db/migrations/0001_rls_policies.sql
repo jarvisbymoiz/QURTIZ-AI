@@ -1,4 +1,4 @@
-﻿-- Row-Level Security: defense-in-depth for workspace isolation.
+-- Row-Level Security: defense-in-depth for workspace isolation.
 -- The application connects as the table owner (bypasses RLS) and enforces
 -- tenancy in its data-access layer; these policies protect any direct
 -- client access path (e.g. PostgREST with a user JWT).
