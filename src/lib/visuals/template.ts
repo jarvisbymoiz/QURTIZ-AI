@@ -52,7 +52,7 @@ function txt(text: string, style: Record<string, unknown>) {
   return { type: "div", props: { style: { display: "flex", ...style }, children: [text] } };
 }
 
-function buildTree(s: TemplateStyle, w: number, h: number) {
+function buildTree(s: TemplateStyle) {
   const primary = normalizeHex(s.primaryColor, "#6366f1");
   const secondary = normalizeHex(s.secondaryColor, "#0ea5e9");
   const dark = "#0b0d12";
@@ -147,7 +147,7 @@ function buildTree(s: TemplateStyle, w: number, h: number) {
  */
 export async function renderTemplateVisual(style: TemplateStyle, size: keyof typeof TEMPLATE_SIZES = "portrait"): Promise<Buffer> {
   const { w, h } = TEMPLATE_SIZES[size];
-  const tree = buildTree(style, w, h);
+  const tree = buildTree(style);
   const svg = await satori(tree as never, {
     width: w,
     height: h,
@@ -156,4 +156,5 @@ export async function renderTemplateVisual(style: TemplateStyle, size: keyof typ
   const resvg = new Resvg(svg, { fitTo: { mode: "width", value: w } });
   return Buffer.from(resvg.render().asPng());
 }
+
 

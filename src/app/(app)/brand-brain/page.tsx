@@ -1,4 +1,4 @@
-﻿import { desc, eq, inArray } from "drizzle-orm";
+﻿import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brandMemory, brands } from "@/db/schema";
 import { listAssetSignedUrls } from "@/server/actions/visuals";
@@ -52,4 +52,5 @@ export default async function BrandBrainPage() {
     </div>
   );
 }
+
 

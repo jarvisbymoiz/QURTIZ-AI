@@ -2,7 +2,7 @@
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
@@ -130,3 +130,4 @@ export async function listAssetSignedUrls(paths: string[]): Promise<Record<strin
   for (const p of paths) out[p] = await getAssetSignedUrl(p);
   return out;
 }
+
