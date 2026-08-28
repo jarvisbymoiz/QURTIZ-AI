@@ -69,6 +69,28 @@ export async function POST(request: NextRequest) {
     workspaceName: brandRow?.businessName ?? workspaceId,
   });
 
+  // Attachment validation: images + PDF only, sane size caps.
+  const ALLOWED_MEDIA = new Set(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
+  const MAX_PART_CHARS = 12_000_000; // ~9MB binary per part when base64
+  let totalChars = 0;
+  for (const msg of body.messages) {
+    for (const part of msg.parts ?? []) {
+      if (part.type === "file") {
+        const fp = part as { mediaType?: string; url?: string };
+        if (!fp.mediaType || !ALLOWED_MEDIA.has(fp.mediaType)) {
+          return NextResponse.json({ error: "UNSUPPORTED_FILE", message: "Only PNG, JPEG, WebP images and PDF files are supported." }, { status: 400 });
+        }
+        totalChars += (fp.url ?? "").length;
+        if ((fp.url ?? "").length > MAX_PART_CHARS) {
+          return NextResponse.json({ error: "FILE_TOO_LARGE", message: "Each attachment must be under 9MB." }, { status: 400 });
+        }
+      }
+    }
+  }
+  if (totalChars > 30_000_000) {
+    return NextResponse.json({ error: "TOO_MANY_ATTACHMENTS", message: "Total attachments exceed 22MB." }, { status: 400 });
+  }
+
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);
 
   try {
@@ -78,6 +100,9 @@ export async function POST(request: NextRequest) {
       messages: convertToModelMessages(recent),
       tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
       stopWhen: stepCountIs(6),
+      providerOptions: {
+        google: { thinkingConfig: { includeThoughts: true } },
+      },
       onFinish: async ({ usage, finishReason }) => {
         try {
           const failed = finishReason === "error";

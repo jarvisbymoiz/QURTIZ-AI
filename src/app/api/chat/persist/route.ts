@@ -16,6 +16,7 @@ function textOf(message: UIMessage): string {
     .join("");
 }
 
+// body size guard: attachments inflate message payloads
 export async function POST(request: NextRequest) {
   const user = await getSessionUser();
   if (!user) {

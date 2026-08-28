@@ -4,7 +4,9 @@ import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { getModelId } from "@/lib/ai/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
+import { makeWebSearchTool } from "@/lib/ai/search-tool";
 import { workspaces } from "@/db/schema";
 import { researchTopics } from "@/lib/ai/research";
 
@@ -237,6 +239,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
+    web_search: makeWebSearchTool({ logStep, modelId: getModelId() }),
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };
