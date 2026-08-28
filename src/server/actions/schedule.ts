@@ -42,7 +42,6 @@ export async function scheduleContentAction(input: { itemId: string; dateIso: st
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(input.dateIso);
-  const timeStr = input.timeStr && /^\d{2}:\d{2}$/.test(input.timeStr) ? input.timeStr : "18:30";
   if (!dateOk) return { ok: false, error: "Invalid date." };
 
   const db = getDb();

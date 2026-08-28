@@ -201,8 +201,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
       const db = getDb();
       let itemId: string | null = input.itemId ?? null;
       if (!itemId) {
-        const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
-        const latest = await db
+          const latest = await db
           .select({ id: contentItems.id, status: contentItems.status, createdAt: contentItems.createdAt })
           .from(contentItems)
           .where(and(eq(contentItems.workspaceId, ctx.workspaceId), eq(contentItems.status, "ready_for_review")))
