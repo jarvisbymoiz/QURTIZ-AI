@@ -15,7 +15,6 @@ import { QUEUES } from "./boss";
 import type { PgBoss } from "pg-boss";
 import { planContentDays } from "@/lib/scheduling/time";
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { overallOpportunity } from "@/lib/ai/scores";
 
 /**
  * Attempt to publish one due publishing job. M4 will provide the real Meta

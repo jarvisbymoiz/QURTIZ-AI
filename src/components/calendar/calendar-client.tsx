@@ -4,14 +4,13 @@ import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { AlertTriangle, ChevronLeft, ChevronRight, ListChecks, Loader2, Sparkles, Wand2 } from "lucide-react";
-import type { contentItems, contentVariants, publishingJobs } from "@/db/schema";
+import type { contentItems, publishingJobs } from "@/db/schema";
 import {
   getJobStatusAction,
   scheduleContentAction,
   startBulkPlanAction,
   unscheduleContentAction,
 } from "@/server/actions/schedule";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -19,7 +18,6 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
-type Variant = typeof contentVariants.$inferSelect;
 type PJob = typeof publishingJobs.$inferSelect;
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -39,13 +37,11 @@ const STATUS_DOT: Record<string, string> = {
 
 export function CalendarClient({
   items,
-  variants,
   pJobs,
   timezone,
   editable,
 }: {
   items: Item[];
-  variants: Variant[];
   pJobs: PJob[];
   timezone: string;
   editable: boolean;
@@ -56,7 +52,6 @@ export function CalendarClient({
   const [monthOffset, setMonthOffset] = useState(0);
   const [selected, setSelected] = useState<Item | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
-  const [bulkOpen, setBulkOpen] = useState(false);
 
   const view = useMemo(() => {
     const base = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);

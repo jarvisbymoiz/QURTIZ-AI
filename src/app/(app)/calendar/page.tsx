@@ -1,6 +1,6 @@
 ﻿import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
+import { contentItems, publishingJobs } from "@/db/schema";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -19,12 +19,9 @@ export default async function CalendarPage() {
     .orderBy(desc(contentItems.createdAt))
     .limit(120);
 
-  const itemIds = items.map((i) => i.id);
-  const variants = itemIds.length
-    ? await db.select().from(contentVariants).where(inArray(contentVariants.contentItemId, itemIds))
-    : [];
 
   // Publishing jobs in a window around today for failure visibility
+  const itemIds = items.map((i) => i.id);
   const now = new Date();
   const windowStart = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 31);
   const windowEnd = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 62);
@@ -50,7 +47,6 @@ export default async function CalendarPage() {
       />
       <CalendarClient
         items={items}
-        variants={variants}
         pJobs={pJobs}
         timezone={ctx.workspace.timezone}
         editable={can(ctx.role, "brand:write")}

@@ -194,7 +194,51 @@ export function Sidebar({
 
       <Separator />
 
-      {/* User */}
+
+      {/* Notifications */}
+      <div className="p-3">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button variant="ghost" className="w-full justify-start gap-2 px-2 font-normal" />}
+          >
+            <span className="relative">
+              <Bell className="size-4" aria-hidden />
+              {unreadCount > 0 ? (
+                <span className="absolute -right-1.5 -top-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-[9px] font-bold text-white">
+                  {unreadCount}
+                </span>
+              ) : null}
+            </span>
+            <span className="flex-1 text-left text-sm">Notifications</span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="right" className="w-72">
+            <DropdownMenuLabel>Notifications</DropdownMenuLabel>
+            {notifications.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-muted-foreground">Nothing yet.</div>
+            ) : (
+              notifications.map((n) => (
+                <DropdownMenuItem key={n.id} className={cn("flex-col items-start gap-0.5", !n.read && "bg-accent/40")}>
+                  <span className="text-xs font-medium">{n.title}</span>
+                  {n.body ? <span className="line-clamp-2 text-xs text-muted-foreground">{n.body}</span> : null}
+                </DropdownMenuItem>
+              ))
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() =>
+                startSwitch(async () => {
+                  await markAllNotificationsReadAction();
+                  router.refresh();
+                })
+              }
+            >
+              Mark all read
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+            {/* User */}
       <div className="p-3">
         <DropdownMenu>
           <DropdownMenuTrigger
