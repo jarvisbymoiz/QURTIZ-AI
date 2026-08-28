@@ -10,6 +10,10 @@ describe("estimateCost", () => {
     expect(estimateCost("gemini-2.5-flash", 100_000, 50_000)).toBeCloseTo(0.155, 6);
   });
 
+  it("prices gemini-3.6-flash at intro rates (0.75/3.75)", () => {
+    expect(estimateCost("gemini-3.6-flash", 1_000_000, 1_000_000)).toBeCloseTo(4.5, 6);
+  });
+
   it("prices gemini-2.5-pro correctly", () => {
     expect(estimateCost("gemini-2.5-pro", 1_000_000, 1_000_000)).toBeCloseTo(11.25, 6);
   });
@@ -25,4 +29,5 @@ describe("estimateCost", () => {
     }
   });
 });
+
 

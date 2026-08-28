@@ -31,7 +31,7 @@ From **Project Settings**:
 
 1. Open https://aistudio.google.com/apikey
 2. Create an API key (free tier includes generous daily quota).
-3. Optional: set `QURTIZ_AI_MODEL` (default `gemini-2.5-flash`).
+3. Optional: set `QURTIZ_AI_MODEL` (default `gemini-3.6-flash`).
 
 ## 3. Configure the app
 
@@ -67,3 +67,4 @@ workspace → fill the Brand Brain → chat with your agent.
 | Migrations fail with auth.uid() error | You are not on a Supabase database — RLS policies require Supabase Postgres |
 | Chat shows Configuration Required | Add `GEMINI_API_KEY` and restart the dev server |
 | `relation already exists` | Schema already applied; skip migrating again |
+

@@ -79,3 +79,4 @@ memory in the Brand Brain UI. Memory feeds the system prompt on every run.
 M1 Foundation → M2 Content engine → M3 Calendar/approval → M4 Meta
 publishing → M5 Analytics → M6 Intelligence → M7 Autopilot. See README.md
 checklist for live status.
+
