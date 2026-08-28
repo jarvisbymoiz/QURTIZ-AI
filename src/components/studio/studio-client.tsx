@@ -255,7 +255,7 @@ function ItemCard({
         <QaPanel qa={item.qa} />
         {open ? (
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent className="max-w-2xl">
+            <DialogContent className="max-h-[88dvh] w-full max-w-2xl overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>{item.topic}</DialogTitle>
                 <DialogDescription>
