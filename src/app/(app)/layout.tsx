@@ -23,13 +23,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         activeWorkspaceName={ctx.workspace.name}
         userEmail={ctx.user.email}
         role={ctx.role}
-        notifications={latestNotifications.map((n) => ({
-          id: n.id,
-          title: n.title,
-          body: n.body,
-          kind: n.kind,
-          read: n.read,
-        }))}
+        unreadCount={unreadCount}
       />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-6xl p-6 lg:p-8">{children}</div>
