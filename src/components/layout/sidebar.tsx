@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -119,6 +120,7 @@ export function Sidebar({
             <ChevronDown className="size-4 shrink-0 opacity-50" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuGroup>
             <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
             {workspaces.map((w) => (
               <DropdownMenuItem
@@ -137,6 +139,7 @@ export function Sidebar({
                 ) : null}
               </DropdownMenuItem>
             ))}
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem render={<Link href="/onboarding" />}>
               <Plus className="size-4" aria-hidden />
