@@ -201,6 +201,7 @@ async function bulkGenerate(jobId: string): Promise<void> {
       .returning();
 
     const created: string[] = [];
+    const failedItems: string[] = [];
     for (let i = 0; i < count; i++) {
       const day = days[i] ?? days[days.length - 1] ?? new Date().toISOString().slice(0, 10);
       const niche = input.niche ? `${input.niche}` : "the brand's niche";
@@ -222,7 +223,9 @@ async function bulkGenerate(jobId: string): Promise<void> {
           .set({ scheduledAt: null, updatedAt: new Date() })
           .where(eq(contentItems.id, itemId));
       } catch (e) {
-        console.error("[bulk-generate] item failed", e instanceof Error ? e.message : e);
+        const reason = e instanceof Error ? e.message : "generation failed";
+        failedItems.push(`Day ${day}: ${reason}`);
+        console.error("[bulk-generate] item failed", reason);
       }
       await db
         .update(jobs)
@@ -230,9 +233,28 @@ async function bulkGenerate(jobId: string): Promise<void> {
         .where(eq(jobs.id, jobId));
     }
 
+    if (created.length === 0) {
+      await db
+        .update(jobs)
+        .set({ status: "failed", error: failedItems.join("; ").slice(0, 500) || "No posts were generated", updatedAt: new Date() })
+        .where(eq(jobs.id, jobId));
+      await db.insert(notifications).values({
+        workspaceId: job.workspaceId,
+        userId: job.userId,
+        kind: "job_completed",
+        title: "Bulk content plan failed",
+        body: failedItems.slice(0, 3).join("; ") || "No posts were generated.",
+        link: "/calendar",
+      });
+      return;
+    }
     await db
       .update(jobs)
-      .set({ status: "completed", result: { createdCount: created.length, days: days.length }, updatedAt: new Date() })
+      .set({
+        status: "completed",
+        result: { createdCount: created.length, failures: failedItems, days: days.length },
+        updatedAt: new Date(),
+      })
       .where(eq(jobs.id, jobId));
     await db
       .update(agentRuns)

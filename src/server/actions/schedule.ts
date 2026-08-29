@@ -159,9 +159,17 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
     })
     .returning();
 
-  const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
-  const boss = await getBoss();
-  await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
+  try {
+    const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+    const boss = await getBoss();
+    await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "Queue unavailable";
+    await (await import("@/lib/jobs/boss")).getBoss;
+    const db = getDb();
+    await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, job.id));
+    return { ok: false, error: "Could not queue the bulk plan: " + msg };
+  }
 
   revalidatePath("/calendar");
   revalidatePath("/");
