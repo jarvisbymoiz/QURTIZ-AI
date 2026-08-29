@@ -203,6 +203,8 @@ export const chatThreads = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     userId: uuid("user_id").notNull(),
     title: text("title").notNull().default("New chat"),
+    pinned: boolean("pinned").notNull().default(false),
+    archived: boolean("archived").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),

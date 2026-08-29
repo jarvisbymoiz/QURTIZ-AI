@@ -2,19 +2,27 @@
 import { notFound } from "next/navigation";
 import { and, asc, desc, eq } from "drizzle-orm";
 import type { UIMessage } from "ai";
-import { MessageSquare, Plus } from "lucide-react";
+
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
+import { ThreadList } from "@/components/chat/thread-list";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 
 export const metadata = { title: "AI Chat" };
 
-export default async function ThreadPage({ params }: { params: Promise<{ threadId: string }> }) {
+export default async function ThreadPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ threadId: string }>;
+  searchParams: Promise<{ m?: string }>;
+}) {
   const { threadId } = await params;
+  const { m: targetMessageId } = await searchParams;
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -51,32 +59,15 @@ export default async function ThreadPage({ params }: { params: Promise<{ threadI
     <div className="space-y-6">
       <PageHeader title={thread.title} description="Conversation with your workspace agent." />
       <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
-        <aside className="space-y-2">
-          <Button nativeButton={false} variant="outline" className="w-full justify-start gap-2" render={<Link href="/chat" />}>
-            <Plus className="size-4" aria-hidden /> New chat
-          </Button>
-          <ul className="space-y-1">
-            {threads.map((t) => (
-              <li key={t.id}>
-                <Link
-                  href={`/chat/${t.id}`}
-                  className={
-                    "flex items-center gap-2 rounded-md border p-2 text-sm hover:bg-accent " +
-                    (t.id === threadId ? "bg-accent font-medium" : "")
-                  }
-                >
-                  <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  <span className="truncate">{t.title}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+        <aside className="hidden h-[calc(100vh-10rem)] lg:block">
+          <ThreadList activeThreadId={thread.id} />
         </aside>
         <ChatPanel
           workspaceId={ctx.workspace.id}
           workspaceName={ctx.workspace.name}
           threadId={thread.id}
           initialMessages={initialMessages}
+          targetMessageId={targetMessageId ?? null}
           aiConfigured={isAiConfigured()}
         />
       </div>

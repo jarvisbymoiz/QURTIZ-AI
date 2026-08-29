@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
@@ -9,13 +9,19 @@ import {
   AlertTriangle,
   ArrowUp,
   Brain,
+  CalendarClock,
+  CheckCheck,
+  ChevronDown,
+  Copy,
   FileText,
   Image as ImageIcon,
   Paperclip,
+  Pencil,
+  PenSquare,
   RefreshCw,
   Search,
-  CalendarClock,
-  PenSquare,
+  TrendingUp,
+  Megaphone,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -29,65 +35,126 @@ const MAX_FILE_MB = 9;
 function toolDisplayName(type: string): string {
   const name = type.replace(/^tool-/, "");
   const labels: Record<string, string> = {
-    get_brand_brain: "Read Brand Brain",
-    list_workspace_facts: "Listed brand memory",
-    update_brand_memory: "Saved a brand memory — view it in Brand Brain → Memory",
-    create_content: "Created content in Studio",
-    schedule_content: "Scheduled content on the calendar",
-    research_niche: "Researched niche — results in Research Lab",
-    web_search: "Searched the web",
+    get_brand_brain: "Reading Brand Brain",
+    list_workspace_facts: "Checking brand memory",
+    update_brand_memory: "Saving to brand memory",
+    create_content: "Creating content",
+    schedule_content: "Scheduling post",
+    research_niche: "Researching niche",
+    web_search: "Searching the web",
   };
   return labels[name] ?? name.replaceAll("_", " ");
 }
 
-function ToolPart({ type, state }: { type: string; state?: string }) {
+function ToolActivity({ type, state }: { type: string; state?: string }) {
   const name = type.replace(/^tool-/, "");
+  const done = state === "output-available";
   const icon =
-    name === "web_search" ? (
-      <Search className="size-3.5" aria-hidden />
-    ) : name === "schedule_content" ? (
-      <CalendarClock className="size-3.5 text-emerald-500" aria-hidden />
-    ) : name === "create_content" ? (
-      <PenSquare className="size-3.5 text-emerald-500" aria-hidden />
-    ) : name === "update_brand_memory" ? (
-      <Brain className="size-3.5 text-emerald-500" aria-hidden />
-    ) : (
-      <Brain className="size-3.5" aria-hidden />
-    );
-  const running = state === "input-streaming" || state === "input-available";
+    name === "web_search" ? <Search className="size-3.5" aria-hidden /> :
+    name === "schedule_content" ? <CalendarClock className="size-3.5" aria-hidden /> :
+    name === "create_content" ? <PenSquare className="size-3.5" aria-hidden /> :
+    name === "research_niche" ? <TrendingUp className="size-3.5" aria-hidden /> :
+    name === "update_brand_memory" ? <Brain className="size-3.5" aria-hidden /> :
+    <Brain className="size-3.5" aria-hidden />;
   return (
-    <p
-      className={cn(
-        "flex items-center gap-2 text-xs",
-        running ? "animate-pulse text-muted-foreground" : "text-muted-foreground",
-        name === "update_brand_memory" || name === "create_content" || name === "schedule_content" ? "text-emerald-600 dark:text-emerald-400" : "",
-      )}
-    >
-      {icon} {toolDisplayName(type)}
-    </p>
+    <div className={cn("flex items-center gap-2 text-xs", done ? "text-muted-foreground" : "animate-pulse text-primary")}>
+      {done ? <CheckCheck className="size-3.5" aria-hidden /> : icon}
+      <span>{toolDisplayName(type)}{done ? "" : "…"}</span>
+    </div>
+  );
+}
+
+function ToolActivitySummary({ types }: { types: string[] }) {
+  const [open, setOpen] = useState(false);
+  const labels = types.map((t) => toolDisplayName(t).replace(/…$/, ""));
+  return (
+    <div className="rounded-md border bg-muted/30 px-3 py-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 text-left text-xs text-muted-foreground"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <CheckCheck className="size-3.5 text-emerald-500" aria-hidden />
+        Completed {types.length} step{types.length === 1 ? "" : "s"}
+        <ChevronDown className={cn("ml-auto size-3.5 transition-transform", open && "rotate-180")} aria-hidden />
+      </button>
+      {open ? (
+        <div className="mt-2 space-y-1 border-t pt-2">
+          {types.map((t, i) => (
+            <ToolActivity key={i} type={t} state="output-available" />
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 function ReasoningBlock({ text }: { text: string }) {
   return (
     <details className="rounded-md border bg-muted/40 px-3 py-2">
-      <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
-        AI thinking
-      </summary>
+      <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">AI thinking</summary>
       <p className="mt-1.5 whitespace-pre-wrap text-xs text-muted-foreground">{text}</p>
     </details>
   );
 }
 
-function MessageParts({ message }: { message: UIMessage }) {
+function FileChip({ part }: { part: { mediaType?: string; url?: string; filename?: string } }) {
+  const isImage = part.mediaType?.startsWith("image/");
+  if (isImage && part.url) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={part.url} alt={part.filename ?? "attachment"} className="max-h-44 rounded-lg border" />;
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border p-2 text-xs text-muted-foreground">
+      <FileText className="size-4" aria-hidden />
+      <span>{part.filename ?? "attachment"} ({part.mediaType})</span>
+    </div>
+  );
+}
+
+function MessageBody({
+  message,
+  onEdit,
+}: {
+  message: UIMessage;
+  onEdit?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const toolTypes: string[] = [];
+  for (const p of message.parts ?? []) if (p.type.startsWith("tool-")) toolTypes.push(p.type);
+
+  async function copyText() {
+    const text = (message.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("\n");
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
   return (
     <div className="space-y-2">
+      {toolTypes.length > 1 ? (
+        <ToolActivitySummary types={toolTypes} />
+      ) : null}
       {(message.parts ?? []).map((part, i) => {
         if (part.type === "text") {
           return part.text.trim() ? (
-            <p key={i} className="whitespace-pre-wrap text-sm leading-relaxed">
-              {part.text}
-            </p>
+            <div key={i} className="group/msg relative">
+              <p className="whitespace-pre-wrap text-sm leading-relaxed">{part.text}</p>
+              <div className="mt-1 flex gap-1 opacity-0 transition-opacity group-hover/msg:opacity-100">
+                <Button size="icon" variant="ghost" className="size-6" aria-label="Copy message"
+                  onClick={() => { void copyText(); }}>
+                  <Copy className={cn("size-3.5", copied && "text-emerald-500")} aria-hidden />
+                </Button>
+                {message.role === "user" && onEdit ? (
+                  <Button size="icon" variant="ghost" className="size-6" aria-label="Edit and resend" onClick={onEdit}>
+                    <Pencil className="size-3.5" aria-hidden />
+                  </Button>
+                ) : null}
+              </div>
+            </div>
           ) : null;
         }
         if (part.type === "reasoning") {
@@ -96,24 +163,12 @@ function MessageParts({ message }: { message: UIMessage }) {
         }
         if (part.type === "file") {
           const fp = part as unknown as { mediaType?: string; url?: string; filename?: string };
-          const isImage = fp.mediaType?.startsWith("image/");
-          return (
-            <div key={i} className="flex items-center gap-2 rounded-md border p-2 text-xs text-muted-foreground">
-              {isImage && fp.url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={fp.url} alt={fp.filename ?? "attachment"} className="max-h-40 rounded" />
-              ) : (
-                <>
-                  <FileText className="size-4" aria-hidden />
-                  <span>{fp.filename ?? "attachment"} ({fp.mediaType})</span>
-                </>
-              )}
-            </div>
-          );
+          return <FileChip key={i} part={fp} />;
         }
         if (part.type.startsWith("tool-")) {
+          if (toolTypes.length > 1) return null; // already collapsed
           const tp = part as unknown as { state?: string };
-          return <ToolPart key={i} type={part.type} state={tp.state} />;
+          return <ToolActivity key={i} type={part.type} state={tp.state} />;
         }
         return null;
       })}
@@ -121,29 +176,41 @@ function MessageParts({ message }: { message: UIMessage }) {
   );
 }
 
+const SUGGESTIONS = [
+  { icon: TrendingUp, label: "Research trends in my niche", prompt: "Research what is trending in my niche right now" },
+  { icon: PenSquare, label: "Create content", prompt: "Create a post about my best-performing topic" },
+  { icon: Search, label: "Analyze competitors", prompt: "What content gaps do my competitors have?" },
+  { icon: Megaphone, label: "Build a campaign", prompt: "Create a 7-day campaign for my current offer" },
+];
+
 export function ChatPanel({
   workspaceId,
   workspaceName,
   threadId,
   initialMessages,
+  targetMessageId,
   aiConfigured,
 }: {
   workspaceId: string;
   workspaceName: string;
   threadId: string | null;
   initialMessages: UIMessage[];
+  targetMessageId?: string | null;
   aiConfigured: boolean;
 }) {
   const router = useRouter();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const persistedCount = useRef(initialMessages.length);
   const currentThreadId = useRef<string | null>(threadId);
   const persisting = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const [editingText, setEditingText] = useState("");
 
-  const { messages, sendMessage, status, error, stop, regenerate } = useChat({
+  const { messages, sendMessage, status, error, stop, regenerate, setMessages } = useChat({
     id: currentThreadId.current ?? "new-chat",
     messages: initialMessages,
     transport: new DefaultChatTransport({
@@ -155,18 +222,38 @@ export function ChatPanel({
     }),
   });
 
-  // Auto-scroll: snap to bottom on load, smooth-follow while streaming.
+  const scrollToBottom = useCallback((smooth = false) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  }, []);
+
+  // Snap to bottom on load / new message count / deep-link target
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (targetMessageId) {
+      const el2 = el.querySelector(`[data-uid="${targetMessageId}"]`);
+      if (el2) {
+        el2.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+    }
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, status]);
+  }, [messages.length, targetMessageId]);
 
+  // Follow stream
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || status !== "streaming") return;
     el.scrollTop = el.scrollHeight;
   }, [messages, status]);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+  }
 
   // Persist new messages after a completed turn.
   useEffect(() => {
@@ -186,7 +273,7 @@ export function ChatPanel({
             messages: newMessages,
           }),
         });
-        if (!res.ok) throw new Error(`persist failed (${res.status})`);
+        if (!res.ok) throw new Error("persist failed");
         const data = (await res.json()) as { threadId: string };
         persistedCount.current = messages.length;
         if (!currentThreadId.current && data.threadId) {
@@ -201,14 +288,35 @@ export function ChatPanel({
     })();
   }, [status, messages, workspaceId, router]);
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSend(e?: React.FormEvent) {
+    e?.preventDefault();
     const text = input.trim();
     if ((!text && attachments.length === 0) || status === "submitted" || status === "streaming") return;
     setInput("");
     const files = attachments;
     setAttachments([]);
+    setEditing(null);
     await sendMessage({ text: text || "Please analyze the attachment(s).", files: files as unknown as FileList });
+  }
+
+  function startEdit(message: UIMessage) {
+    const text = (message.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    const idx = messages.findIndex((m) => m.id === message.id);
+    setEditing({ id: message.id, text });
+    setEditingText(text);
+    setMessages(messages.slice(0, idx));
+    persistedCount.current = idx;
+  }
+
+  function sendEdit() {
+    const text = editingText.trim();
+    if (!text || status !== "ready") return;
+    setEditing(null);
+    setEditingText("");
+    void sendMessage({ text });
   }
 
   function addFiles(list: FileList | null) {
@@ -247,61 +355,116 @@ export function ChatPanel({
   }
 
   return (
-    <div className="flex h-[calc(100vh-10rem)] flex-col gap-4">
+    <div className="relative flex h-[calc(100vh-10rem)] flex-col gap-4">
       {messages.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
-          <div className="flex size-12 items-center justify-center rounded-xl bg-muted">
-            <Brain className="size-6 text-primary" aria-hidden />
+        <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-lg">
+            <Brain className="size-7" aria-hidden />
           </div>
-          <h2 className="text-lg font-semibold">Chat with your {workspaceName} agent</h2>
-          <p className="max-w-md text-sm text-muted-foreground">
-            Ask about your brand, draft captions or strategy, attach images or PDFs for analysis, or say
-            &quot;remember: no emojis in business posts&quot; — the agent saves it to Brand Brain memory.
-          </p>
+          <div>
+            <h2 className="text-xl font-semibold">AI Social Media Agent</h2>
+            <p className="mt-1 text-sm text-muted-foreground">What would you like to accomplish for {workspaceName}?</p>
+          </div>
+          <div className="flex max-w-lg flex-wrap justify-center gap-2">
+            {SUGGESTIONS.map((s) => (
+              <button
+                key={s.label}
+                type="button"
+                onClick={() => setInput(s.prompt)}
+                className="flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+              >
+                <s.icon className="size-3.5" aria-hidden />
+                {s.label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : (
-        <div ref={scrollRef} className="flex-1 space-y-6 overflow-y-auto pr-2">
-          {messages.map((m, idx) => (
-            <div key={m.id} className="flex gap-3">
-              <div
-                className={cn(
-                  "flex size-8 shrink-0 items-center justify-center rounded-lg",
-                  m.role === "assistant" ? "bg-primary/10" : "bg-muted",
-                )}
-              >
-                {m.role === "assistant" ? (
-                  <Brain className="size-4 text-primary" aria-hidden />
-                ) : (
-                  <Brain className="size-4 text-muted-foreground" aria-hidden />
-                )}
-              </div>
-              <div className="min-w-0 flex-1 space-y-2">
-                <div className="rounded-lg border bg-card p-4">
-                  <MessageParts message={m} />
-                </div>
-                {idx === lastAssistantIdx && status === "ready" ? (
-                  <div className="flex justify-end">
-                    <Button size="sm" variant="ghost" onClick={() => regenerate()} aria-label="Regenerate response">
-                      <RefreshCw className="size-3.5" aria-hidden /> Regenerate
-                    </Button>
+        <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 space-y-5 overflow-y-auto pr-2">
+          {messages.map((m) => {
+            const isUser = m.role === "user";
+            return (
+              <div key={m.id} data-uid={m.id} className={cn("flex gap-3", isUser && "justify-end")}>
+                {!isUser ? (
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                    <Brain className="size-4 text-primary" aria-hidden />
                   </div>
                 ) : null}
+                <div
+                  className={cn(
+                    "min-w-0 rounded-xl border p-4",
+                    isUser ? "max-w-[80%] border-primary/30 bg-primary/5" : "flex-1 bg-card",
+                  )}
+                >
+                  {!isUser ? (
+                    <div className="mb-1.5 text-xs font-semibold text-primary">AI Agent</div>
+                  ) : null}
+                  <MessageBody message={m} onEdit={isUser && !busy ? () => startEdit(m) : undefined} />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {status === "submitted" ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="size-2 animate-pulse rounded-full bg-primary" aria-hidden />
-              Thinking…
+              AI Agent is thinking…
             </div>
           ) : null}
         </div>
       )}
 
+      {!atBottom && messages.length > 0 ? (
+        <button
+          type="button"
+          onClick={() => scrollToBottom(true)}
+          aria-label="Scroll to latest"
+          className="absolute bottom-32 right-6 z-10 flex size-9 items-center justify-center rounded-full border bg-background shadow-md hover:bg-accent"
+        >
+          <ChevronDown className="size-4" aria-hidden />
+        </button>
+      ) : null}
+
       {error ? (
-        <p className="text-sm text-destructive" role="alert">
-          {error.message || "The agent could not respond. Try again."}
-        </p>
+        <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <p className="flex items-center gap-2 text-sm text-destructive">
+            <AlertTriangle className="size-4" aria-hidden />
+            {error.message || "The agent could not respond."}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => regenerate()}>Retry</Button>
+        </div>
+      ) : null}
+
+      {editing ? (
+        <div className="rounded-lg border border-primary/40 p-3">
+          <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <Pencil className="size-3.5" aria-hidden /> Editing message — sending replaces the rest of this turn
+            </span>
+            <button type="button" onClick={() => { setEditing(null); setMessages(initialMessages.slice(0, persistedCount.current)); setEditingText(""); }}>
+              <X className="size-3.5" aria-hidden />
+            </button>
+          </div>
+          <Textarea
+            autoFocus
+            value={editingText}
+            onChange={(e) => setEditingText(e.target.value)}
+            rows={3}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendEdit();
+              }
+            }}
+          />
+          <div className="mt-2 flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => { setEditing(null); setMessages(initialMessages.slice(0, persistedCount.current)); }}>
+              Cancel
+            </Button>
+            <Button size="sm" disabled={editingText.trim().length === 0 || busy} onClick={sendEdit}>
+              Resend
+            </Button>
+          </div>
+        </div>
       ) : null}
 
       {attachments.length > 0 ? (
@@ -314,11 +477,7 @@ export function ChatPanel({
                 <FileText className="size-3.5" aria-hidden />
               )}
               <span className="max-w-40 truncate">{file.name}</span>
-              <button
-                type="button"
-                onClick={() => setAttachments((a) => a.filter((_, j) => j !== i))}
-                aria-label={`Remove ${file.name}`}
-              >
+              <button type="button" onClick={() => setAttachments((a) => a.filter((_, j) => j !== i))} aria-label={`Remove ${file.name}`}>
                 <X className="size-3.5" aria-hidden />
               </button>
             </div>
@@ -326,11 +485,11 @@ export function ChatPanel({
         </div>
       ) : null}
 
-      <form onSubmit={handleSend} className="flex items-end gap-2">
+      <form onSubmit={handleSend} className="sticky bottom-0 flex items-end gap-2 bg-background pb-1 pt-1">
         <input
           ref={fileInputRef}
           type="file"
-          accept={ALLOWED_FILES}
+          accept="image/png,image/jpeg,image/webp,application/pdf"
           multiple
           className="hidden"
           onChange={(e) => {
@@ -338,14 +497,7 @@ export function ChatPanel({
             e.target.value = "";
           }}
         />
-        <Button
-          type="button"
-          size="icon"
-          variant="outline"
-          aria-label="Attach image or PDF"
-          disabled={busy}
-          onClick={() => fileInputRef.current?.click()}
-        >
+        <Button type="button" size="icon" variant="outline" aria-label="Attach image or PDF" disabled={busy} onClick={() => fileInputRef.current?.click()}>
           <Paperclip className="size-4" aria-hidden />
         </Button>
         <Textarea
@@ -354,7 +506,7 @@ export function ChatPanel({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              handleSend(e);
+              handleSend();
             }
           }}
           placeholder="Message your agent… (Enter to send, Shift+Enter for a new line)"
