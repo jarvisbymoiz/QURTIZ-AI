@@ -3,7 +3,6 @@
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
-import { z } from "zod";
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
 import { getSessionUser, getMembership } from "@/lib/workspace";

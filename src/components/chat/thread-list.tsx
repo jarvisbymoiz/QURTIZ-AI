@@ -99,7 +99,6 @@ export function ThreadList({ activeThreadId }: { activeThreadId: string | null }
 
   useEffect(() => {
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId, pathname]);
 
   // Debounced search
@@ -326,7 +325,7 @@ export function ThreadList({ activeThreadId }: { activeThreadId: string | null }
           <DialogHeader>
             <DialogTitle>Delete chat?</DialogTitle>
             <DialogDescription>
-              This permanently deletes "{deleting?.title}" and all its messages. This cannot be undone.
+              This permanently deletes “{deleting?.title}” and all its messages. This cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

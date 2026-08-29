@@ -1,6 +1,5 @@
-﻿import Link from "next/link";
-import { notFound } from "next/navigation";
-import { and, asc, desc, eq } from "drizzle-orm";
+﻿import { notFound } from "next/navigation";
+import { and, asc, eq } from "drizzle-orm";
 import type { UIMessage } from "ai";
 
 import { getDb } from "@/db";
@@ -10,7 +9,6 @@ import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
 import { PageHeader } from "@/components/layout/page-header";
-import { Button } from "@/components/ui/button";
 
 export const metadata = { title: "AI Chat" };
 
@@ -48,12 +46,7 @@ export default async function ThreadPage({
     .map((r) => r.message as unknown as UIMessage)
     .filter((m) => m && typeof m.role === "string" && Array.isArray(m.parts));
 
-  const threads = await db
-    .select({ id: chatThreads.id, title: chatThreads.title })
-    .from(chatThreads)
-    .where(eq(chatThreads.workspaceId, ctx.workspace.id))
-    .orderBy(desc(chatThreads.updatedAt))
-    .limit(30);
+
 
   return (
     <div className="space-y-6">

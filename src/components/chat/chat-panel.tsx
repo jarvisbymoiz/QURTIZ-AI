@@ -18,7 +18,6 @@ import {
   Paperclip,
   Pencil,
   PenSquare,
-  RefreshCw,
   Search,
   TrendingUp,
   Megaphone,
@@ -29,7 +28,6 @@ import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-const ALLOWED_FILES = "image/png,image/jpeg,image/webp,application/pdf";
 const MAX_FILE_MB = 9;
 
 function toolDisplayName(type: string): string {
@@ -66,7 +64,6 @@ function ToolActivity({ type, state }: { type: string; state?: string }) {
 
 function ToolActivitySummary({ types }: { types: string[] }) {
   const [open, setOpen] = useState(false);
-  const labels = types.map((t) => toolDisplayName(t).replace(/…$/, ""));
   return (
     <div className="rounded-md border bg-muted/30 px-3 py-2">
       <button
@@ -333,7 +330,6 @@ export function ChatPanel({
   }
 
   const busy = status === "submitted" || status === "streaming";
-  const lastAssistantIdx = messages.length > 0 && messages[messages.length - 1].role === "assistant" ? messages.length - 1 : -1;
 
   if (!aiConfigured) {
     return (

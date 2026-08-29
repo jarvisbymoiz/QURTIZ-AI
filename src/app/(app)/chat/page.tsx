@@ -1,27 +1,13 @@
-﻿import Link from "next/link";
-import { desc, eq } from "drizzle-orm";
-
-import { getDb } from "@/db";
-import { chatThreads } from "@/db/schema";
-import { isAiConfigured } from "@/lib/ai/provider";
+﻿import { isAiConfigured } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
 import { PageHeader } from "@/components/layout/page-header";
-import { Button } from "@/components/ui/button";
 
 export const metadata = { title: "AI Chat" };
 
 export default async function ChatIndexPage() {
   const ctx = await requireWorkspace();
-  const db = getDb();
-
-  const threads = await db
-    .select({ id: chatThreads.id, title: chatThreads.title, updatedAt: chatThreads.updatedAt })
-    .from(chatThreads)
-    .where(eq(chatThreads.workspaceId, ctx.workspace.id))
-    .orderBy(desc(chatThreads.updatedAt))
-    .limit(30);
 
   return (
     <div className="space-y-6">
