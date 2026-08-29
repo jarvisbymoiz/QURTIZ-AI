@@ -1,5 +1,5 @@
 ﻿import { redirect } from "next/navigation";
-import { getSessionUser, getUserWorkspaces } from "@/lib/workspace";
+import { getSessionUser } from "@/lib/workspace";
 import { OnboardingForm } from "@/components/onboarding/onboarding-form";
 
 export const metadata = { title: "Create workspace" };
