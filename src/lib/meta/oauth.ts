@@ -20,15 +20,26 @@ export function buildOAuthUrl(origin: string, state: string): string {
     client_id: process.env.META_APP_ID ?? "",
     redirect_uri: metaRedirectUri(origin),
     state,
-    scope: [
-      "pages_show_list",
-      "pages_manage_posts",
-      "pages_read_engagement",
-      "instagram_basic",
-      "instagram_content_publish",
-    ].join(","),
     response_type: "code",
   });
+  // Two supported modes:
+  // 1) META_LOGIN_CONFIG_ID set  -> Facebook Login for Business (config carries permissions)
+  // 2) otherwise                 -> classic Facebook Login with explicit scopes
+  const configId = process.env.META_LOGIN_CONFIG_ID;
+  if (configId) {
+    params.set("config_id", configId);
+  } else {
+    params.set(
+      "scope",
+      [
+        "pages_show_list",
+        "pages_manage_posts",
+        "pages_read_engagement",
+        "instagram_basic",
+        "instagram_content_publish",
+      ].join(","),
+    );
+  }
   return `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth?${params.toString()}`;
 }
 
