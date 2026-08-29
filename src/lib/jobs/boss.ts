@@ -9,6 +9,14 @@ import { PgBoss } from "pg-boss";
 type BossGlobal = typeof globalThis & { __qurtizBoss?: PgBoss };
 const g = globalThis as BossGlobal;
 
+export const QUEUES = {
+  publishScan: "publish-due-scan",
+  bulkGenerate: "bulk-generate",
+  campaignGenerate: "campaign-generate",
+  syncInsights: "sync-insights",
+  autopilotLoop: "autopilot-loop",
+} as const;
+
 export async function getBoss(): Promise<PgBoss> {
   if (g.__qurtizBoss) return g.__qurtizBoss;
   if (!process.env.DATABASE_URL) {
@@ -20,15 +28,14 @@ export async function getBoss(): Promise<PgBoss> {
   });
   boss.on("error", (e: Error) => console.error("[pg-boss]", e.message));
   await boss.start();
+  // Ensure every queue exists before anything sends to it. createQueue is
+  // idempotent, and this decouples queue availability from worker startup.
+  for (const name of Object.values(QUEUES)) {
+    await boss.createQueue(name);
+  }
   g.__qurtizBoss = boss;
   return boss;
 }
 
-export const QUEUES = {
-  publishScan: "publish-due-scan",
-  bulkGenerate: "bulk-generate",
-  campaignGenerate: "campaign-generate",
-  syncInsights: "sync-insights",
-  autopilotLoop: "autopilot-loop",
-} as const;
+
 
