@@ -8,10 +8,6 @@ export default async function OnboardingPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login");
 
-  const workspaces = await getUserWorkspaces(user.id);
-  if (workspaces.length > 0) {
-    redirect("/");
-  }
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-muted/30 p-4">
