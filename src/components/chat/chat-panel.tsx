@@ -140,7 +140,11 @@ function MessageBody({
         if (part.type === "text") {
           return part.text.trim() ? (
             <div key={i} className="group/msg relative">
-              <p className="whitespace-pre-wrap text-sm leading-relaxed">{part.text}</p>
+              {message.role === "assistant" ? (
+                <Markdown content={part.text} />
+              ) : (
+                <p className="whitespace-pre-wrap text-sm leading-relaxed">{part.text}</p>
+              )}
               <div className="mt-1 flex gap-1 opacity-0 transition-opacity group-hover/msg:opacity-100">
                 <Button size="icon" variant="ghost" className="size-6" aria-label="Copy message"
                   onClick={() => { void copyText(); }}>
