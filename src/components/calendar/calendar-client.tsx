@@ -3,7 +3,7 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronLeft, ChevronRight, ListChecks, Loader2, Sparkles, Wand2 } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, ListChecks } from "lucide-react";
 import type { contentItems, publishingJobs } from "@/db/schema";
 import {
   scheduleContentAction,
@@ -11,8 +11,7 @@ import {
 } from "@/server/actions/schedule";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
