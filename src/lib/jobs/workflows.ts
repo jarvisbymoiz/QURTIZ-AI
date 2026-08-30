@@ -1,9 +1,8 @@
 ﻿import "server-only";
 
-import { and, desc, eq, lte } from "drizzle-orm";
+import { and, asc, desc, eq, lte } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
-  settings,
   contentItems,
   contentVariants,
   workspaces,
@@ -12,6 +11,8 @@ import {
   publishingJobs,
   visualAssets,
   researchItems,
+  jobs,
+  settings,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
 import { decryptToken } from "@/lib/crypto/tokens";
@@ -318,10 +319,19 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.publishScan, async () => {
     await publishDueScan();
   });
-  await boss.work(QUEUES.bulkGenerate, async (job) => {
-    const data = (job as { data?: { jobId?: string } }).data;
-    const jobId = data?.jobId;
-    if (jobId) await bulkGenerate(jobId);
+  await boss.work(QUEUES.bulkGenerate, async () => {
+    // Payload-independent: process every queued bulk_plan row (oldest first).
+    // This survives any handler-payload shape differences across pg-boss versions.
+    const db = getDb();
+    const queued = await db
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(and(eq(jobs.type, "bulk_plan"), eq(jobs.status, "queued")))
+      .orderBy(asc(jobs.createdAt))
+      .limit(5);
+    for (const row of queued) {
+      await bulkGenerate(row.id);
+    }
   });
   await boss.work(Q.campaignGenerate, async (job) => {
     const data = (job as { data?: { campaignId?: string } }).data;

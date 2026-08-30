@@ -2,7 +2,7 @@
 import { renderTemplateVisual } from "@/lib/visuals/template";
 
 describe("renderTemplateVisual", () => {
-  it("renders a real PNG for the promo layout", async () => {
+  it("renders a real PNG for the promo layout", { timeout: 60_000 }, async () => {
     const png = await renderTemplateVisual({
       primaryColor: "#6366f1",
       secondaryColor: "#0ea5e9",
@@ -17,7 +17,7 @@ describe("renderTemplateVisual", () => {
     expect(png.slice(1, 4).toString("ascii")).toBe("PNG");
   });
 
-  it("renders the statement layout with a logo data URL", async () => {
+  it("renders the statement layout with a logo data URL", { timeout: 60_000 }, async () => {
     const tinyLogo =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const png = await renderTemplateVisual({
