@@ -8,7 +8,6 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs, jobs, workspaces } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
 
-import { planContentDays } from "@/lib/scheduling/time";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { getSessionUser, getMembership } from "@/lib/workspace";

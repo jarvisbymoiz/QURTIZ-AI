@@ -3,12 +3,10 @@
 import { and, desc, eq, lte } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
-  agentRuns,
   settings,
   contentItems,
   contentVariants,
   workspaces,
-  jobs,
   notifications,
   platformConnections,
   publishingJobs,
@@ -24,7 +22,6 @@ import { defaultSlotFor } from "@/lib/scheduling/time";
 import { campaigns, campaignItems } from "@/db/schema";
 import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
-import { planContentDays } from "@/lib/scheduling/time";
 import { generateAndPersistContent } from "@/lib/ai/content";
 
 /**

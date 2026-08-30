@@ -3,7 +3,7 @@ import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
-import { summarizeBrandBrain, type BrandBrainRow } from "@/lib/ai/brand-summary";
+import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { getModelId } from "@/lib/ai/provider";

@@ -6,7 +6,6 @@ import { z } from "zod";
 import { getDb } from "@/db";
 import {
   agentRuns,
-  aiInsights,
   brandMemory,
   brands,
   contentItems,
@@ -15,6 +14,7 @@ import {
   notifications,
   postMetrics,
   researchItems,
+  visualAssets,
   workspaces,
 } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
@@ -369,7 +369,7 @@ async function storeVisual(workspaceId: string, contentItemId: string, png: Buff
   const { error } = await supabase.storage.from("brand-assets").upload(storagePath, png, { contentType: "image/png" });
   if (error) return;
   const db = getDb();
-  await db.insert(visualAssetsTable).values({
+  await db.insert(visualAssets).values({
     workspaceId,
     contentItemId,
     kind: "template",
@@ -381,7 +381,7 @@ async function storeVisual(workspaceId: string, contentItemId: string, png: Buff
 }
 
 // localized import to avoid circular chunk ordering issues
-import { visualAssets as visualAssetsTable } from "@/db/schema";
+
 
 /** Shared entry used by the server action and the chat agent tool. */
 export async function startBulkPlanCore(args: {

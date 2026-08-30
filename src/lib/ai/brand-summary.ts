@@ -1,5 +1,3 @@
-import { eq } from "drizzle-orm";
-import { getDb } from "@/db";
 import { brands } from "@/db/schema";
 
 export type BrandBrainRow = typeof brands.$inferSelect;
