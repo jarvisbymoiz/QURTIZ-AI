@@ -3,10 +3,12 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { Loader2, Plus, Sparkles, ThumbsDown, Trash2, TrendingUp, Wand2 } from "lucide-react";
 import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
 import { generateVisualAction } from "@/server/actions/visuals";
 import {
+  rejectContentAction,
+  regenerateContentAction,
   createContentAction,
   deleteContentAction,
   setContentStatusAction,
@@ -14,6 +16,8 @@ import {
 } from "@/server/actions/content";
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
+import { SuggestTrends } from "@/components/studio/suggest-trends";
+import { suggestTrendsAction } from "@/server/actions/research";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -90,6 +94,8 @@ function QaPanel({ qa }: { qa: unknown }) {
 function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boolean }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   const [pending, start] = useTransition();
   const [topic, setTopic] = useState("");
   const [objective, setObjective] = useState("");
@@ -215,6 +221,8 @@ function ItemCard({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   const [pending, start] = useTransition();
   const scores = item.aiScores as { relevance?: number; engagement?: number } | null;
 
@@ -283,6 +291,20 @@ function ItemCard({
                   ) : null}
                 </Tabs>
                 <VisualSection itemId={item.id} visuals={visuals} visualUrls={visualUrls} editable={editable} aiConfigured={aiConfigured} />
+                {rejecting ? (
+                  <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
+                    <Label htmlFor="rr">Rejection reason (optional)</Label>
+                    <Input id="rr" value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={300}
+                      placeholder="e.g. too salesy, wrong tone" />
+                    <div className="flex justify-end gap-2">
+                      <Button size="sm" variant="ghost" onClick={() => { setRejecting(false); setRejectReason(""); }}>Cancel</Button>
+                      <Button size="sm" variant="destructive" disabled={pending}
+                        onClick={() => act(() => rejectContentAction(item.id, rejectReason || undefined), "Rejected")}>
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap justify-end gap-2">
                   {item.status !== "approved" ? (
                     <Button variant="outline" disabled={pending || !editable}
@@ -296,9 +318,15 @@ function ItemCard({
                     </Button>
                   )}
                   <Button variant="ghost" disabled={pending || !editable}
-                    onClick={() => act(() => setContentStatusAction(item.id, "archived"), "Archived")}>
-                    Archive
+                    onClick={() => { setRejecting(true); setRejectReason(""); }}>
+                    <ThumbsDown className="size-3.5" aria-hidden /> Reject
                   </Button>
+                  {item.status === "rejected" ? (
+                    <Button variant="outline" disabled={pending || !editable}
+                      onClick={() => act(() => regenerateContentAction(item.id), "Regenerated — new version created")}>
+                      Regenerate
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             </DialogContent>
@@ -380,6 +408,7 @@ export function StudioClient({
   editable: boolean;
 }) {
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [trendsOpen, setTrendsOpen] = useState(false);
   const filtered = useMemo(
     () => (statusFilter === "all" ? items : items.filter((i) => i.status === statusFilter)),
     [items, statusFilter],
@@ -432,6 +461,7 @@ export function StudioClient({
             <BulkApproveButton />
           ) : null}
           <BulkPlanDialog editable={editable} aiConfigured={aiConfigured} />
+          <SuggestTrends editable={editable} aiConfigured={aiConfigured} />
           <NewPostDialog pillars={pillars} editable={editable && aiConfigured} />
         </div>
       </div>

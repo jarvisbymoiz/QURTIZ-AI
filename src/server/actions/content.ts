@@ -7,6 +7,7 @@ import { z } from "zod";
 import { getDb } from "@/db";
 import { contentItems, contentVariants } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { approveItem, rejectItem, archiveItem, getItem } from "@/lib/content/lifecycle";
 import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
@@ -135,3 +136,53 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
 
 
 
+
+export async function approveContentAction(itemId: string): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const item = await getItem(ctx.workspaceId, itemId);
+  if (!item) return { ok: false, error: "Content item not found." };
+  if (!["ready_for_review", "rejected"].includes(item.status)) {
+    return { ok: false, error: "Only content waiting for review can be approved." };
+  }
+  await approveItem(ctx.workspaceId, itemId);
+  revalidatePath("/content-studio");
+  return { ok: true };
+}
+
+export async function rejectContentAction(itemId: string, reason?: string): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const item = await getItem(ctx.workspaceId, itemId);
+  if (!item) return { ok: false, error: "Content item not found." };
+  if (item.status === "published" || item.status === "scheduled") {
+    return { ok: false, error: "Published or scheduled content cannot be rejected — unschedule first." };
+  }
+  await rejectItem(ctx.workspaceId, itemId, reason ?? null);
+  revalidatePath("/content-studio");
+  return { ok: true };
+}
+
+export async function regenerateContentAction(itemId: string): Promise<ActionResult & { newItemId?: string }> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const item = await getItem(ctx.workspaceId, itemId);
+  if (!item) return { ok: false, error: "Content item not found." };
+  await archiveItem(ctx.workspaceId, itemId);
+  try {
+    const created = await generateAndPersistContent({
+      workspaceId: ctx.workspaceId,
+      userId: ctx.userId,
+      input: {
+        topic: item.topic,
+        objective: item.objective,
+        platforms: ["facebook", "instagram"],
+        preferredFormat: item.format,
+      },
+    });
+    revalidatePath("/content-studio");
+    return { ok: true, newItemId: created.itemId };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Regeneration failed" };
+  }
+}

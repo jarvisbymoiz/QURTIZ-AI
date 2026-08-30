@@ -127,3 +127,26 @@ export async function createContentFromResearchAction(itemId: string): Promise<A
   }
 }
 
+
+
+import { suggestTrends } from "@/lib/ai/trends";
+
+export async function suggestTrendsAction(input: { niche?: string }): Promise<
+  { ok: true; sourced: boolean; trends: unknown } | { ok: false; error: string }
+> {
+  const user = await getSessionUser();
+  if (!user) return { ok: false, error: "You must be signed in." };
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  if (!workspaceId) return { ok: false, error: "No active workspace." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "brand:write")) return { ok: false, error: "Not allowed." };
+
+  try {
+    const result = await suggestTrends({ workspaceId, niche: input.niche });
+    if (!result.ok) return { ok: false, error: result.message };
+    return { ok: true, sourced: result.sourced, trends: result.trends };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Trend suggestion failed" };
+  }
+}

@@ -44,6 +44,8 @@ export type GenerateContentInput = {
   objective?: string | null;
   platforms: ("facebook" | "instagram")[];
   preferredFormat?: "single_image" | "carousel" | "reel" | "story" | "text_post" | null;
+  toneOverride?: string | null;
+  visualStyleHint?: string | null;
 };
 
 /**
@@ -117,6 +119,8 @@ ${memoryLines.length > 0 ? memoryLines : "(none)"}
 Topic: ${ctx.input.topic}
 Objective: ${ctx.input.objective ?? "Engagement + awareness"}
 Target platforms: ${ctx.input.platforms.join(", ")}
+${ctx.input.toneOverride ? `Tone override: ${ctx.input.toneOverride}` : ""}
+${ctx.input.visualStyleHint ? `Visual style hint: ${ctx.input.visualStyleHint}` : ""}
 ${ctx.input.preferredFormat ? `Preferred format: ${ctx.input.preferredFormat}` : "Choose the best format per platform and explain nothing — just produce it."}
 Produce one variant per target platform.`;
 

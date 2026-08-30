@@ -1,6 +1,6 @@
 ﻿import { tool } from "ai";
 import { z } from "zod";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ilike } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
@@ -12,6 +12,10 @@ import { startBulkPlanCore } from "@/lib/jobs/bulk";
 import { makeWebSearchTool } from "@/lib/ai/search-tool";
 import { workspaces } from "@/db/schema";
 import { researchTopics } from "@/lib/ai/research";
+import { approveItem, rejectItem, getItem } from "@/lib/content/lifecycle";
+import { sumTotals } from "@/lib/analytics/compute";
+import { postMetrics } from "@/db/schema";
+import { generateVisual } from "@/lib/visuals/generate";
 
 export type BrandMemoryRow = typeof brandMemory.$inferSelect;
 
@@ -224,12 +228,95 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
+  const searchContentLibrary = tool({
+    description: "Search the workspace's content library (topics and captions) for existing posts. Use before generating new content to avoid repetition.",
+    inputSchema: z.object({ query: z.string().min(2).max(200) }),
+    execute: async (input) => {
+      const rows = await db
+        .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status, createdAt: contentItems.createdAt })
+        .from(contentItems)
+        .where(and(eq(contentItems.workspaceId, ctx.workspaceId), ilike(contentItems.topic, "%" + input.query + "%")))
+        .limit(10);
+      await logStep("search_content_library", input, { count: rows.length });
+      return { results: rows.map((r) => ({ id: r.id, topic: r.topic, status: r.status })) };
+    },
+  });
+
+  const getAnalytics = tool({
+    description: "Get the workspace's measured analytics summary (from synced platform data). Returns totals; zero data when nothing is synced yet.",
+    inputSchema: z.object({}),
+    execute: async () => {
+      const rows = await db.select().from(postMetrics).where(eq(postMetrics.workspaceId, ctx.workspaceId)).limit(100);
+      const totals = sumTotals(
+        rows.map((r) => ({
+          platform: r.platform,
+          contentItemId: r.contentItemId,
+          metrics: (r.metrics ?? {}) as Record<string, number>,
+          postedAt: r.postedAt,
+        })),
+      );
+      await logStep("get_analytics", {}, { totals });
+      return { totals };
+    },
+  });
+
+  const generateVisualTool = tool({
+    description: "Generate a template brand visual for a content item (uses brand colors, logo and the post's copy). Free and instant.",
+    inputSchema: z.object({ itemId: z.string().uuid() }),
+    execute: async (input) => {
+      const result = await generateVisual({
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        contentItemId: input.itemId,
+        mode: "template",
+      });
+      await logStep("generate_visual", input, { ok: result.ok });
+      if (!result.ok) return { generated: false, message: result.message };
+      return { generated: true, message: "Visual generated and attached to the content item." };
+    },
+  });
+
+  const approveContentTool = tool({
+    description: "Approve a content item that is waiting for review. Approved items can then be scheduled.",
+    inputSchema: z.object({ itemId: z.string().uuid() }),
+    execute: async (input) => {
+      const item = await getItem(ctx.workspaceId, input.itemId);
+      if (!item) return { ok: false, message: "Content item not found." };
+      if (!["ready_for_review", "rejected"].includes(item.status)) {
+        return { ok: false, message: "Only content waiting for review can be approved." };
+      }
+      await approveItem(ctx.workspaceId, input.itemId);
+      await logStep("approve_content", input, { ok: true });
+      return { ok: true, message: "Approved. You can schedule it from the Calendar." };
+    },
+  });
+
+  const rejectContentTool = tool({
+    description: "Reject a content item waiting for review, optionally with a reason. Rejected items can be regenerated.",
+    inputSchema: z.object({ itemId: z.string().uuid(), reason: z.string().max(300).optional() }),
+    execute: async (input) => {
+      const item = await getItem(ctx.workspaceId, input.itemId);
+      if (!item) return { ok: false, message: "Content item not found." };
+      if (item.status === "published" || item.status === "scheduled") {
+        return { ok: false, message: "Published or scheduled content cannot be rejected." };
+      }
+      await rejectItem(ctx.workspaceId, input.itemId, input.reason ?? null);
+      await logStep("reject_content", input, { ok: true });
+      return { ok: true, message: input.reason ? "Rejected with reason: " + input.reason : "Rejected." };
+    },
+  });
+
   return {
     get_brand_brain: getBrandBrain,
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
     web_search: makeWebSearchTool({ logStep, modelId: getModelId() }),
+    search_content_library: searchContentLibrary,
+    get_analytics: getAnalytics,
+    generate_visual: generateVisualTool,
+    approve_content: approveContentTool,
+    reject_content: rejectContentTool,
     bulk_plan: bulkPlan,
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
