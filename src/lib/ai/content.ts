@@ -4,7 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
 import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
-import { summarizeBrandBrain } from "@/lib/ai/tools";
+import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
 import type { ContentRulesInput } from "@/lib/validation";
 

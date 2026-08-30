@@ -180,98 +180,11 @@ async function publishDueScan(): Promise<void> {
 }
 
 /**
- * Bulk content plan: generate posts spread over planned days with a
- * pillar-aware mix, updating progress on the jobs row.
+ * Bulk content plan: delegates to the staged pipeline in lib/jobs/bulk.ts.
  */
 async function bulkGenerate(jobId: string): Promise<void> {
-  const db = getDb();
-  const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-  if (!job || job.status !== "queued") return;
-
-  await db.update(jobs).set({ status: "running", updatedAt: new Date() }).where(eq(jobs.id, jobId));
-
-  try {
-    const input = job.input as { count?: number; days?: string[]; niche?: string };
-    const count = Math.min(Math.max(input.count ?? 12, 1), 30);
-    const days = input.days ?? planContentDays(new Date(), count);
-
-    const [run] = await db
-      .insert(agentRuns)
-      .values({ workspaceId: job.workspaceId, userId: job.userId, kind: "bulk_generation", model: null })
-      .returning();
-
-    const created: string[] = [];
-    const failedItems: string[] = [];
-    for (let i = 0; i < count; i++) {
-      const day = days[i] ?? days[days.length - 1] ?? new Date().toISOString().slice(0, 10);
-      const niche = input.niche ? `${input.niche}` : "the brand's niche";
-      try {
-        const { itemId } = await generateAndPersistContent({
-          workspaceId: job.workspaceId,
-          userId: job.userId,
-          input: {
-            topic: `Bulk plan day ${day}: pick the next strong ${niche} topic not yet covered (variation ${i + 1} of ${count})`,
-            objective: "Bulk content plan",
-            platforms: ["facebook", "instagram"],
-            preferredFormat: i % 4 === 0 ? "carousel" : i % 4 === 1 ? "reel" : "single_image",
-          },
-        });
-        created.push(itemId);
-        // Link planned day for the calendar
-        await db
-          .update(contentItems)
-          .set({ scheduledAt: null, updatedAt: new Date() })
-          .where(eq(contentItems.id, itemId));
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : "generation failed";
-        failedItems.push(`Day ${day}: ${reason}`);
-        console.error("[bulk-generate] item failed", reason);
-      }
-      await db
-        .update(jobs)
-        .set({ progress: i + 1, total: count, updatedAt: new Date() })
-        .where(eq(jobs.id, jobId));
-    }
-
-    if (created.length === 0) {
-      await db
-        .update(jobs)
-        .set({ status: "failed", error: failedItems.join("; ").slice(0, 500) || "No posts were generated", updatedAt: new Date() })
-        .where(eq(jobs.id, jobId));
-      await db.insert(notifications).values({
-        workspaceId: job.workspaceId,
-        userId: job.userId,
-        kind: "job_completed",
-        title: "Bulk content plan failed",
-        body: failedItems.slice(0, 3).join("; ") || "No posts were generated.",
-        link: "/calendar",
-      });
-      return;
-    }
-    await db
-      .update(jobs)
-      .set({
-        status: "completed",
-        result: { createdCount: created.length, failures: failedItems, days: days.length },
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, jobId));
-    await db
-      .update(agentRuns)
-      .set({ status: "completed", finishedAt: new Date() })
-      .where(eq(agentRuns.id, run.id));
-    await db.insert(notifications).values({
-      workspaceId: job.workspaceId,
-      userId: job.userId,
-      kind: "job_completed",
-      title: "Bulk content plan ready",
-      body: `${created.length} posts generated. Review them in the Calendar and Content Studio.`,
-      link: "/calendar",
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Bulk generation failed";
-    await db.update(jobs).set({ status: "failed", error: message, updatedAt: new Date() }).where(eq(jobs.id, jobId));
-  }
+  const { runBulkPlan } = await import("@/lib/jobs/bulk");
+  await runBulkPlan(jobId);
 }
 
 /**
@@ -294,18 +207,15 @@ async function generateCampaign(campaignId: string): Promise<void> {
     try {
       const { itemId } = await generateAndPersistContent({
         workspaceId: campaign.workspaceId,
-        userId: (campaign.createdBy ?? campaign.workspaceId),
+        userId: campaign.createdBy ?? campaign.workspaceId,
         input: {
-          topic: `Campaign "${campaign.name}" — Day ${day.dayIndex}: ${day.theme}${campaign.offer ? ` (offer: ${campaign.offer})` : ""}`,
-          objective: `Campaign day ${day.dayIndex}/${campaign.durationDays}: ${day.theme}`,
+          topic: "Campaign \"" + campaign.name + "\" - Day " + day.dayIndex + ": " + day.theme + (campaign.offer ? " (offer: " + campaign.offer + ")" : ""),
+          objective: "Campaign day " + day.dayIndex + "/" + campaign.durationDays + ": " + day.theme,
           platforms,
           preferredFormat: null,
         },
       });
-      await db
-        .update(campaignItems)
-        .set({ contentItemId: itemId })
-        .where(eq(campaignItems.id, day.id));
+      await db.update(campaignItems).set({ contentItemId: itemId }).where(eq(campaignItems.id, day.id));
     } catch (e) {
       console.error("[campaign] day failed", e instanceof Error ? e.message : e);
     }
@@ -317,10 +227,11 @@ async function generateCampaign(campaignId: string): Promise<void> {
     userId: campaign.createdBy ?? campaign.workspaceId,
     kind: "job_completed",
     title: "Campaign content ready",
-    body: `${campaign.name}: ${pending.length} posts generated.`,
+    body: pending.length + " posts generated.",
     link: "/campaigns",
   });
 }
+
 
 /**
  * Daily autonomous loop for workspaces with autopilot enabled.
@@ -348,9 +259,9 @@ async function autopilotLoop(): Promise<void> {
       if (!research.ok) continue;
 
       const items = await db
-      .select()
-      .from(researchItems)
-      .where(and(eq(researchItems.workspaceId, row.workspaceId), eq(researchItems.status, "new")));
+        .select()
+        .from(researchItems)
+        .where(and(eq(researchItems.workspaceId, row.workspaceId), eq(researchItems.status, "new")));
       const top = items
         .map((i) => ({ item: i, score: ((i.scores ?? {}) as Record<string, number>).overall ?? 0 }))
         .sort((a, b) => b.score - a.score)
@@ -403,6 +314,8 @@ async function autopilotLoop(): Promise<void> {
     }
   }
 }
+
+
 /** Register all workers. Called once at server start. */
 export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.publishScan, async () => {
@@ -434,6 +347,13 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
         console.error("[sync-insights]", e instanceof Error ? e.message : e);
       }
     }
+  });
+  await boss.work(Q.autopilotLoop, async () => {
+    await autopilotLoop();
+  });
+  await boss.work(Q.campaignGenerate, async (job) => {
+    const data = (job as { data?: { campaignId?: string } }).data;
+    if (data?.campaignId) await generateCampaign(data.campaignId);
   });
   await boss.work(Q.autopilotLoop, async () => {
     await autopilotLoop();

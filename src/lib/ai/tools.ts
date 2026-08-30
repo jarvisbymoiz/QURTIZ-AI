@@ -3,14 +3,15 @@ import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
+import { summarizeBrandBrain, type BrandBrainRow } from "@/lib/ai/brand-summary";
+export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { getModelId } from "@/lib/ai/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
+import { startBulkPlanCore } from "@/lib/jobs/bulk";
 import { makeWebSearchTool } from "@/lib/ai/search-tool";
 import { workspaces } from "@/db/schema";
 import { researchTopics } from "@/lib/ai/research";
-
-export type BrandBrainRow = typeof brands.$inferSelect;
 
 export type BrandMemoryRow = typeof brandMemory.$inferSelect;
 
@@ -19,41 +20,6 @@ export type AgentToolContext = {
   userId: string;
   runId: string;
 };
-
-/** Human-readable summary of the Brand Brain row for prompts/tools. */
-export function summarizeBrandBrain(brand: BrandBrainRow | null): string {
-  if (!brand) return "No brand information configured yet.";
-  const parts: string[] = [];
-  const add = (label: string, v: string | null | undefined) => {
-    if (v && v.trim().length > 0) parts.push(`${label}: ${v.trim()}`);
-  };
-  add("Business", brand.businessName);
-  add("Description", brand.description);
-  add("Industry", brand.industry);
-  add("Products", brand.products);
-  add("Services", brand.services);
-  add("Pricing", brand.pricing);
-  add("Offers", brand.offers);
-  add("Locations", brand.locations);
-  add("Website", brand.website);
-  add("Contact", brand.contact);
-  add("Primary CTA", brand.cta);
-  add("Target market", brand.targetMarket);
-  const a = (brand.audience ?? {}) as Record<string, unknown>;
-  add("Audience demographics", String(a.demographics ?? ""));
-  add("Audience interests", String(a.interests ?? ""));
-  add("Audience problems", String(a.problems ?? ""));
-  add("Audience goals", String(a.goals ?? ""));
-  add("Audience objections", String(a.objections ?? ""));
-  add("Audience preferred language", String(a.preferredLanguage ?? ""));
-  if (brand.voicePresets.length > 0) parts.push(`Brand voice: ${brand.voicePresets.join(", ")}`);
-  add("Voice instructions", brand.voiceCustom);
-  const v = (brand.visualIdentity ?? {}) as Record<string, unknown>;
-  add("Visual identity", JSON.stringify(v));
-  const r = (brand.contentRules ?? {}) as Record<string, unknown>;
-  add("Content rules", JSON.stringify(r));
-  return parts.length > 0 ? parts.join("\n") : "Brand Brain is empty — ask the user to fill it in.";
-}
 
 /**
  * Build the M1 agent tool set. All tools are read / internal-write only —
@@ -234,12 +200,37 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
+  const bulkPlan = tool({
+    description:
+      "Create a bulk content plan: generate multiple posts (6-30) spread over upcoming weekdays via the background pipeline. Each post is brand-context aware, QA-verified, and lands in Content Studio as Ready for Review. Use when the user asks for many posts at once (e.g. 'create 12 posts', 'content for next month').",
+    inputSchema: z.object({
+      count: z.number().int().min(4).max(30).default(12).describe("How many posts to generate"),
+      niche: z.string().max(300).optional().describe("Optional focus for the plan"),
+    }),
+    execute: async (input) => {
+      const result = await startBulkPlanCore({
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        count: input.count,
+        niche: input.niche,
+      });
+      await logStep("bulk_plan", input, { ok: result.ok, jobId: result.ok ? result.jobId : undefined });
+      if (!result.ok) return { queued: false, message: result.error };
+      return {
+        queued: true,
+        jobId: result.jobId,
+        message: "Bulk plan queued. Posts generate in the background and appear in Content Studio as Ready for Review.",
+      };
+    },
+  });
+
   return {
     get_brand_brain: getBrandBrain,
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
     web_search: makeWebSearchTool({ logStep, modelId: getModelId() }),
+    bulk_plan: bulkPlan,
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };

@@ -144,36 +144,56 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
 
   await ensureDefaultPillars(ctx.workspaceId);
-
-  const db = getDb();
-  const days = planContentDays(new Date(), parsed.data.count);
-  const [job] = await db
-    .insert(jobs)
-    .values({
-      workspaceId: ctx.workspaceId,
-      userId: ctx.userId,
-      type: "bulk_plan",
-      status: "queued",
-      total: parsed.data.count,
-      input: { count: parsed.data.count, days, niche: parsed.data.niche || undefined },
-    })
-    .returning();
+  const { startBulkPlanCore } = await import("@/lib/jobs/bulk");
+  const result = await startBulkPlanCore({
+    workspaceId: ctx.workspaceId,
+    userId: ctx.userId,
+    count: parsed.data.count,
+    niche: parsed.data.niche || undefined,
+  });
+  if (!result.ok) return { ok: false, error: result.error };
 
   try {
     const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
     const boss = await getBoss();
-    await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
+    await boss.send(QUEUES.bulkGenerate, { jobId: result.jobId });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Queue unavailable";
-    await (await import("@/lib/jobs/boss")).getBoss;
     const db = getDb();
-    await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, job.id));
+    await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, result.jobId));
     return { ok: false, error: "Could not queue the bulk plan: " + msg };
   }
 
+  revalidatePath("/content-studio");
   revalidatePath("/calendar");
-  revalidatePath("/");
-  return { ok: true, jobId: job.id };
+  return { ok: true, jobId: result.jobId };
+}
+
+export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const db = getDb();
+  await db
+    .update(jobs)
+    .set({ status: "cancelled", updatedAt: new Date() })
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+  revalidatePath("/content-studio");
+  return { ok: true };
+}
+
+export async function retryBulkFailedAction(jobId: string): Promise<ActionResult & { jobId?: string }> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const db = getDb();
+  const [prev] = await db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+  if (!prev) return { ok: false, error: "Job not found." };
+  const result = (prev.result ?? {}) as { createdCount?: number; failures?: string[] };
+  const failedCount = (prev.total ?? 0) - (result.createdCount ?? 0);
+  if (failedCount <= 0) return { ok: false, error: "Nothing to retry." };
+  return startBulkPlanAction({ count: failedCount, niche: ((prev.input ?? {}) as { niche?: string }).niche });
 }
 
 export async function getJobStatusAction(jobId: string): Promise<{
@@ -181,6 +201,7 @@ export async function getJobStatusAction(jobId: string): Promise<{
   status?: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress?: number;
   total?: number;
+  stage?: string | null;
   error?: string;
 }> {
   const user = await getSessionUser();
@@ -193,11 +214,15 @@ export async function getJobStatusAction(jobId: string): Promise<{
 
   const db = getDb();
   const [job] = await db
-    .select({ status: jobs.status, progress: jobs.progress, total: jobs.total, error: jobs.error })
+    .select({ status: jobs.status, progress: jobs.progress, total: jobs.total, error: jobs.error, result: jobs.result })
     .from(jobs)
     .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, workspaceId)));
   if (!job) return { ok: false };
-  return { ok: true, status: job.status, progress: job.progress, total: job.total, error: job.error ?? undefined };
+  const stage = (job.result as { stage?: string } | null)?.stage ?? null;
+  return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined };
 }
+
+
+
 
 
