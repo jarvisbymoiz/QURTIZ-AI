@@ -4,7 +4,7 @@ import { z } from "zod";
 import { generateObject } from "ai";
 import { getDb } from "@/db";
 import { brandMemory } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { brands } from "@/db/schema";
 import { getModel } from "@/lib/ai/provider";

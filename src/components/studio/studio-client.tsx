@@ -3,7 +3,7 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus, Sparkles, ThumbsDown, Trash2, TrendingUp, Wand2 } from "lucide-react";
+import { Loader2, Plus, Sparkles, ThumbsDown, Trash2, Wand2 } from "lucide-react";
 import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
 import { generateVisualAction } from "@/server/actions/visuals";
 import {
@@ -17,7 +17,6 @@ import {
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
 import { SuggestTrends } from "@/components/studio/suggest-trends";
-import { suggestTrendsAction } from "@/server/actions/research";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -408,7 +407,6 @@ export function StudioClient({
   editable: boolean;
 }) {
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [trendsOpen, setTrendsOpen] = useState(false);
   const filtered = useMemo(
     () => (statusFilter === "all" ? items : items.filter((i) => i.status === statusFilter)),
     [items, statusFilter],

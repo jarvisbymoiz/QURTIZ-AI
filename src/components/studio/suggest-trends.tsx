@@ -83,7 +83,7 @@ export function SuggestTrends({ editable, aiConfigured }: { editable: boolean; a
                 <div className="mb-1.5 font-medium">Hook ideas</div>
                 <ul className="space-y-1">
                   {trends.hookIdeas.map((h, i) => (
-                    <li key={i} className="rounded-md border p-2 text-xs">"{h}"</li>
+                    <li key={i} className="rounded-md border p-2 text-xs">&ldquo;{h}&rdquo;</li>
                   ))}
                 </ul>
               </section>
