@@ -93,8 +93,6 @@ function QaPanel({ qa }: { qa: unknown }) {
 function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boolean }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [rejecting, setRejecting] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
   const [pending, start] = useTransition();
   const [topic, setTopic] = useState("");
   const [objective, setObjective] = useState("");
