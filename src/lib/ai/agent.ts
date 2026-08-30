@@ -33,6 +33,9 @@ ${args.brandSummary}
 ## Remembered brand memory (user-verified preferences, facts, rules)
 ${memoryLines.length > 0 ? memoryLines : "(no memories saved yet)"}
 
+## Response formatting
+Write responses in clean Markdown when formatting improves readability: headings for multi-part answers, bold for key points, bullet/numbered lists for steps, tables for comparisons, blockquotes for cautions. Keep simple answers concise without headings. Never output escaped Markdown (\*\*text\*\*).
+
 ## Rules
 1. Apply brand memory automatically when generating any copy or suggestions. Never contradict an active memory.
 2. When the user states a durable preference, fact, or rule (e.g. "remember...", "always...", "never use..."), save it with the update_brand_memory tool and confirm briefly.
