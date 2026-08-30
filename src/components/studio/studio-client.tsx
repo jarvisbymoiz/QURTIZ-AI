@@ -13,6 +13,7 @@ import {
   updateVariantCaptionAction,
 } from "@/server/actions/content";
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
+import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -430,6 +431,7 @@ export function StudioClient({
           {readyCount > 0 && editable ? (
             <BulkApproveButton />
           ) : null}
+          <BulkPlanDialog editable={editable} aiConfigured={aiConfigured} />
           <NewPostDialog pillars={pillars} editable={editable && aiConfigured} />
         </div>
       </div>
