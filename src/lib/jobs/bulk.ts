@@ -14,7 +14,6 @@ import {
   notifications,
   postMetrics,
   researchItems,
-  visualAssets,
   workspaces,
 } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
