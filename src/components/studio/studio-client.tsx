@@ -538,7 +538,6 @@ function VisualSection({
   const router = useRouter();
   const [pending, start] = useTransition();
   const uploadInputRef = useRef<HTMLInputElement>(null);
-  const [uploadSlide, setUploadSlide] = useState<string>("");
 
   const variant = variants.find((v) => v.format === (format === "carousel" ? "carousel" : format)) ?? variants[0];
   const slides = (variant?.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[];
@@ -667,7 +666,7 @@ function VisualSection({
                 <div className="font-medium">{start}s - Scene {i + 1}</div>
                 {s.text ? <p>VO: {s.text}</p> : null}
                 {s.visualDirection ? <p className="text-muted-foreground">Visual: {s.visualDirection}</p> : null}
-                {s.onScreenText ? <p className="text-muted-foreground">On-screen: "{s.onScreenText}"</p> : null}
+                {s.onScreenText ? <p className="text-muted-foreground">On-screen: &ldquo;{s.onScreenText}&rdquo;</p> : null}
                 {s.transition ? <p className="text-muted-foreground">Transition: {s.transition}</p> : null}
               </div>
             );
