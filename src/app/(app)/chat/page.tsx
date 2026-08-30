@@ -2,6 +2,7 @@
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
+import { MobileThreads } from "@/components/chat/mobile-threads";
 import { PageHeader } from "@/components/layout/page-header";
 
 export const metadata = { title: "AI Chat" };
@@ -19,6 +20,9 @@ export default async function ChatIndexPage() {
         <aside className="hidden h-[calc(100vh-10rem)] lg:block">
           <ThreadList activeThreadId={null} />
         </aside>
+        <div className="mb-3 lg:hidden">
+          <MobileThreads activeThreadId={null} />
+        </div>
         <ChatPanel
           workspaceId={ctx.workspace.id}
           workspaceName={ctx.workspace.name}
