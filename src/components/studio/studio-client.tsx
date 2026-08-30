@@ -563,7 +563,6 @@ function VisualSection({
   function uploadSlideFile(file: File) {
     const fd = new FormData();
     fd.set("itemId", itemId);
-    if (uploadSlide !== "") fd.set("slideIndex", uploadSlide);
     fd.set("file", file);
     start(async () => {
       const r = await uploadVisualUploadAction(fd);
