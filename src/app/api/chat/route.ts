@@ -15,6 +15,7 @@ import { can } from "@/lib/permissions";
 import { cookies } from "next/headers";
 import { and, desc } from "drizzle-orm";
 import { getMembership, getSessionUser } from "@/lib/workspace";
+import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,12 @@ const MAX_RECENT_MESSAGES = 24;
 
 export async function POST(request: NextRequest) {
   const user = await getSessionUser();
+  if (user) {
+    const rl = rateLimit("chat:" + user.id, 30, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json({ error: "RATE_LIMITED", message: "Too many messages. Retry in " + rl.retryAfterSeconds + "s." }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } });
+    }
+  }
   if (!user) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }

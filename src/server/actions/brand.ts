@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brands } from "@/db/schema";
+import { safeHttpUrl } from "@/lib/validation";
 import {
   audienceSchema,
   businessInfoSchema,
@@ -56,7 +57,7 @@ export async function updateBusinessInfoAction(formData: FormData): Promise<Acti
       pricing: emptyToNull(d.pricing),
       offers: emptyToNull(d.offers),
       locations: emptyToNull(d.locations),
-      website: emptyToNull(d.website),
+      website: safeHttpUrl(d.website),
       contact: emptyToNull(d.contact),
       cta: emptyToNull(d.cta),
       targetMarket: emptyToNull(d.targetMarket),

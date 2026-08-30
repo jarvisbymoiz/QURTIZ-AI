@@ -6,6 +6,7 @@ import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
 import { can } from "@/lib/permissions";
 import { getMembership, getSessionUser } from "@/lib/workspace";
+import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,12 @@ function textOf(message: UIMessage): string {
 // body size guard: attachments inflate message payloads
 export async function POST(request: NextRequest) {
   const user = await getSessionUser();
+  if (user) {
+    const rl = rateLimit("persist:" + user.id, 60, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json({ error: "RATE_LIMITED" }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } });
+    }
+  }
   if (!user) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }

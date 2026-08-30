@@ -8,6 +8,7 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { can, type Capability } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -42,6 +43,9 @@ export async function createContentAction(input: {
 }): Promise<ActionResult & { itemId?: string; qaScore?: number }> {
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("content:" + ctx.workspaceId, 10, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Generation limit reached. Try again in a few minutes." };
 
   const parsed = createContentSchema.safeParse(input);
   if (!parsed.success) {

@@ -1,0 +1,38 @@
+{
+  "version": 3,
+  "middleware": {
+    "/": {
+      "files": [
+        "server/edge/chunks/Documents_QURTIZ AI_debf8e76._.js",
+        "server/edge/chunks/turbopack-Documents_QURTIZ AI_edge-wrapper_90d6f190.js",
+        "server/edge/chunks/Documents_QURTIZ AI_ef609e0a._.js",
+        "server/edge/chunks/55592_@opentelemetry_api_build_esm_200f95be._.js",
+        "server/edge/chunks/55592_@supabase_auth-js_dist_module_64062843._.js",
+        "server/edge/chunks/55592_0a7e8b5f._.js",
+        "server/edge/chunks/[root-of-the-server]__2053bc51._.js",
+        "server/edge/chunks/turbopack-Documents_QURTIZ AI_edge-wrapper_6d22a3ee.js"
+      ],
+      "name": "middleware",
+      "page": "/",
+      "matchers": [
+        {
+          "regexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?(?:\\/((?!_next\\/static|_next\\/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*))(\\.json|\\.rsc|\\.segments\\/.+\\.segment\\.rsc)?[\\/#\\?]?$",
+          "originalSource": "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"
+        }
+      ],
+      "wasm": [],
+      "assets": [],
+      "env": {
+        "__NEXT_BUILD_ID": "development",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "iDXDmRUmlCQLEQhpkNWz7LWYa5tmB7kN7D8Ly37W+RQ=",
+        "__NEXT_PREVIEW_MODE_ID": "6fea2943dc97182249f00d0d5c06583d",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "eb9a7d24d2c6ef716945a9d9e86b1b693c927c6dea07f0f4f37b96f6c040d48f",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "c8c425f33db56164710d471c71c970df7a1b6c656e72a07361e3420b9b54fdef"
+      }
+    }
+  },
+  "sortedMiddleware": [
+    "/"
+  ],
+  "functions": {}
+}

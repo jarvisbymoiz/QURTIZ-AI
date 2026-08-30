@@ -10,6 +10,7 @@ import { researchTopics } from "@/lib/ai/research";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { can, type Capability } from "@/lib/permissions";
 import { getSessionUser, getMembership } from "@/lib/workspace";
+import { rateLimit } from "@/lib/security/rate-limit";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -38,6 +39,9 @@ export async function runResearchAction(input: {
 }): Promise<ActionResult & { count?: number; sourced?: boolean; note?: string }> {
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("research:" + ctx.workspaceId, 6, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Research limit reached. Try again in a few minutes." };
 
   const parsed = runSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };

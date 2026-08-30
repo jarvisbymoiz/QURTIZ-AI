@@ -9,6 +9,7 @@ import { contentItems, contentVariants, publishingJobs, jobs, workspaces } from 
 import { can, type Capability } from "@/lib/permissions";
 
 import { scheduleItem } from "@/lib/scheduling/engine";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
@@ -139,7 +140,10 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
-  const parsed = bulkPlanSchema.safeParse({ count: input.count ?? 12, niche: input.niche ?? "" });
+  const rl = rateLimit("bulk:" + ctx.workspaceId, 3, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Too many bulk plans. Try again in a few minutes." };
+
+    const parsed = bulkPlanSchema.safeParse({ count: input.count ?? 12, niche: input.niche ?? "" });
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
 
   await ensureDefaultPillars(ctx.workspaceId);

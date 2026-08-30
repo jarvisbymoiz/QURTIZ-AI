@@ -47,10 +47,12 @@ export function CalendarClient({
   const [pending, start] = useTransition();
   const today = new Date();
   const [monthOffset, setMonthOffset] = useState(0);
+  const [calView, setCalView] = useState<"month" | "week">("month");
+  const [weekOffset, setWeekOffset] = useState(0);
   const [selected, setSelected] = useState<Item | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
-  const view = useMemo(() => {
+  const monthView = useMemo(() => {
     const base = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
     const year = base.getFullYear();
     const month = base.getMonth();
@@ -65,6 +67,11 @@ export function CalendarClient({
   }, [monthOffset]);
 
   // Items scheduled: use scheduledAt rendered in the workspace timezone day
+  const weekDates = useMemo(() => {
+    const s = new Date(today.getFullYear(), today.getMonth(), today.getDate() + weekOffset * 7 - ((today.getDay() + 6) % 7));
+    return Array.from({ length: 7 }, (_, i) => new Date(s.getFullYear(), s.getMonth(), s.getDate() + i));
+  }, [weekOffset]);
+
   const scheduledByDay = useMemo(() => {
     const map = new Map<string, Item[]>();
     for (const item of items) {
@@ -116,25 +123,50 @@ export function CalendarClient({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Button size="icon" variant="ghost" aria-label="Previous month" onClick={() => setMonthOffset((m) => m - 1)}>
+          <div className="mr-1 flex rounded-lg border p-0.5">
+            {(["month", "week"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                aria-pressed={calView === v}
+                onClick={() => setCalView(v)}
+                className={cn(
+                  "rounded-md px-2.5 py-1 text-xs capitalize transition-colors",
+                  calView === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+          <Button size="icon" variant="ghost" aria-label="Previous" onClick={() => calView === "month" ? setMonthOffset((m) => m - 1) : setWeekOffset((w) => w - 1)}>
             <ChevronLeft className="size-4" aria-hidden />
           </Button>
-          <span className="min-w-44 text-center text-sm font-medium">{view.label}</span>
-          <Button size="icon" variant="ghost" aria-label="Next month" onClick={() => setMonthOffset((m) => m + 1)}>
+          <span className="min-w-44 text-center text-sm font-medium">
+            {calView === "month"
+              ? monthView.label
+              : (() => {
+                  const s = new Date(today.getFullYear(), today.getMonth(), today.getDate() + weekOffset * 7 - ((today.getDay() + 6) % 7));
+                  const e = new Date(s.getTime() + 6 * 86400000);
+                  return s.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " + e.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                })()}
+          </span>
+          <Button size="icon" variant="ghost" aria-label="Next" onClick={() => calView === "month" ? setMonthOffset((m) => m + 1) : setWeekOffset((w) => w + 1)}>
             <ChevronRight className="size-4" aria-hidden />
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setMonthOffset(0)}>Today</Button>
+          <Button size="sm" variant="ghost" onClick={() => { setMonthOffset(0); setWeekOffset(0); }}>Today</Button>
         </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
+        {calView === "month" ? (
         <Card>
           <CardContent className="p-2">
             <div className="grid grid-cols-7 gap-1 px-1 pb-1 pt-2 text-center text-xs font-medium text-muted-foreground">
               {DOW.map((d) => <div key={d}>{d}</div>)}
             </div>
             <div className="grid grid-cols-7 gap-1">
-              {view.cells.map((date, i) => {
+              {(monthView.cells as (Date | null)[]).map((date: Date | null, i: number) => {
                 if (!date) return <div key={`e-${i}`} className="min-h-24 rounded-lg bg-muted/30" />;
                 const iso = dayIso(date);
                 const dayItems = scheduledByDay.get(iso) ?? [];
@@ -189,6 +221,69 @@ export function CalendarClient({
             </div>
           </CardContent>
         </Card>
+        ) : (
+        <Card>
+          <CardContent className="p-2">
+            <div className="grid grid-cols-7 gap-1 px-1 pb-1 pt-2 text-center text-xs font-medium text-muted-foreground">
+              {DOW.map((d) => <div key={d}>{d}</div>)}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {weekDates.map((date: Date, i: number) => {
+                if (!date) return <div key={`e-${i}`} className="min-h-24 rounded-lg bg-muted/30" />;
+                const iso = dayIso(date);
+                const dayItems = scheduledByDay.get(iso) ?? [];
+                const isToday = iso === dayIso(today);
+                return (
+                  <div
+                    key={iso}
+                    onDragOver={(e) => { e.preventDefault(); setDragOver(iso); }}
+                    onDragLeave={() => setDragOver((d) => (d === iso ? null : d))}
+                    onDrop={(e) => handleDrop(e, iso)}
+                    className={cn(
+                      "min-h-24 rounded-lg border p-1.5 transition-colors",
+                      isToday && "border-primary/50",
+                      dragOver === iso && "border-primary bg-primary/5",
+                      !editable && "opacity-90",
+                    )}
+                  >
+                    <div className={cn("mb-1 text-xs", isToday ? "font-bold text-primary" : "text-muted-foreground")}>
+                      {date.getDate()}
+                    </div>
+                    <div className="space-y-1">
+                      {dayItems.slice(0, 3).map((item) => {
+                        const failed = failedJobsByItem.get(item.id);
+                        return (
+                          <div
+                            key={item.id}
+                            draggable={editable}
+                            onDragStart={(e) => e.dataTransfer.setData("text/qurtiz-item", item.id)}
+                            onClick={() => setSelected(item)}
+                            className="cursor-pointer rounded border bg-background px-1.5 py-1 text-[11px] leading-tight hover:bg-accent"
+                            title={item.topic}
+                          >
+                            <div className="flex items-center gap-1">
+                              <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[item.status] ?? "bg-muted-foreground")} />
+                              <span className="truncate">{item.topic}</span>
+                            </div>
+                            {failed && failed.length > 0 ? (
+                              <div className="mt-0.5 flex items-center gap-1 text-destructive">
+                                <AlertTriangle className="size-3" aria-hidden /> publish failed
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                      {dayItems.length > 3 ? (
+                        <div className="px-1 text-[10px] text-muted-foreground">+{dayItems.length - 3} more</div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+        )}
 
         {/* Unscheduled queue */}
         <Card className="h-fit">

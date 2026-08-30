@@ -1,0 +1,12 @@
+{
+  "sorted_middleware": [],
+  "middleware": {},
+  "instrumentation": {
+    "files": [
+      "server/edge/chunks/Documents_QURTIZ AI_debf8e76._.js",
+      "server/edge/chunks/turbopack-Documents_QURTIZ AI_edge-wrapper_90d6f190.js"
+    ],
+    "name": "instrumentation"
+  },
+  "functions": {}
+}

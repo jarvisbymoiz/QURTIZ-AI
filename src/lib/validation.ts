@@ -115,3 +115,34 @@ export const updateMemorySchema = z.object({
   active: z.boolean().optional(),
 });
 export type UpdateMemoryInput = z.infer<typeof updateMemorySchema>;
+
+/**
+ * SSRF-safe URL validation for user-supplied links: only http(s) with a
+ * resolvable-looking public host. Blocks private ranges and credentials.
+ */
+export function safeHttpUrl(value: string | null | undefined): string | null {
+  const v = (value ?? "").trim();
+  if (!v) return null;
+  let url: URL;
+  try {
+    url = new URL(v.startsWith("http") ? v : "https://" + v);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.username || url.password) return null;
+  const host = url.hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    /^(10|127)\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    host === "0.0.0.0" ||
+    host === "[::1]"
+  ) return null;
+  if (!host.includes(".")) return null;
+  return url.toString();
+}

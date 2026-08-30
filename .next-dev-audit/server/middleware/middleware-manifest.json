@@ -1,0 +1,34 @@
+{
+  "sorted_middleware": [],
+  "middleware": {
+    "/": {
+      "files": [
+        "server/edge/chunks/Documents_QURTIZ AI_ef609e0a._.js",
+        "server/edge/chunks/55592_@opentelemetry_api_build_esm_200f95be._.js",
+        "server/edge/chunks/55592_@supabase_auth-js_dist_module_64062843._.js",
+        "server/edge/chunks/55592_0a7e8b5f._.js",
+        "server/edge/chunks/[root-of-the-server]__2053bc51._.js",
+        "server/edge/chunks/turbopack-Documents_QURTIZ AI_edge-wrapper_4f92531b.js"
+      ],
+      "name": "middleware",
+      "page": "/",
+      "matchers": [
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*){(\\.json|\\.rsc|\\.segments/.+\\.segment\\.rsc)}?",
+          "originalSource": "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"
+        }
+      ],
+      "wasm": [],
+      "assets": [],
+      "env": {
+        "__NEXT_BUILD_ID": "development",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "l24MdgFyii565FXgt3e5C1EJ8MAxeUTcRabceDBQ054=",
+        "__NEXT_PREVIEW_MODE_ID": "bc74707b66749575d5f2666f0f07e057",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "b154d3283e839b5fd1046454a307c2c35f0a2a414279dc7f0fee41b30ff927ea",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "1e949164156198ff5f5a8237595dcfc45cccc80c53045570682b573468cbe8e8"
+      }
+    }
+  },
+  "instrumentation": null,
+  "functions": {}
+}

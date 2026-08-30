@@ -1,0 +1,4 @@
+[{"name":"hot-reloader","duration":87,"timestamp":43282391342,"id":3,"tags":{"version":"15.5.24"},"startTime":1788083402615,"traceId":"4da71f1ce155c544"},{"name":"compile-path","duration":2822239,"timestamp":43283235355,"id":4,"tags":{"trigger":"instrumentation Node.js"},"startTime":1788083403459,"traceId":"4da71f1ce155c544"}]
+[{"name":"compile-path","duration":73058,"timestamp":43286058391,"id":5,"tags":{"trigger":"instrumentation Edge"},"startTime":1788083406282,"traceId":"4da71f1ce155c544"}]
+[{"name":"compile-path","duration":1265743,"timestamp":43286289463,"id":6,"tags":{"trigger":"middleware"},"startTime":1788083406513,"traceId":"4da71f1ce155c544"}]
+[{"name":"next-dev","duration":2182017,"timestamp":43847827435,"id":1,"tags":{},"startTime":1788083968057,"traceId":"0ed2315a69aeab25"}]

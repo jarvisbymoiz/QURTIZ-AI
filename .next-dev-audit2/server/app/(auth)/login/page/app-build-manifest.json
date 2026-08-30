@@ -1,0 +1,29 @@
+{
+  "pages": {
+    "/(auth)/login/page": [
+      "static/chunks/55592_next_dist_86cfd11e._.js",
+      "static/chunks/Documents_QURTIZ AI_src_app_favicon_ico_mjs_35b4ca62._.js",
+      "static/chunks/[root-of-the-server]__6495fa36._.css",
+      "static/chunks/55592_11a0999a._.js",
+      "static/chunks/Documents_QURTIZ AI_src_9e3bcd48._.js",
+      "static/chunks/Documents_QURTIZ AI_src_app_layout_tsx_3a639fd4._.js",
+      "static/chunks/55592_next_dist_client_components_builtin_global-error_7075bd7f.js",
+      "static/chunks/55592_next_dist_84abdbb7._.js",
+      "static/chunks/Documents_QURTIZ AI_src_app_(auth)_layout_tsx_7075bd7f._.js",
+      "static/chunks/55592_@supabase_auth-js_dist_module_e2d4115a._.js",
+      "static/chunks/55592_@base-ui_react_7eba3900._.js",
+      "static/chunks/55592_c353f228._.js",
+      "static/chunks/Documents_QURTIZ AI_src_7be2b92b._.js",
+      "static/chunks/Documents_QURTIZ AI_src_app_(auth)_login_page_tsx_e7f1d720._.js",
+      "static/chunks/[turbopack]_browser_dev_hmr-client_hmr-client_ts_9900a13d._.js",
+      "static/chunks/55592_next_dist_compiled_react-dom_30245b54._.js",
+      "static/chunks/55592_next_dist_compiled_next-devtools_index_55814941.js",
+      "static/chunks/55592_next_dist_compiled_1486f2d0._.js",
+      "static/chunks/55592_next_dist_client_35cedde2._.js",
+      "static/chunks/55592_next_dist_ff409894._.js",
+      "static/chunks/55592_@swc_helpers_cjs_49848b07._.js",
+      "static/chunks/Documents_QURTIZ AI_a0ff3932._.js",
+      "static/chunks/turbopack-Documents_QURTIZ AI_b1963649._.js"
+    ]
+  }
+}
