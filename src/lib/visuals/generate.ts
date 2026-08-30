@@ -2,7 +2,7 @@
 
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandAssets, brands, contentItems, visualAssets } from "@/db/schema";
+import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { generateImage } from "@/lib/ai/image";
 import { getModelId } from "@/lib/ai/provider";
 import { renderTemplateVisual } from "@/lib/visuals/template";
@@ -52,6 +52,7 @@ export async function generateVisual(args: {
   userId: string;
   contentItemId: string;
   mode: VisualMode;
+  slideIndex?: number;
 }): Promise<VisualGenResult> {
   const db = getDb();
   const [item] = await db
@@ -60,6 +61,11 @@ export async function generateVisual(args: {
     .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
   if (!item) return { ok: false, reason: "not_found", message: "Content item not found." };
 
+  const [variant] = await db
+    .select()
+    .from(contentVariants)
+    .where(eq(contentVariants.contentItemId, args.contentItemId))
+    .limit(1);
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, args.workspaceId));
   const identity = (brand?.visualIdentity ?? {}) as Record<string, string | undefined>;
 
@@ -96,7 +102,7 @@ export async function generateVisual(args: {
         .join(" ");
 
       const result = await generateImage({
-        prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
+        prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${variant?.slides && Array.isArray(variant.slides) && variant.slides[args.slideIndex ?? -1]?.visualPrompt ? variant.slides[args.slideIndex ?? -1].visualPrompt : item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
         references: refs,
       });
       if (!result.ok) {
@@ -146,6 +152,13 @@ export async function generateVisual(args: {
         meta: { model: usedModel },
       })
       .returning();
+
+    // Visual attached: content moves to Approval/Review if still a draft.
+    const [freshItem] = await db.select({ status: contentItems.status }).from(contentItems).where(eq(contentItems.id, args.contentItemId));
+    if (freshItem?.status === "draft") {
+      await db.update(contentItems).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentItems.id, args.contentItemId));
+      await db.update(contentVariants).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, args.contentItemId));
+    }
 
     await db
       .update(agentRuns)

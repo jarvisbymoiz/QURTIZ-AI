@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { brandAssets } from "@/db/schema";
+import { brandAssets, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
 import { generateVisual, type VisualMode } from "@/lib/visuals/generate";
 import { getSessionUser, getMembership } from "@/lib/workspace";
@@ -96,6 +96,7 @@ export async function deleteBrandAssetAction(assetId: string): Promise<ActionRes
 export async function generateVisualAction(
   contentItemId: string,
   mode: VisualMode,
+  slideIndex?: number,
 ): Promise<ActionResult & { visualId?: string; model?: string }> {
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
@@ -106,6 +107,7 @@ export async function generateVisualAction(
       userId: ctx.userId,
       contentItemId,
       mode,
+      slideIndex,
     });
     if (!result.ok) return { ok: false, error: result.message };
     revalidatePath("/content-studio");
@@ -131,3 +133,65 @@ export async function listAssetSignedUrls(paths: string[]): Promise<Record<strin
   return out;
 }
 
+
+
+/**
+ * Manual visual upload: the user attaches their own image for a content item
+ * (or a specific carousel slide). Marks the item Ready for Review if it was
+ * still a draft, per the approval-first workflow.
+ */
+export async function uploadVisualUploadAction(formData: FormData): Promise<ActionResult> {
+  const ctx = await activeContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const itemId = String(formData.get("itemId") ?? "");
+  const slideIndexRaw = formData.get("slideIndex");
+  const slideIndex = slideIndexRaw === null || slideIndexRaw === "" ? null : Number(slideIndexRaw);
+  const file = formData.get("file");
+
+  if (!itemId) return { ok: false, error: "Missing content item." };
+  if (!(file instanceof File) || file.size === 0) return { ok: false, error: "Choose an image file." };
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    return { ok: false, error: "Only PNG, JPEG or WebP images are allowed." };
+  }
+  if (file.size > 9 * 1024 * 1024) return { ok: false, error: "Image must be 9MB or smaller." };
+
+  const { createClient } = await import("@/lib/supabase/server");
+  const supabase = await createClient();
+  const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
+  const storagePath = ctx.workspaceId + "/visuals/" + itemId + "-upload-" + Date.now() + "." + ext;
+  const { error: uploadError } = await supabase.storage
+    .from("brand-assets")
+    .upload(storagePath, file, { contentType: file.type, upsert: false });
+  if (uploadError) return { ok: false, error: "Upload failed: " + uploadError.message };
+
+  const db = getDb();
+  await db.insert(visualAssets).values({
+    workspaceId: ctx.workspaceId,
+    contentItemId: itemId,
+    kind: "upload",
+    slideIndex: slideIndex === null || Number.isNaN(slideIndex) ? null : slideIndex,
+    storagePath,
+    mimeType: file.type,
+    meta: { source: "manual-upload" },
+  });
+
+  // Approval transition: draft -> ready_for_review once a visual exists.
+  const [item] = await db
+    .select({ status: contentItems.status })
+    .from(contentItems)
+    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (item?.status === "draft") {
+    await db
+      .update(contentItems)
+      .set({ status: "ready_for_review", updatedAt: new Date() })
+      .where(eq(contentItems.id, itemId));
+    await db
+      .update(contentVariants)
+      .set({ status: "ready_for_review", updatedAt: new Date() })
+      .where(eq(contentVariants.contentItemId, itemId));
+  }
+
+  revalidatePath("/content-studio");
+  return { ok: true };
+}

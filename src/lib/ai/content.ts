@@ -12,6 +12,7 @@ export const generatedContentSchema = z.object({
   hook: z.string().describe("Scroll-stopping opening line"),
   mainCopy: z.string().describe("Core message body shared across platforms"),
   cta: z.string().describe("Call to action, consistent with brand rules"),
+  firstComment: z.string().describe("A first comment the brand should post under its own content: adds hashtags/extra context/CTA link. Keep it natural, 1-2 sentences."),
   hashtags: z.array(z.string()).max(15).describe("Hashtags without the # symbol"),
   keywords: z.array(z.string()).max(10).describe("SEO/keyword terms covered"),
   visualConcept: z.string().describe("Description of the visual to create"),
@@ -28,12 +29,30 @@ export const generatedContentSchema = z.object({
         .object({
           hook: z.string().optional(),
           scenes: z
-            .array(z.object({ text: z.string(), onScreenText: z.string().optional(), durationSeconds: z.number().optional() }))
+            .array(z.object({
+              text: z.string().optional().describe("Voiceover/dialogue for the scene"),
+              visualDirection: z.string().optional().describe("What is shown on screen"),
+              onScreenText: z.string().optional(),
+              transition: z.string().optional().describe("Transition into the next scene"),
+              durationSeconds: z.number().optional(),
+            }))
             .max(10)
             .optional(),
           outro: z.string().optional(),
+          totalDuration: z.union([z.literal(10), z.literal(20), z.literal(30), z.literal(60)]).optional(),
         })
-        .describe("For reel format: scene structure. Empty object otherwise."),
+        .describe("For reel format: complete scene-by-scene script with voiceover, visual direction, on-screen text, transitions and timing. Empty object otherwise."),
+      slides: z
+        .array(
+          z.object({
+            index: z.number().int().min(1),
+            headline: z.string().max(120),
+            visualPrompt: z.string().max(400),
+          }),
+        )
+        .max(10)
+        .optional()
+        .describe("For carousel format: per-slide visual prompts. Omit otherwise."),
     }),
   ).min(1),
 });
@@ -113,7 +132,10 @@ ${memoryLines.length > 0 ? memoryLines : "(none)"}
 3. Adapt per platform — never duplicate the same caption: Facebook favors conversation and slightly longer copy; Instagram favors strong hooks, concise captions, and save-worthy structure.
 4. For reel formats, produce a scene script (hook, 3-6 scenes with on-screen text, outro).
 5. Never invent statistics, testimonials, or product claims that are not in the Brand Brain.
-6. Hashtags: no # symbol in the strings.`;
+6. Hashtags: no # symbol in the strings.
+7. Always produce a firstComment (useful addition, not a duplicate of the caption).
+8. Carousel variants: provide slides (3-8) each with a distinct visualPrompt describing that slide's image.
+9. Reel variants: produce a complete timed script — hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.`;
 
   const prompt = `Create one social media post.
 Topic: ${ctx.input.topic}
@@ -168,6 +190,7 @@ Produce one variant per target platform.`;
       mainCopy: d.mainCopy,
       caption: d.variants[0]?.caption ?? d.mainCopy,
       cta: d.cta,
+      firstComment: d.firstComment,
       hashtags: d.hashtags,
       keywords: d.keywords,
       visualConcept: d.visualConcept,
