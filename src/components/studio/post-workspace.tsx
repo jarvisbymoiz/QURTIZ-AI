@@ -130,6 +130,7 @@ export function PostWorkspace({
     const d = new Date(Date.now() + 86400000);
     return d.toISOString().slice(0, 10);
   });
+  const [scheduleTime, setScheduleTime] = useState("18:30");
   const [masterPrompt, setMasterPrompt] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -195,9 +196,9 @@ export function PostWorkspace({
 
   function schedule() {
     start(async () => {
-      const r = await scheduleContentAction({ itemId: item.id, dateIso: scheduleDate, timeStr: "18:30" });
+      const r = await scheduleContentAction({ itemId: item.id, dateIso: scheduleDate, timeStr: scheduleTime });
       if (r.ok) {
-        toast.success("Scheduled for " + scheduleDate + " 18:30");
+        toast.success("Scheduled for " + scheduleDate + " " + scheduleTime);
         router.refresh();
       } else toast.error(r.error);
     });
@@ -442,8 +443,10 @@ export function PostWorkspace({
         ) : null}
         {scheduling ? (
           <div className="space-y-2 rounded-lg border p-3">
-            <Label htmlFor={"sd-" + item.id}>Schedule date (18:30, workspace time)</Label>
+            <Label htmlFor={"sd-" + item.id}>Schedule date (workspace time)</Label>
             <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setScheduleDate(e.target.value)} />
+            <Label htmlFor={"st-" + item.id} className="mt-2">Schedule time</Label>
+            <Input id={"st-" + item.id} type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} />
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setScheduling(false)}>Cancel</Button>
               <Button size="sm" disabled={pending} onClick={schedule}>
