@@ -46,6 +46,7 @@ function StatusBadge({ status }: { status: string }) {
 function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[]; editable: boolean; aiConfigured: boolean }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  void pillars;
   const [pending, start] = useTransition();
   const [topic, setTopic] = useState("");
   const [objective, setObjective] = useState("");
@@ -243,8 +244,6 @@ export function StudioClient({
   aiConfigured: boolean;
   editable: boolean;
 }) {
-  const router = useRouter();
-  const [pending, start] = useTransition();
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const byItem = useMemo(() => {
