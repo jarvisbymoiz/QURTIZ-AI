@@ -226,10 +226,10 @@ export function PostWorkspace({
   }
 
   return (
-    <div className="flex h-full flex-col gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-3">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className={cn("font-medium", STATUS_STYLE[item.status])}>
             {item.status.replaceAll("_", " ")}
           </Badge>
@@ -241,10 +241,10 @@ export function PostWorkspace({
         <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {/* Two columns */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto lg:grid-cols-2 lg:overflow-hidden">
-        {/* LEFT — content */}
-        <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+      {/* Body — wide 3-zone desktop layout (content | creative | preview) */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(340px,0.95fr)] xl:grid-rows-1">
+        {/* LEFT — post content */}
+        <div className="min-h-0 space-y-3 overflow-y-auto pr-1 lg:border-r lg:border-border/50 lg:pr-3">
           <div>
             <div className="text-base font-semibold leading-snug">{item.topic}</div>
             {item.hook ? <p className="mt-1 text-sm text-muted-foreground">Hook: {item.hook}</p> : null}
@@ -301,12 +301,11 @@ export function PostWorkspace({
 
           <Field label="Hashtags">
             <div className="rounded-md border p-2.5">
-              <div className="flex flex-wrap gap-1 pr-6">
+              <div className="flex flex-wrap gap-1">
                 {(variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => (
                   <span key={h} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">#{h}</span>
                 ))}
               </div>
-              <div className="absolute" />
               <div className="mt-1.5">
                 <CopyIcon text={hashtagsText} label="hashtags" />
               </div>
@@ -321,8 +320,8 @@ export function PostWorkspace({
           </Field>
         </div>
 
-        {/* RIGHT — creative / media */}
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto pl-1">
+        {/* CENTER — creative / media */}
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto lg:pr-1 xl:border-r xl:border-border/50 xl:pr-3">
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
               <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
@@ -352,7 +351,7 @@ export function PostWorkspace({
                     {s.visualPrompt ? <p className="mt-1 text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
                     {url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-44 rounded-md border object-contain" />
+                      <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-56 rounded-md border object-contain" />
                     ) : null}
                   </div>
                 );
@@ -368,10 +367,10 @@ export function PostWorkspace({
               </div>
               {script.hook ? <p className="text-xs"><span className="font-medium">0-5s Hook:</span> {script.hook}</p> : null}
               {(script.scenes ?? []).map((s, i) => {
-                const start = 5 + i * Math.round(((script.totalDuration ?? 30) - 10) / Math.max((script.scenes ?? []).length, 1));
+                const sceneStart = 5 + i * Math.round(((script.totalDuration ?? 30) - 10) / Math.max((script.scenes ?? []).length, 1));
                 return (
                   <div key={i} className="rounded-md bg-muted/40 p-2 text-xs">
-                    <div className="font-medium">{start}s - Scene {i + 1}</div>
+                    <div className="font-medium">{sceneStart}s - Scene {i + 1}</div>
                     {s.voiceover || s.text ? <p>VO: {s.voiceover || s.text}</p> : null}
                     {s.visualDirection ? <p className="text-muted-foreground">Visual: {s.visualDirection}</p> : null}
                     {s.onScreenText ? <p className="text-muted-foreground">On-screen: &ldquo;{s.onScreenText}&rdquo;</p> : null}
@@ -409,15 +408,17 @@ export function PostWorkspace({
               </>
             ) : null}
           </div>
+        </div>
 
-          {/* Live preview */}
+        {/* RIGHT — live preview */}
+        <div className="min-h-0 space-y-3 overflow-y-auto lg:col-span-2 xl:col-span-1 xl:pl-1">
           <div className="rounded-lg border p-3">
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Live preview</div>
             {previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={previewUrl} alt="Preview" className="mx-auto max-h-72 rounded-lg border object-contain" />
+              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[440px] rounded-lg border object-contain" />
             ) : (
-              <div className="flex h-40 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
+              <div className="flex h-56 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
                 No visual yet — generate, or upload your own.
               </div>
             )}
@@ -428,101 +429,102 @@ export function PostWorkspace({
                   const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
                   return url ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img key={s.index} src={url} alt={"Slide " + s.index} className="h-24 rounded-md border object-contain" />
+                    <img key={s.index} src={url} alt={"Slide " + s.index} className="h-28 rounded-md border object-contain" />
                   ) : (
-                    <div key={s.index} className="flex h-24 w-20 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">S{s.index}</div>
+                    <div key={s.index} className="flex h-28 w-24 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">S{s.index}</div>
                   );
                 })}
               </div>
             ) : null}
             <p className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">{captionText}{hashtagsText ? "\n\n" + hashtagsText : ""}</p>
           </div>
+        </div>
+      </div>
 
-          {/* Approval + schedule */}
-          <div className="space-y-2">
-            {rejecting ? (
-              <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
-                <Label htmlFor={"rr-" + item.id}>Rejection reason (optional)</Label>
-                <Input id={"rr-" + item.id} value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={300} placeholder="e.g. too salesy" />
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="ghost" onClick={() => setRejecting(false)}>Cancel</Button>
-                  <Button size="sm" variant="destructive" disabled={pending} onClick={reject}>Reject</Button>
-                </div>
-              </div>
-            ) : null}
-            {scheduling ? (
-              <div className="space-y-2 rounded-lg border p-3">
-                <Label htmlFor={"sd-" + item.id}>Schedule date (18:30, workspace time)</Label>
-                <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setScheduleDate(e.target.value)} />
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="ghost" onClick={() => setScheduling(false)}>Cancel</Button>
-                  <Button size="sm" disabled={pending} onClick={schedule}>
-                    <CalendarClock className="size-3.5" aria-hidden /> Schedule
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            <div className="flex flex-wrap justify-end gap-2">
-              {item.status === "approved" || item.status === "ready_for_review" || item.status === "rejected" ? (
-                <Button size="sm" variant="outline" disabled={pending || !editable} onClick={schedule}>
-                  <CalendarClock className="size-3.5" aria-hidden /> Schedule
-                </Button>
-              ) : null}
-              {item.status !== "approved" ? (
-                <Button size="sm" disabled={pending || !editable} onClick={approve}>
-                  <CheckCheck className="size-3.5" aria-hidden /> Approve
-                </Button>
-              ) : (
-                <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => start(async () => { const r = await setContentStatusAction(item.id, "ready_for_review"); if (r.ok) { toast.success("Back to review"); router.refresh(); } else toast.error(r.error); })}>
-                  Revoke approval
-                </Button>
-              )}
-              <Button size="sm" variant="ghost" disabled={pending || !editable} onClick={() => { setRejecting(true); setRejectReason(""); }}>
-                <ThumbsDown className="size-3.5" aria-hidden /> Reject
-              </Button>
-              {editable ? (
-                <Button size="sm" variant="ghost" disabled={pending} onClick={regenerate}>
-                  <RefreshCw className="size-3.5" aria-hidden /> Regenerate
-                </Button>
-              ) : null}
-              {editable ? (
-                <Button size="icon" variant="ghost" aria-label="Delete post" disabled={pending}
-                  onClick={() => start(async () => {
-                    const r = await setContentStatusAction(item.id, "archived");
-                    if (r.ok) { toast.success("Archived"); onClose(); router.refresh(); } else toast.error(r.error);
-                  })}>
-                  <Trash2 className="size-3.5 text-destructive" aria-hidden />
-                </Button>
-              ) : null}
+      {/* Footer — always visible: status panels + action bar (nothing hidden at the bottom) */}
+      <div className="space-y-2 border-t pt-2">
+        {rejecting ? (
+          <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
+            <Label htmlFor={"rr-" + item.id}>Rejection reason (optional)</Label>
+            <Input id={"rr-" + item.id} value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={300} placeholder="e.g. too salesy" />
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setRejecting(false)}>Cancel</Button>
+              <Button size="sm" variant="destructive" disabled={pending} onClick={reject}>Reject</Button>
             </div>
           </div>
-
-          {item.status === "scheduled" ? (
-            <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2.5 text-xs text-indigo-300">
-              <CalendarClock className="size-3.5" aria-hidden />
-              Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} — the background worker publishes automatically.
+        ) : null}
+        {scheduling ? (
+          <div className="space-y-2 rounded-lg border p-3">
+            <Label htmlFor={"sd-" + item.id}>Schedule date (18:30, workspace time)</Label>
+            <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setScheduleDate(e.target.value)} />
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setScheduling(false)}>Cancel</Button>
+              <Button size="sm" disabled={pending} onClick={schedule}>
+                <CalendarClock className="size-3.5" aria-hidden /> Schedule
+              </Button>
             </div>
+          </div>
+        ) : null}
+        {item.status === "scheduled" ? (
+          <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2.5 text-xs text-indigo-300">
+            <CalendarClock className="size-3.5" aria-hidden />
+            Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} — the background worker publishes automatically.
+          </div>
+        ) : null}
+        {item.status === "failed" ? (
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
+            <AlertTriangle className="size-3.5" aria-hidden /> Generation failed — use Regenerate.
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {item.status === "approved" || item.status === "ready_for_review" || item.status === "rejected" ? (
+            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={schedule}>
+              <CalendarClock className="size-3.5" aria-hidden /> Schedule
+            </Button>
           ) : null}
-          <Dialog open={masterPrompt !== null} onOpenChange={(o) => !o && setMasterPrompt(null)}>
-            <DialogContent className="max-h-[85dvh] max-w-2xl overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>Master AI prompt (external tools)</DialogTitle>
-              </DialogHeader>
-              <div className="flex justify-end">
-                <Button size="sm" variant="outline" onClick={async () => { if (masterPrompt) { await navigator.clipboard.writeText(masterPrompt); toast.success("Master prompt copied"); } }}>
-                  Copy prompt
-                </Button>
-              </div>
-              <pre className="whitespace-pre-wrap rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{masterPrompt}</pre>
-            </DialogContent>
-          </Dialog>
-                    {item.status === "failed" ? (
-            <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
-              <AlertTriangle className="size-3.5" aria-hidden /> Generation failed — use Regenerate.
-            </div>
+          {item.status !== "approved" ? (
+            <Button size="sm" disabled={pending || !editable} onClick={approve}>
+              <CheckCheck className="size-3.5" aria-hidden /> Approve
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => start(async () => { const r = await setContentStatusAction(item.id, "ready_for_review"); if (r.ok) { toast.success("Back to review"); router.refresh(); } else toast.error(r.error); })}>
+              Revoke approval
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" disabled={pending || !editable} onClick={() => { setRejecting(true); setRejectReason(""); }}>
+            <ThumbsDown className="size-3.5" aria-hidden /> Reject
+          </Button>
+          {editable ? (
+            <Button size="sm" variant="ghost" disabled={pending} onClick={regenerate}>
+              <RefreshCw className="size-3.5" aria-hidden /> Regenerate
+            </Button>
+          ) : null}
+          {editable ? (
+            <Button size="icon" variant="ghost" aria-label="Delete post" disabled={pending}
+              onClick={() => start(async () => {
+                const r = await setContentStatusAction(item.id, "archived");
+                if (r.ok) { toast.success("Archived"); onClose(); router.refresh(); } else toast.error(r.error);
+              })}>
+              <Trash2 className="size-3.5 text-destructive" aria-hidden />
+            </Button>
           ) : null}
         </div>
       </div>
+
+      {/* Master prompt dialog */}
+      <Dialog open={masterPrompt !== null} onOpenChange={(o) => !o && setMasterPrompt(null)}>
+        <DialogContent className="max-h-[85dvh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Master AI prompt (external tools)</DialogTitle>
+          </DialogHeader>
+          <div className="flex justify-end">
+            <Button size="sm" variant="outline" onClick={async () => { if (masterPrompt) { await navigator.clipboard.writeText(masterPrompt); toast.success("Master prompt copied"); } }}>
+              Copy prompt
+            </Button>
+          </div>
+          <pre className="whitespace-pre-wrap rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{masterPrompt}</pre>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
