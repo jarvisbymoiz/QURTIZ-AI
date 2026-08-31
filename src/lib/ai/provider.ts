@@ -23,6 +23,36 @@ export function isAiConfigured(): boolean {
 }
 
 /**
+ * Retry a generative AI call when the provider returns 429
+ * (rate limit / quota exhausted - e.g. Gemini free tier: 20 req/min).
+ * Honors the Retry-After header when present, otherwise backs off.
+ * Non-429 errors propagate immediately. Re-throws after attempts.
+ */
+export async function withRateLimitRetry<T>(
+  fn: () => Promise<T> | T,
+  attempts = 3,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const e = err as { statusCode?: number; headers?: Record<string, unknown>; message?: string };
+      const is429 = e?.statusCode === 429 || (e?.message ?? "").includes("RESOURCE_EXHAUSTED");
+      if (!is429 || i === attempts - 1) throw err;
+      let waitMs = 10_000;
+      const ra = (e?.headers as Record<string, unknown>)?.["retry-after"];
+      const raNum = typeof ra === "number" ? ra : ra != null ? Number(String(ra)) : NaN;
+      if (!Number.isNaN(raNum) && raNum > 0) waitMs = Math.min(raNum * 1000, 60_000);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr;
+}
+
+
+/**
  * Resolve the configured model from the provider registry.
  * Returns null when no API key is configured — callers must render an
  * honest "Configuration Required" state instead of faking a response.

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
-import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
+import { estimateCostFromUsage, getModel, getModelId, withRateLimitRetry } from "@/lib/ai/provider";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
@@ -158,12 +158,14 @@ ${ctx.input.visualStyleHint ? `Visual style hint: ${ctx.input.visualStyleHint}` 
 ${ctx.input.preferredFormat ? `Preferred format: ${ctx.input.preferredFormat}` : "Choose the best format per platform and explain nothing — just produce it."}
 Produce one variant per target platform.`;
 
-  const result = await generateObject({
-    model,
-    schema: generatedContentSchema,
-    system,
-    prompt,
-  });
+  const result = await withRateLimitRetry(() =>
+    generateObject({
+      model,
+      schema: generatedContentSchema,
+      system,
+      prompt,
+    }),
+  );
 
   const usage = result.usage;
   try {

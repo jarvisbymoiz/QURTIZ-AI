@@ -10,7 +10,7 @@ import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
-import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
+import { estimateCostFromUsage, getModel, getModelId, withRateLimitRetry } from "@/lib/ai/provider";
 import { can } from "@/lib/permissions";
 import { cookies } from "next/headers";
 import { and, desc } from "drizzle-orm";
@@ -101,7 +101,8 @@ export async function POST(request: NextRequest) {
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);
 
   try {
-    const result = streamText({
+const result = await withRateLimitRetry(() =>
+    streamText({
       model,
       system,
       messages: convertToModelMessages(recent),
@@ -130,7 +131,8 @@ export async function POST(request: NextRequest) {
           // Never let run bookkeeping break the response.
         }
       },
-    });
+    })
+  );
 
     return result.toUIMessageStreamResponse();
   } catch (error) {

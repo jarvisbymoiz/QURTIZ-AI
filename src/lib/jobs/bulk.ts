@@ -19,7 +19,7 @@ import {
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
-import { getModel } from "@/lib/ai/provider";
+import { getModel, withRateLimitRetry } from "@/lib/ai/provider";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { planContentDays } from "@/lib/scheduling/time";
 import { renderTemplateVisual } from "@/lib/visuals/template";
@@ -164,9 +164,10 @@ export async function runBulkPlan(jobId: string): Promise<void> {
     if (!model) throw new Error("AI is not configured (GEMINI_API_KEY missing).");
 
     const pillarNames = pillars.map((p) => p.name);
-    const planRes = await generateObject({
-      model,
-      schema: planSchema,
+    const planRes = await withRateLimitRetry(() =>
+      generateObject({
+        model,
+        schema: planSchema,
       prompt: `${GLOBAL_AI_INSTRUCTION}
 
 You are the content strategist for "${brand?.businessName ?? "the brand"}".
@@ -184,8 +185,9 @@ Create a plan for exactly ${count} DISTINCT social media posts. Rules:
 - Every topic must be specific and different from the already-covered list.
 - Respect all brand rules and memory.
 Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}`,
-      maxOutputTokens: 3072,
-    });
+        maxOutputTokens: 3072,
+      }),
+    );
 
     const plan: PlanItem[] = planRes.object.items.slice(0, count);
 
@@ -279,6 +281,13 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       }
 
       await db.update(jobs).set({ progress: i + 1, updatedAt: new Date() }).where(eq(jobs.id, jobId));
+
+      // Pace API calls: free-tier Gemini caps at ~20 requests/minute.
+      // QURTIZ_BULK_INTERVAL_MS overrides (0 = no delay, paid tier).
+      if (i < plan.length - 1) {
+        const interval = Number(process.env.QURTIZ_BULK_INTERVAL_MS ?? 4000);
+        if (interval > 0) await new Promise((r) => setTimeout(r, interval));
+      }
     }
 
     // ── 7. Finish ───────────────────────────────────────────────────
