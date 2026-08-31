@@ -8,6 +8,7 @@ export type MasterPromptInput = {
   title: string;
   hook: string | null;
   caption: string | null;
+  cta: string | null;
   firstComment: string | null;
   hashtags: string[];
   visualConcept: string | null;
@@ -52,6 +53,7 @@ export function buildMasterPrompt(input: MasterPromptInput): string {
   if (input.title) lines.push("Title: " + input.title);
   if (input.hook) lines.push("Hook: " + input.hook);
   if (input.caption) lines.push("Caption: " + input.caption);
+  if (input.cta) lines.push("CTA: " + input.cta);
   if (input.firstComment) lines.push("First comment: " + input.firstComment);
   if (input.hashtags.length) lines.push("Hashtags: " + input.hashtags.map((h) => "#" + h).join(" "));
 

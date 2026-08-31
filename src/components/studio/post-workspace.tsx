@@ -60,25 +60,41 @@ function CopyIcon({ text, label }: { text: string; label: string }) {
       type="button"
       aria-label={"Copy " + label}
       title={"Copy " + label}
-      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+      className="shrink-0 rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
       onClick={async () => {
         await navigator.clipboard.writeText(text);
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       }}
     >
-      {copied ? <CheckCheck className="size-3.5 text-emerald-500" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+      {copied ? <CheckCheck className="size-3 text-emerald-500" aria-hidden /> : <Copy className="size-3" aria-hidden />}
     </button>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldCard({
+  label,
+  copy,
+  actions,
+  bodyClassName,
+  children,
+}: {
+  label: string;
+  copy?: string;
+  actions?: React.ReactNode;
+  bodyClassName?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+    <div className="overflow-hidden rounded-lg border bg-card/40">
+      <div className="flex items-center justify-between border-b bg-muted/20 px-2.5 py-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</span>
+        <div className="flex items-center gap-0.5">
+          {copy ? <CopyIcon text={copy} label={label} /> : null}
+          {actions}
+        </div>
       </div>
-      {children}
+      <div className={cn("p-2.5 text-sm leading-relaxed", bodyClassName)}>{children}</div>
     </div>
   );
 }
@@ -237,32 +253,37 @@ export function PostWorkspace({
             <span className="text-xs text-muted-foreground">Relevance {scores.relevance}/10 · Engagement {scores.engagement}/10 (AI-est.)</span>
           ) : null}
         </div>
-        <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
+            <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+        </div>
       </div>
 
-      {/* Body — two columns: post content | creative + live preview directly below the prompt */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:grid-rows-1 lg:overflow-hidden">
+      {/* Body — two equal columns, no inner column scrollbars; one shared scroll only if content exceeds the dialog */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto scroll-thin lg:grid-cols-2">
         {/* LEFT — post content */}
-        <div className="min-h-0 space-y-3 overflow-y-auto pr-1 lg:border-r lg:border-border/50 lg:pr-3">
-          <div>
-            <div className="text-base font-semibold leading-snug">{item.topic}</div>
-            {item.hook ? <p className="mt-1 text-sm text-muted-foreground">Hook: {item.hook}</p> : null}
-          </div>
+        <div className="space-y-2.5">
+          <FieldCard label="Topic" bodyClassName="text-sm font-semibold leading-snug">
+            {item.topic}
+            {item.hook ? <p className="mt-1 text-xs font-normal text-muted-foreground">Hook: {item.hook}</p> : null}
+          </FieldCard>
 
           {qa && typeof qa.score === "number" ? (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="font-medium">QA</span>
-              <Badge variant={qa.passed ? "secondary" : "destructive"} className={cn(!qa.passed && "", qa.passed && "bg-emerald-500/10 text-emerald-500")}>
+            <div className="flex flex-wrap items-center gap-2 px-0.5 text-xs">
+              <span className="font-medium text-muted-foreground">QA</span>
+              <Badge variant={qa.passed ? "secondary" : "destructive"} className={cn(qa.passed && "bg-emerald-500/10 text-emerald-500")}>
                 {qa.score}/100 {qa.passed ? "· passed" : "· needs attention"}
               </Badge>
+              {(qa?.issues ?? []).map((iss, i) => (
+                <span key={i} className={cn("text-[11px]", iss.severity === "error" ? "text-destructive" : "text-amber-500")}>• {iss.message}</span>
+              ))}
             </div>
           ) : null}
-          {(qa?.issues ?? []).map((iss, i) => (
-            <p key={i} className={cn("text-xs", iss.severity === "error" ? "text-destructive" : "text-amber-500")}>• {iss.message}</p>
-          ))}
 
           {variants.length > 1 ? (
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1.5 px-0.5">
               {variants.map((v) => (
                 <button key={v.id} type="button" onClick={() => { setActiveVariantId(v.id); setCaption(v.caption); }}
                   className={cn("rounded-full border px-2.5 py-1 text-xs capitalize", v.id === activeVariantId ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground")}>
@@ -272,10 +293,21 @@ export function PostWorkspace({
             </div>
           ) : null}
 
-          <Field label="Caption">
+          <FieldCard
+            label="Caption"
+            copy={caption}
+            bodyClassName="max-h-40 scroll-thin overflow-y-auto"
+            actions={editable ? (
+              editingCaption ? null : (
+                <button type="button" aria-label="Edit caption" className="rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground" onClick={() => setEditingCaption(true)}>
+                  <Pencil className="size-3" aria-hidden />
+                </button>
+              )
+            ) : null}
+          >
             {editingCaption ? (
               <div className="space-y-2">
-                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={6} disabled={!editable} />
+                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={5} className="scroll-thin resize-none" disabled={!editable} />
                 <div className="flex justify-end gap-2">
                   <Button size="sm" variant="ghost" onClick={() => { setCaption(variant?.caption ?? ""); setEditingCaption(false); }}>Cancel</Button>
                   <Button size="sm" disabled={pending} onClick={() => { if (variant) { start(async () => { const r = await updateVariantCaptionAction(variant.id, caption); if (r.ok) { toast.success("Caption saved"); router.refresh(); setEditingCaption(false); } else toast.error(r.error); }); } }}>
@@ -284,91 +316,58 @@ export function PostWorkspace({
                 </div>
               </div>
             ) : (
-              <div className="group/cap relative rounded-md border p-2.5">
-                <p className="whitespace-pre-wrap pr-6 text-sm">{caption || "—"}</p>
-                <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover/cap:opacity-100">
-                  <CopyIcon text={caption} label="caption" />
-                  {editable ? (
-                    <button type="button" aria-label="Edit caption" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setEditingCaption(true)}>
-                      <Pencil className="size-3.5" aria-hidden />
-                    </button>
-                  ) : null}
-                </div>
-              </div>
+              <p className="whitespace-pre-wrap">{caption || "—"}</p>
             )}
-          </Field>
+          </FieldCard>
 
-          <Field label="Hashtags">
-            <div className="rounded-md border p-2.5">
-              <div className="flex flex-wrap gap-1">
-                {(variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => (
-                  <span key={h} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">#{h}</span>
-                ))}
-              </div>
-              <div className="mt-1.5">
-                <CopyIcon text={hashtagsText} label="hashtags" />
-              </div>
+          <FieldCard label="Hashtags" copy={hashtagsText}>
+            <div className="flex flex-wrap gap-1">
+              {(variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => (
+                <span key={h} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">#{h}</span>
+              ))}
             </div>
-          </Field>
+          </FieldCard>
 
-          <Field label="First comment">
-            <div className="rounded-md border p-2.5 text-sm">
-              <p className="whitespace-pre-wrap pr-6">{item.firstComment ?? variant?.firstComment ?? "—"}</p>
-              <div className="mt-1.5"><CopyIcon text={item.firstComment ?? variant?.firstComment ?? ""} label="first comment" /></div>
-            </div>
-          </Field>
+          <FieldCard label="CTA" copy={(variant?.cta ?? item.cta) ?? ""} bodyClassName="max-h-24 scroll-thin overflow-y-auto">
+            <p className="whitespace-pre-wrap">{variant?.cta ?? item.cta ?? "—"}</p>
+          </FieldCard>
+
+          <FieldCard label="First comment" copy={(item.firstComment ?? variant?.firstComment) ?? ""} bodyClassName="max-h-28 scroll-thin overflow-y-auto">
+            <p className="whitespace-pre-wrap">{item.firstComment ?? variant?.firstComment ?? "—"}</p>
+          </FieldCard>
         </div>
 
-        {/* RIGHT — visual prompt, media options, then live preview directly below */}
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto lg:pl-1">
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
-              <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
-            </Button>
-          </div>
-
-          {/* Visual prompt / slides / reel */}
+        {/* RIGHT — creative: prompt, media options, preview */}
+        <div className="space-y-2.5">
           {isCarousel ? (
             <div className="space-y-2">
-              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Carousel slides</div>
+              <div className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Carousel slides</div>
               {slides.map((s) => {
                 const sv = visuals.filter((v) => v.slideIndex === s.index);
                 const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
                 return (
-                  <div key={s.index} className="rounded-md border p-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-medium">Slide {s.index}{s.headline ? " — " + s.headline : ""}</span>
-                      <div className="flex items-center gap-1">
-                        <CopyIcon text={s.visualPrompt ?? ""} label={"slide " + s.index + " prompt"} />
-                        {editable && aiConfigured ? (
-                          <Button size="sm" variant="ghost" disabled={pending} onClick={() => generate("ai", s.index)}>
-                            <Sparkles className="size-3.5" aria-hidden /> Generate
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                    {s.visualPrompt ? <p className="mt-1 text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
+                  <FieldCard key={s.index} label={"Slide " + s.index + (s.headline ? " — " + s.headline : "")} copy={s.visualPrompt ?? ""}
+                    actions={editable && aiConfigured ? (
+                      <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" disabled={pending} onClick={() => generate("ai", s.index)}>
+                        <Sparkles className="size-3" aria-hidden /> Generate
+                      </Button>
+                    ) : null}>
+                    {s.visualPrompt ? <p className="mb-2 max-h-24 scroll-thin overflow-y-auto whitespace-pre-wrap text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
                     {url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-48 rounded-md border object-contain" />
+                      <img src={url} alt={"Slide " + s.index} className="max-h-44 rounded-md border object-contain" />
                     ) : null}
-                  </div>
+                  </FieldCard>
                 );
               })}
             </div>
           ) : isReel ? (
-            <div className="space-y-2 rounded-md border p-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Reel script{script.totalDuration ? " (" + script.totalDuration + "s)" : ""}
-                </span>
-                <CopyIcon text={JSON.stringify(script, null, 2)} label="full reel script" />
-              </div>
+            <FieldCard label={"Reel script" + (script.totalDuration ? " (" + script.totalDuration + "s)" : "")} copy={JSON.stringify(script, null, 2)} bodyClassName="max-h-72 scroll-thin overflow-y-auto">
               {script.hook ? <p className="text-xs"><span className="font-medium">0-5s Hook:</span> {script.hook}</p> : null}
               {(script.scenes ?? []).map((s, i) => {
                 const sceneStart = 5 + i * Math.round(((script.totalDuration ?? 30) - 10) / Math.max((script.scenes ?? []).length, 1));
                 return (
-                  <div key={i} className="rounded-md bg-muted/40 p-2 text-xs">
+                  <div key={i} className="mt-1.5 rounded-md bg-muted/40 p-2 text-xs">
                     <div className="font-medium">{sceneStart}s - Scene {i + 1}</div>
                     {s.voiceover || s.text ? <p>VO: {s.voiceover || s.text}</p> : null}
                     {s.visualDirection ? <p className="text-muted-foreground">Visual: {s.visualDirection}</p> : null}
@@ -377,20 +376,16 @@ export function PostWorkspace({
                   </div>
                 );
               })}
-              {script.outro ? <p className="text-xs text-muted-foreground">Outro: {script.outro}</p> : null}
-            </div>
+              {script.outro ? <p className="mt-1.5 text-xs text-muted-foreground">Outro: {script.outro}</p> : null}
+            </FieldCard>
           ) : (
-            <div className="rounded-md border p-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Visual prompt</span>
-                {item.visualConcept ? <CopyIcon text={item.visualConcept} label="visual prompt" /> : null}
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">{item.visualConcept ?? "—"}</p>
-            </div>
+            <FieldCard label="Visual prompt" copy={item.visualConcept ?? ""} bodyClassName="max-h-40 scroll-thin overflow-y-auto">
+              <p className="whitespace-pre-wrap text-muted-foreground">{item.visualConcept ?? "—"}</p>
+            </FieldCard>
           )}
 
           {/* Media options */}
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 px-0.5">
             <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
               {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
             </Button>
@@ -408,19 +403,18 @@ export function PostWorkspace({
             ) : null}
           </div>
 
-          {/* Live preview — directly below the visual prompt */}
-          <div className="rounded-lg border p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Visual preview</div>
+          {/* Visual preview */}
+          <FieldCard label="Visual preview">
             {previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[360px] rounded-lg border object-contain" />
+              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[320px] rounded-lg border object-contain" />
             ) : (
-              <div className="flex h-48 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
+              <div className="flex h-44 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
                 No visual yet — generate, or upload your own.
               </div>
             )}
             {isCarousel && slides.length > 0 ? (
-              <div className="mt-2 flex gap-2 overflow-x-auto">
+              <div className="mt-2 flex gap-2 overflow-x-auto scroll-thin">
                 {slides.map((s) => {
                   const sv = visuals.filter((v) => v.slideIndex === s.index);
                   const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
@@ -433,11 +427,11 @@ export function PostWorkspace({
                 })}
               </div>
             ) : null}
-          </div>
+          </FieldCard>
         </div>
       </div>
 
-      {/* Footer — always visible: status panels + action bar (nothing hidden at the bottom) */}
+      {/* Footer — always visible: status panels + action bar */}
       <div className="space-y-2 border-t pt-2">
         {rejecting ? (
           <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
@@ -509,7 +503,7 @@ export function PostWorkspace({
 
       {/* Master prompt dialog */}
       <Dialog open={masterPrompt !== null} onOpenChange={(o) => !o && setMasterPrompt(null)}>
-        <DialogContent className="max-h-[85dvh] max-w-3xl overflow-y-auto">
+        <DialogContent className="max-h-[85dvh] max-w-3xl overflow-y-auto scroll-thin">
           <DialogHeader>
             <DialogTitle>Master AI prompt (external tools)</DialogTitle>
           </DialogHeader>
@@ -518,7 +512,7 @@ export function PostWorkspace({
               Copy prompt
             </Button>
           </div>
-          <pre className="whitespace-pre-wrap rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{masterPrompt}</pre>
+          <pre className="scroll-thin max-h-[55dvh] whitespace-pre-wrap overflow-y-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{masterPrompt}</pre>
         </DialogContent>
       </Dialog>
     </div>

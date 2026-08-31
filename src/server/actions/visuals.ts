@@ -227,6 +227,7 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
     title: item.topic,
     hook: item.hook,
     caption: variant.caption || item.caption,
+    cta: variant.cta ?? item.cta,
     firstComment: variant.firstComment ?? item.firstComment,
     hashtags: variant.hashtags?.length ? variant.hashtags : item.hashtags,
     visualConcept: item.visualConcept,
