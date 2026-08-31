@@ -185,7 +185,7 @@ function ItemCard({
         </div>
         {open ? (
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent className="flex h-[94dvh] w-full max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-4 sm:max-w-[1800px] sm:p-5">
+            <DialogContent className="flex h-[90dvh] w-full flex-col overflow-hidden p-4 sm:h-[76dvh] sm:w-[74vw] sm:max-w-[1600px] sm:p-5">
               <PostWorkspace
                 item={item}
                 variants={variants}

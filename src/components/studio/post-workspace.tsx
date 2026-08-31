@@ -132,7 +132,6 @@ export function PostWorkspace({
   const latestVisual = itemVisuals.length > 0 ? itemVisuals[itemVisuals.length - 1] : null;
   const previewUrl = latestVisual ? visualUrls[latestVisual.storagePath] ?? null : null;
   const hashtagsText = (variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => "#" + h).join(" ");
-  const captionText = caption;
 
 
 
@@ -241,8 +240,8 @@ export function PostWorkspace({
         <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {/* Body — wide 3-zone desktop layout (content | creative | preview) */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(340px,0.95fr)] xl:grid-rows-1">
+      {/* Body — two columns: post content | creative + live preview directly below the prompt */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:grid-rows-1 lg:overflow-hidden">
         {/* LEFT — post content */}
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1 lg:border-r lg:border-border/50 lg:pr-3">
           <div>
@@ -320,8 +319,8 @@ export function PostWorkspace({
           </Field>
         </div>
 
-        {/* CENTER — creative / media */}
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto lg:pr-1 xl:border-r xl:border-border/50 xl:pr-3">
+        {/* RIGHT — visual prompt, media options, then live preview directly below */}
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto lg:pl-1">
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
               <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
@@ -351,7 +350,7 @@ export function PostWorkspace({
                     {s.visualPrompt ? <p className="mt-1 text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
                     {url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-56 rounded-md border object-contain" />
+                      <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-48 rounded-md border object-contain" />
                     ) : null}
                   </div>
                 );
@@ -390,7 +389,7 @@ export function PostWorkspace({
             </div>
           )}
 
-          {/* Media actions */}
+          {/* Media options */}
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
               {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
@@ -408,17 +407,15 @@ export function PostWorkspace({
               </>
             ) : null}
           </div>
-        </div>
 
-        {/* RIGHT — live preview */}
-        <div className="min-h-0 space-y-3 overflow-y-auto lg:col-span-2 xl:col-span-1 xl:pl-1">
+          {/* Live preview — directly below the visual prompt */}
           <div className="rounded-lg border p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Live preview</div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Visual preview</div>
             {previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[440px] rounded-lg border object-contain" />
+              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[360px] rounded-lg border object-contain" />
             ) : (
-              <div className="flex h-56 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
+              <div className="flex h-48 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
                 No visual yet — generate, or upload your own.
               </div>
             )}
@@ -429,14 +426,13 @@ export function PostWorkspace({
                   const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
                   return url ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img key={s.index} src={url} alt={"Slide " + s.index} className="h-28 rounded-md border object-contain" />
+                    <img key={s.index} src={url} alt={"Slide " + s.index} className="h-24 rounded-md border object-contain" />
                   ) : (
-                    <div key={s.index} className="flex h-28 w-24 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">S{s.index}</div>
+                    <div key={s.index} className="flex h-24 w-20 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">S{s.index}</div>
                   );
                 })}
               </div>
             ) : null}
-            <p className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">{captionText}{hashtagsText ? "\n\n" + hashtagsText : ""}</p>
           </div>
         </div>
       </div>
