@@ -328,9 +328,6 @@ export function PostWorkspace({
             </div>
           </FieldCard>
 
-          <FieldCard label="CTA" copy={(variant?.cta ?? item.cta) ?? ""} bodyClassName="max-h-24 scroll-thin overflow-y-auto">
-            <p className="whitespace-pre-wrap">{variant?.cta ?? item.cta ?? "—"}</p>
-          </FieldCard>
 
           <FieldCard label="First comment" copy={(item.firstComment ?? variant?.firstComment) ?? ""} bodyClassName="max-h-28 scroll-thin overflow-y-auto">
             <p className="whitespace-pre-wrap">{item.firstComment ?? variant?.firstComment ?? "—"}</p>
