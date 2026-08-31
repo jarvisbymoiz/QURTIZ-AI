@@ -17,6 +17,7 @@ import {
   workspaces,
 } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { getModel } from "@/lib/ai/provider";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
@@ -166,7 +167,9 @@ export async function runBulkPlan(jobId: string): Promise<void> {
     const planRes = await generateObject({
       model,
       schema: planSchema,
-      prompt: `You are the content strategist for "${brand?.businessName ?? "the brand"}".
+      prompt: `${GLOBAL_AI_INSTRUCTION}
+
+You are the content strategist for "${brand?.businessName ?? "the brand"}".
 Brand Brain: ${summarizeBrandBrain(brand ?? null)}
 Brand memory: ${memories.map((m) => m.content).join("; ") || "(none)"}
 Content pillars available: ${pillarNames.join(", ") || "(defaults will be used)"}

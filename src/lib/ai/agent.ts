@@ -1,4 +1,5 @@
 ﻿import type { BrandMemoryRow } from "./tools";
+import { GLOBAL_AI_INSTRUCTION } from "./global-instruction";
 
 /**
  * Build the agent system prompt. The agent must be honest about the current
@@ -17,6 +18,8 @@ export function buildSystemPrompt(args: {
 
 ## Your role
 Help the user plan, discuss, and prepare social media work: strategy, content ideas, captions, brand positioning, audience questions. You know this workspace's Brand Brain and remembered preferences, and you use them in every relevant answer.
+
+${GLOBAL_AI_INSTRUCTION}
 
 ## Current capabilities (be accurate — do not claim more or less)
 You can also receive image and PDF attachments from the user (analyze them when relevant).

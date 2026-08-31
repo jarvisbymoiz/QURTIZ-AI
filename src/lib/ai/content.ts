@@ -6,6 +6,7 @@ import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVarian
 import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
+import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import type { ContentRulesInput } from "@/lib/validation";
 
 export const generatedContentSchema = z.object({
@@ -67,6 +68,30 @@ export type GenerateContentInput = {
   visualStyleHint?: string | null;
 };
 
+
+export function buildContentSystemPrompt(args: { brandName: string; brandSummary: string; memoryLines: string }): string {
+  return `${GLOBAL_AI_INSTRUCTION}
+
+You are the QURTIZ AI content engine for "${args.brandName}".
+
+## Brand Brain
+${args.brandSummary}
+
+## Brand memory (must be respected)
+${args.memoryLines.length > 0 ? args.memoryLines : "(none)"}
+
+## Hard rules
+1. Respect every avoided word/claim/topic strictly.
+2. Match the brand voice in all copy.
+3. Adapt per platform - never duplicate the same caption: Facebook favors conversation and slightly longer copy; Instagram favors strong hooks, concise captions, and save-worthy structure.
+4. For reel formats, produce a scene script (hook, 3-6 scenes with on-screen text, outro).
+5. Never invent statistics, testimonials, or product claims that are not in the Brand Brain.
+6. Hashtags: no # symbol in the strings.
+7. Always produce a firstComment (useful addition, not a duplicate of the caption).
+8. Carousel variants: provide slides (3-8) each with a distinct visualPrompt describing that slide's image.
+9. Reel variants: produce a complete timed script - hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.`;
+}
+
 /**
  * Generate one content item with platform variants using the configured
  * AI provider. Persists the item + variants with QA results, and logs the
@@ -118,24 +143,11 @@ export async function generateAndPersistContent(ctx: {
   const rules = (brand?.contentRules ?? {}) as Partial<ContentRulesInput>;
   const memoryLines = memories.map((m) => `- [${m.type}] ${m.content}`).join("\n") + (strategyLine || "");
 
-  const system = `You are the QURTIZ AI content engine for "${brand?.businessName ?? ctx.workspaceId}".
-
-## Brand Brain
-${summarizeBrandBrain(brand ?? null)}
-
-## Brand memory (must be respected)
-${memoryLines.length > 0 ? memoryLines : "(none)"}
-
-## Hard rules
-1. Respect every avoided word/claim/topic strictly.
-2. Match the brand voice in all copy.
-3. Adapt per platform — never duplicate the same caption: Facebook favors conversation and slightly longer copy; Instagram favors strong hooks, concise captions, and save-worthy structure.
-4. For reel formats, produce a scene script (hook, 3-6 scenes with on-screen text, outro).
-5. Never invent statistics, testimonials, or product claims that are not in the Brand Brain.
-6. Hashtags: no # symbol in the strings.
-7. Always produce a firstComment (useful addition, not a duplicate of the caption).
-8. Carousel variants: provide slides (3-8) each with a distinct visualPrompt describing that slide's image.
-9. Reel variants: produce a complete timed script — hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.`;
+  const system = buildContentSystemPrompt({
+    brandName: brand?.businessName ?? ctx.workspaceId,
+    brandSummary: summarizeBrandBrain(brand ?? null),
+    memoryLines,
+  });
 
   const prompt = `Create one social media post.
 Topic: ${ctx.input.topic}
