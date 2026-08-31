@@ -3,21 +3,12 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import {
-  AlertTriangle,
-  CheckCheck,
-  Loader2,
-  Plus,
-  Sparkles,
-  ThumbsDown,
-  Trash2,
-} from "lucide-react";
+import { Loader2, Plus, Sparkles } from "lucide-react";
 import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
 import { createContentAction } from "@/server/actions/content";
 import { suggestTrendsAction } from "@/server/actions/research";
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
-import { SuggestTrends } from "@/components/studio/suggest-trends";
 import { PostWorkspace } from "@/components/studio/post-workspace";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -162,24 +153,14 @@ function ItemCard({
   editable: boolean;
   aiConfigured: boolean;
 }) {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [pending, start] = useTransition();
   const scores = (item.aiScores ?? {}) as Record<string, number>;
-
-  function archive() {
-    start(async () => {
-      const r = await createContentAction; // noop guard
-      void r;
-      router.refresh();
-    });
-  }
 
   return (
     <Card>
       <CardContent className="space-y-3 p-4">
         <div className="flex items-start justify-between gap-3">
-          <button type="button" className="text-left" onClick={() => setOpen(true)}>
+          <button type="button" className="w-full text-left" onClick={() => setOpen(true)}>
             <div className="font-medium hover:underline">{item.topic}</div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <StatusBadge status={item.status} />
@@ -187,12 +168,6 @@ function ItemCard({
               {item.createdAt ? <span>· {new Date(item.createdAt).toLocaleDateString()}</span> : null}
             </div>
           </button>
-          {editable ? (
-            <Button size="icon" variant="ghost" aria-label="Open post"
-              onClick={() => setOpen(true)}>
-              <Sparkles className="size-4" aria-hidden />
-            </Button>
-          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {typeof scores.relevance === "number" ? (
@@ -252,11 +227,6 @@ function BulkApproveButton() {
   );
 }
 
-function DeleteButton({ itemId, onDeleted }: { itemId: string; onDeleted: () => void }) {
-  void itemId; void onDeleted;
-  return null;
-}
-
 export function StudioClient({
   items,
   variants,
@@ -277,9 +247,13 @@ export function StudioClient({
   const router = useRouter();
   const [pending, start] = useTransition();
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [niche, setNiche] = useState("");
-  const [trends, setTrends] = useState<{ trendingTopics: { topic: string; why: string }[]; visualDirections: { direction: string; style: string }[]; hookIdeas: string[] } | null>(null);
+  const [trends, setTrends] = useState<{
+    trendingTopics: { topic: string; why: string }[];
+    visualDirections: { direction: string; style: string }[];
+    hookIdeas: string[];
+  } | null>(null);
   const [trendsSourced, setTrendsSourced] = useState(false);
+  const [niche, setNiche] = useState("");
 
   const byItem = useMemo(() => {
     const map = new Map<string, Variant[]>();
@@ -341,48 +315,10 @@ export function StudioClient({
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={runTrends}>
-            {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Sparkles className="size-3.5" aria-hidden />}
-            Suggest trends
-          </Button>
           <BulkPlanDialog editable={editable} aiConfigured={aiConfigured} />
           <NewPostDialog pillars={pillars} editable={editable} aiConfigured={aiConfigured} />
         </div>
       </div>
-
-      {trends ? (
-        <Card>
-          <CardContent className="space-y-3 p-4">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Trend suggestions {trendsSourced ? "(live web)" : "(AI estimates)"}</div>
-              <Button size="sm" variant="ghost" onClick={() => setTrends(null)}>Dismiss</Button>
-            </div>
-            <div className="grid gap-2 md:grid-cols-3">
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold uppercase text-muted-foreground">Trending topics</div>
-                {trends.trendingTopics.map((t, i) => (
-                  <div key={i} className="rounded-md border p-2 text-xs">
-                    <div className="font-medium">{t.topic}</div>
-                    {t.why ? <div className="text-muted-foreground">{t.why}</div> : null}
-                  </div>
-                ))}
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold uppercase text-muted-foreground">Visual directions</div>
-                {trends.visualDirections.map((v, i) => (
-                  <div key={i} className="rounded-md border p-2 text-xs">{v.direction}</div>
-                ))}
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold uppercase text-muted-foreground">Hook ideas</div>
-                {trends.hookIdeas.map((h, i) => (
-                  <div key={i} className="rounded-md border p-2 text-xs">&ldquo;{h}&rdquo;</div>
-                ))}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
 
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-10 text-center">
@@ -406,8 +342,10 @@ export function StudioClient({
           ))}
         </div>
       )}
+      {pending && !trends ? (
+        <p className="text-xs text-muted-foreground">Working…</p>
+      ) : null}
+      <BulkApproveButton />
     </div>
   );
 }
-
-function DeleteHidden() { return null; }
