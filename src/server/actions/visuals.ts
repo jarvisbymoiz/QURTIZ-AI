@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { brandAssets, contentItems, contentVariants, visualAssets } from "@/db/schema";
+import { brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
 import { generateVisual, type VisualMode } from "@/lib/visuals/generate";
 import { getSessionUser, getMembership } from "@/lib/workspace";
@@ -194,4 +194,46 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
 
   revalidatePath("/content-studio");
   return { ok: true };
+}
+
+
+export async function buildMasterPromptAction(itemId: string, variantId?: string): Promise<
+  { ok: true; prompt: string } | { ok: false; error: string }
+> {
+  const ctx = await activeContext("brand:read");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const db = getDb();
+  const [item] = await db
+    .select()
+    .from(contentItems)
+    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (!item) return { ok: false, error: "Content item not found." };
+
+  const variants = await db
+    .select()
+    .from(contentVariants)
+    .where(eq(contentVariants.contentItemId, itemId));
+  const variant = variantId ? variants.find((v) => v.id === variantId) ?? variants[0] : variants[0];
+  if (!variant) return { ok: false, error: "No platform variant found for this post." };
+
+  const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
+
+  const { buildMasterPrompt } = await import("@/lib/ai/master-prompt");
+  const prompt = buildMasterPrompt({
+    brand: brand ?? null,
+    platform: variant.platform,
+    contentType: variant.format,
+    title: item.topic,
+    hook: item.hook,
+    caption: variant.caption || item.caption,
+    firstComment: variant.firstComment ?? item.firstComment,
+    hashtags: variant.hashtags?.length ? variant.hashtags : item.hashtags,
+    visualConcept: item.visualConcept,
+    slides: (variant.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
+    script: variant.format === "reel" ? (variant.script as Record<string, unknown> as never) : null,
+    referenceNote: "Uploaded brand/reference images from Brand Brain are used as style references; the logo is composited afterwards.",
+  });
+
+  return { ok: true, prompt };
 }

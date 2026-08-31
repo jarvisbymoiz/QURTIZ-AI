@@ -17,6 +17,7 @@ import {
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
 import { SuggestTrends } from "@/components/studio/suggest-trends";
+import { PostWorkspace } from "@/components/studio/post-workspace";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -239,8 +240,6 @@ function ItemCard({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [rejecting, setRejecting] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
   const [pending, start] = useTransition();
   const scores = item.aiScores as { relevance?: number; engagement?: number } | null;
 
@@ -282,81 +281,17 @@ function ItemCard({
         <QaPanel qa={item.qa} />
         {open ? (
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent className="max-h-[88dvh] w-full max-w-2xl overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>{item.topic}</DialogTitle>
-                <DialogDescription>
-                  Hook: {item.hook} · CTA: {item.cta}
-                  {item.firstComment ? " · First comment: " + item.firstComment : ""}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <QaPanel qa={item.qa} />
-                <Tabs defaultValue={variants[0]?.id ?? "none"}>
-                  <TabsList>
-                    {variants.map((v) => (
-                      <TabsTrigger key={v.id} value={v.id}>
-                        {v.platform} · {v.format.replaceAll("_", " ")}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                  {variants.map((v) => (
-                    <TabsContent key={v.id} value={v.id} className="space-y-3">
-                      <VariantEditor variant={v} editable={editable} />
-                    </TabsContent>
-                  ))}
-                  {variants.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No variants stored.</p>
-                  ) : null}
-                </Tabs>
-                <div className="flex flex-wrap items-center gap-2 copy-chips-row">
-                  {item.caption ? <CopyChip label="Copy caption" text={item.caption} /> : null}
-                  {item.firstComment ? <CopyChip label="Copy first comment" text={item.firstComment} /> : null}
-                  {item.hashtags && item.hashtags.length > 0 ? (
-                    <CopyChip label="Copy hashtags" text={item.hashtags.map((h) => "#" + h).join(" ")} />
-                  ) : null}
-                  {item.visualConcept ? <CopyChip label="Copy visual prompt" text={item.visualConcept} /> : null}
-                </div>
-                <VisualSection itemId={item.id} format={item.format} variants={variants} visuals={visuals} visualUrls={visualUrls} editable={editable} aiConfigured={aiConfigured} />
-                {rejecting ? (
-                  <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
-                    <Label htmlFor="rr">Rejection reason (optional)</Label>
-                    <Input id="rr" value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={300}
-                      placeholder="e.g. too salesy, wrong tone" />
-                    <div className="flex justify-end gap-2">
-                      <Button size="sm" variant="ghost" onClick={() => { setRejecting(false); setRejectReason(""); }}>Cancel</Button>
-                      <Button size="sm" variant="destructive" disabled={pending}
-                        onClick={() => act(() => rejectContentAction(item.id, rejectReason || undefined), "Rejected")}>
-                        Reject
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap justify-end gap-2">
-                  {item.status !== "approved" ? (
-                    <Button variant="outline" disabled={pending || !editable}
-                      onClick={() => act(() => setContentStatusAction(item.id, "approved"), "Approved")}>
-                      Approve
-                    </Button>
-                  ) : (
-                    <Button variant="outline" disabled={pending || !editable}
-                      onClick={() => act(() => setContentStatusAction(item.id, "ready_for_review"), "Back to review")}>
-                      Revoke approval
-                    </Button>
-                  )}
-                  <Button variant="ghost" disabled={pending || !editable}
-                    onClick={() => { setRejecting(true); setRejectReason(""); }}>
-                    <ThumbsDown className="size-3.5" aria-hidden /> Reject
-                  </Button>
-                  {item.status === "rejected" ? (
-                    <Button variant="outline" disabled={pending || !editable}
-                      onClick={() => act(() => regenerateContentAction(item.id), "Regenerated — new version created")}>
-                      Regenerate
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            </DialogContent>
+            <DialogContent className="h-[93dvh] w-full max-w-6xl overflow-hidden p-4">
+            <PostWorkspace
+              item={item}
+              variants={variants}
+              visuals={visuals}
+              visualUrls={visualUrls}
+              editable={editable}
+              aiConfigured={aiConfigured}
+              onClose={() => setOpen(false)}
+            />
+          </DialogContent>
           </Dialog>
         ) : null}
       </CardContent>
@@ -514,172 +449,6 @@ export function StudioClient({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function VisualSection({
-  itemId,
-  format,
-  variants,
-  visuals,
-  visualUrls,
-  editable,
-  aiConfigured,
-}: {
-  itemId: string;
-  format: string;
-  variants: Variant[];
-  visuals: Visual[];
-  visualUrls: Record<string, string | null>;
-  editable: boolean;
-  aiConfigured: boolean;
-}) {
-  const router = useRouter();
-  const [pending, start] = useTransition();
-  const uploadInputRef = useRef<HTMLInputElement>(null);
-
-  const variant = variants.find((v) => v.format === (format === "carousel" ? "carousel" : format)) ?? variants[0];
-  const slides = (variant?.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[];
-  const isCarousel = format === "carousel" && slides.length > 0;
-  const isReel = format === "reel";
-  const script = (variant?.script ?? {}) as {
-    hook?: string;
-    scenes?: { text?: string; voiceover?: string; visualDirection?: string; onScreenText?: string; transition?: string; durationSeconds?: number }[];
-    outro?: string;
-    totalDuration?: number;
-  };
-
-  function generate(mode: "template" | "ai", slideIndex?: number) {
-    start(async () => {
-      const r = await generateVisualAction(itemId, mode, slideIndex);
-      if (r.ok) {
-        toast.success(r.model && r.model !== "satori-template" ? "AI visual created (" + r.model + ")" : "Visual created");
-        router.refresh();
-      } else toast.error(r.error);
-    });
-  }
-
-  function uploadSlideFile(file: File) {
-    const fd = new FormData();
-    fd.set("itemId", itemId);
-    fd.set("file", file);
-    start(async () => {
-      const r = await uploadVisualUploadAction(fd);
-      if (r.ok) {
-        toast.success("Visual uploaded — moved to Ready for Review");
-        router.refresh();
-      } else toast.error(r.error);
-    });
-  }
-
-  function visualsFor(slide: number | null) {
-    return visuals.filter((v) => (slide === null ? v.slideIndex === null || v.slideIndex === undefined : v.slideIndex === slide));
-  }
-
-  const itemVisuals = visualsFor(null);
-  const hasAnyVisual = visuals.length > 0;
-
-  return (
-    <div className="space-y-3 rounded-lg border p-3">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">Visuals</span>
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
-            {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />}
-            Template
-          </Button>
-          <Button size="sm" variant="ghost" disabled={pending || !editable || !aiConfigured} onClick={() => generate("ai")}>
-            AI photo
-          </Button>
-          {editable ? (
-            <>
-              <input
-                ref={uploadInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) uploadSlideFile(file);
-                  e.target.value = "";
-                }}
-              />
-              <Button size="sm" variant="ghost" disabled={pending} onClick={() => uploadInputRef.current?.click()}>
-                <Upload className="size-3.5" aria-hidden /> Upload own
-              </Button>
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      {isCarousel ? (
-        <div className="space-y-2">
-          {slides.map((s) => {
-            const slideVisuals = visualsFor(s.index);
-            const url = slideVisuals.length > 0 ? visualUrls[slideVisuals[slideVisuals.length - 1].storagePath] : null;
-            return (
-              <div key={s.index} className="rounded-md border p-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium">Slide {s.index}{s.headline ? ": " + s.headline : ""}</span>
-                  {editable ? (
-                    <Button size="sm" variant="ghost" disabled={pending || !aiConfigured}
-                      onClick={() => generate("ai", s.index)}>
-                      <Sparkles className="size-3.5" aria-hidden /> Generate slide visual
-                    </Button>
-                  ) : null}
-                </div>
-                {s.visualPrompt ? <p className="mt-1 text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
-                {url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={url} alt={"Slide " + s.index} className="mt-2 max-h-52 rounded-md border object-contain" />
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : itemVisuals.length > 0 ? (
-        <div className="flex flex-wrap gap-3">
-          {itemVisuals.map((v) => {
-            const url = visualUrls[v.storagePath];
-            return url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img key={v.id} src={url} alt={v.kind} className="max-h-64 rounded-lg border object-contain" />
-            ) : (
-              <div key={v.id} className="h-32 w-32 rounded-lg border bg-muted" />
-            );
-          })}
-        </div>
-      ) : null}
-
-      {isReel && (script.scenes?.length || script.hook) ? (
-        <div className="space-y-1.5 rounded-lg border p-3">
-          <div className="text-sm font-medium">Reel script{script.totalDuration ? " (" + script.totalDuration + "s)" : ""}</div>
-          {script.hook ? (
-            <p className="text-xs"><span className="font-medium">0-5s Hook:</span> {script.hook}</p>
-          ) : null}
-          {(script.scenes ?? []).map((s, i) => {
-            const start = 5 + i * Math.round(((script.totalDuration ?? 30) - 10) / Math.max(script.scenes!.length, 1));
-            return (
-              <div key={i} className="rounded-md bg-muted/40 p-2 text-xs">
-                <div className="font-medium">{start}s - Scene {i + 1}</div>
-                {s.text ? <p>VO: {s.text}</p> : null}
-                {s.visualDirection ? <p className="text-muted-foreground">Visual: {s.visualDirection}</p> : null}
-                {s.onScreenText ? <p className="text-muted-foreground">On-screen: &ldquo;{s.onScreenText}&rdquo;</p> : null}
-                {s.transition ? <p className="text-muted-foreground">Transition: {s.transition}</p> : null}
-              </div>
-            );
-          })}
-          {script.outro ? <p className="text-xs text-muted-foreground">Outro: {script.outro}</p> : null}
-        </div>
-      ) : null}
-
-      {!hasAnyVisual && !isCarousel ? (
-        <p className="text-xs text-muted-foreground">
-          No visual yet. Template = free brand graphic with your logo. AI photo = photographic image with references
-          (paid billing required). Upload own = attach your own image. All three move the post to Ready for Review.
-        </p>
-      ) : null}
     </div>
   );
 }
