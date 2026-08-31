@@ -64,7 +64,7 @@ Reply ONLY with JSON: {"trendingTopics":[{"topic","why"}],"visualDirections":[{"
             contents: [{ parts: [{ text: prompt + "\nUse live web search before answering." }] }],
             tools: [{ google_search: {} }],
           }),
-          signal: AbortSignal.timeout(90_000),
+          signal: AbortSignal.timeout(15_000),
         },
       );
       if (res.ok) {
