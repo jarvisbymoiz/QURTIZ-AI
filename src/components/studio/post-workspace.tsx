@@ -134,16 +134,7 @@ export function PostWorkspace({
   const hashtagsText = (variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => "#" + h).join(" ");
   const captionText = caption;
 
-  function saveCaption() {
-    if (!variant) return;
-    start(async () => {
-      const r = await updateVariantCaptionAction(variant.id, caption);
-      if (r.ok) {
-        toast.success("Caption saved");
-        router.refresh();
-      } else toast.error(r.error);
-    });
-  }
+
 
   function generate(mode: "template" | "ai", slideIndex?: number) {
     start(async () => {
@@ -512,7 +503,20 @@ export function PostWorkspace({
               Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} — the background worker publishes automatically.
             </div>
           ) : null}
-          {item.status === "failed" ? (
+          <Dialog open={masterPrompt !== null} onOpenChange={(o) => !o && setMasterPrompt(null)}>
+            <DialogContent className="max-h-[85dvh] max-w-2xl overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Master AI prompt (external tools)</DialogTitle>
+              </DialogHeader>
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={async () => { if (masterPrompt) { await navigator.clipboard.writeText(masterPrompt); toast.success("Master prompt copied"); } }}>
+                  Copy prompt
+                </Button>
+              </div>
+              <pre className="whitespace-pre-wrap rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{masterPrompt}</pre>
+            </DialogContent>
+          </Dialog>
+                    {item.status === "failed" ? (
             <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
               <AlertTriangle className="size-3.5" aria-hidden /> Generation failed — use Regenerate.
             </div>

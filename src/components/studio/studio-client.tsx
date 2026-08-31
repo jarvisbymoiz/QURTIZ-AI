@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import { Loader2, Plus, Sparkles } from "lucide-react";
 import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
 import { createContentAction } from "@/server/actions/content";
-import { suggestTrendsAction } from "@/server/actions/research";
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
 import { PostWorkspace } from "@/components/studio/post-workspace";
@@ -247,13 +246,6 @@ export function StudioClient({
   const router = useRouter();
   const [pending, start] = useTransition();
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [trends, setTrends] = useState<{
-    trendingTopics: { topic: string; why: string }[];
-    visualDirections: { direction: string; style: string }[];
-    hookIdeas: string[];
-  } | null>(null);
-  const [trendsSourced, setTrendsSourced] = useState(false);
-  const [niche, setNiche] = useState("");
 
   const byItem = useMemo(() => {
     const map = new Map<string, Variant[]>();
@@ -270,17 +262,6 @@ export function StudioClient({
     [items, statusFilter],
   );
   const readyCount = items.filter((i) => i.status === "ready_for_review").length;
-
-  function runTrends() {
-    start(async () => {
-      const r = await suggestTrendsAction({ niche: niche || undefined });
-      if (r.ok) {
-        setTrends(r.trends as never);
-        setTrendsSourced(r.sourced);
-        toast.success(r.sourced ? "Trend suggestions ready (live web)" : "Trend suggestions ready (AI estimates)");
-      } else toast.error(r.error);
-    });
-  }
 
   return (
     <div className="space-y-4">
@@ -346,6 +327,12 @@ export function StudioClient({
         <p className="text-xs text-muted-foreground">Working…</p>
       ) : null}
       <BulkApproveButton />
+      <DeleteHidden />
     </div>
   );
 }
+
+function DeleteHidden() {
+  return null;
+}
+
