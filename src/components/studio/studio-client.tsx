@@ -323,9 +323,6 @@ export function StudioClient({
           ))}
         </div>
       )}
-      {pending && !trends ? (
-        <p className="text-xs text-muted-foreground">Working…</p>
-      ) : null}
       <BulkApproveButton />
       <DeleteHidden />
     </div>
