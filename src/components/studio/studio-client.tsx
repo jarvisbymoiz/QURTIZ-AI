@@ -1,19 +1,20 @@
 ﻿"use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { CheckCheck, Copy, Loader2, Plus, Sparkles, ThumbsDown, Trash2, Upload, Wand2 } from "lucide-react";
-import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
-import { generateVisualAction, uploadVisualUploadAction } from "@/server/actions/visuals";
 import {
-  rejectContentAction,
-  regenerateContentAction,
-  createContentAction,
-  deleteContentAction,
-  setContentStatusAction,
-  updateVariantCaptionAction,
-} from "@/server/actions/content";
+  AlertTriangle,
+  CheckCheck,
+  Loader2,
+  Plus,
+  Sparkles,
+  ThumbsDown,
+  Trash2,
+} from "lucide-react";
+import type { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
+import { createContentAction } from "@/server/actions/content";
+import { suggestTrendsAction } from "@/server/actions/research";
 import { bulkApproveReadyAction } from "@/server/actions/schedule";
 import { BulkPlanDialog } from "@/components/studio/bulk-plan-dialog";
 import { SuggestTrends } from "@/components/studio/suggest-trends";
@@ -22,18 +23,9 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
@@ -49,6 +41,7 @@ const STATUS_STYLE: Record<string, string> = {
   scheduled: "bg-indigo-500/10 text-indigo-400",
   published: "bg-emerald-600/15 text-emerald-400",
   failed: "bg-destructive/10 text-destructive",
+  rejected: "bg-destructive/10 text-destructive",
   archived: "bg-muted text-muted-foreground",
 };
 
@@ -60,38 +53,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function ScoreChip({ label, value }: { label: string; value: unknown }) {
-  const n = typeof value === "number" ? value : Number(value);
-  if (Number.isNaN(n) || n <= 0) return null;
-  return (
-    <span className="text-xs text-muted-foreground">
-      {label} <span className="font-medium text-foreground">{n}/10</span>
-      <span className="ml-1 text-[10px] uppercase tracking-wide">(AI-est.)</span>
-    </span>
-  );
-}
-
-function QaPanel({ qa }: { qa: unknown }) {
-  const data = qa as { passed?: boolean; score?: number; issues?: { severity: string; check: string; message: string }[] } | null;
-  if (!data || typeof data.score !== "number") return null;
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2 text-sm">
-        <span className="font-medium">QA</span>
-        <Badge variant={data.passed ? "secondary" : "destructive"} className={cn(!data.passed && "", data.passed && "bg-emerald-500/10 text-emerald-500")}>
-          {data.score}/100 {data.passed ? "· passed" : "· needs attention"}
-        </Badge>
-      </div>
-      {(data.issues ?? []).map((i, idx) => (
-        <p key={idx} className={cn("text-xs", i.severity === "error" ? "text-destructive" : "text-amber-500")}>
-          • {i.message}
-        </p>
-      ))}
-    </div>
-  );
-}
-
-function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boolean }) {
+function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[]; editable: boolean; aiConfigured: boolean }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
@@ -99,7 +61,6 @@ function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boo
   const [objective, setObjective] = useState("");
   const [platforms, setPlatforms] = useState<string[]>(["facebook", "instagram"]);
   const [format, setFormat] = useState<string>("single_image");
-  const [pillarId, setPillarId] = useState<string>(pillars[0]?.id ?? "");
 
   function togglePlatform(p: string) {
     setPlatforms((s) => (s.includes(p) ? s.filter((x) => x !== p) : [...s, p]));
@@ -109,27 +70,25 @@ function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boo
     e.preventDefault();
     if (pending || platforms.length === 0) return;
     start(async () => {
-      const result = await createContentAction({
+      const r = await createContentAction({
         topic,
         objective: objective || undefined,
         platforms: platforms as ("facebook" | "instagram")[],
         preferredFormat: format as "single_image",
       });
-      if (result.ok) {
-        toast.success(`Content created — QA ${result.qaScore}/100`);
+      if (r.ok) {
+        toast.success("Content created — Ready for Review below");
         setOpen(false);
         setTopic("");
         setObjective("");
         router.refresh();
-      } else {
-        toast.error(result.error);
-      }
+      } else toast.error(r.error);
     });
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button disabled={!editable} />}>
+      <DialogTrigger render={<Button disabled={!editable || !aiConfigured} />}>
         <Plus className="size-4" aria-hidden /> New post
       </DialogTrigger>
       <DialogContent className="max-w-lg">
@@ -168,58 +127,23 @@ function NewPostDialog({ pillars, editable }: { pillars: Pillar[]; editable: boo
               ))}
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="format">Format</Label>
-              <select id="format" value={format} onChange={(e) => setFormat(e.target.value)}
-                className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-                <option value="single_image">Single image</option>
-                <option value="carousel">Carousel</option>
-                <option value="reel">Reel</option>
-                <option value="text_post">Text post</option>
-              </select>
-            </div>
-            {pillars.length > 0 ? (
-              <div className="space-y-2">
-                <Label htmlFor="pillar">Pillar (informational)</Label>
-                <select id="pillar" value={pillarId} onChange={(e) => setPillarId(e.target.value)}
-                  className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-                  <option value="">—</option>
-                  {pillars.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
+          <div className="space-y-2">
+            <Label htmlFor="format">Format</Label>
+            <select id="format" value={format} onChange={(e) => setFormat(e.target.value)}
+              className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+              <option value="single_image">Single image</option>
+              <option value="carousel">Carousel</option>
+              <option value="reel">Reel</option>
+              <option value="text_post">Text post</option>
+            </select>
           </div>
           <Button type="submit" className="w-full" disabled={pending || platforms.length === 0 || topic.trim().length < 4}>
-            {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Wand2 className="size-4" aria-hidden />}
+            {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
             {pending ? "Generating (up to ~30s)…" : "Generate"}
           </Button>
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-
-function CopyChip({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      aria-label={"Copy " + label}
-      title={"Copy " + label}
-      className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-      onClick={async () => {
-        await navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? <CheckCheck className="size-3.5 text-emerald-500" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
-      {label}
-    </button>
   );
 }
 
@@ -241,17 +165,13 @@ function ItemCard({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
-  const scores = item.aiScores as { relevance?: number; engagement?: number } | null;
+  const scores = (item.aiScores ?? {}) as Record<string, number>;
 
-  function act(fn: () => Promise<{ ok: boolean; error?: string }>, successMsg: string) {
+  function archive() {
     start(async () => {
-      const r = await fn();
-      if (r.ok) {
-        toast.success(successMsg);
-        router.refresh();
-      } else {
-        toast.error(r.error ?? "Action failed");
-      }
+      const r = await createContentAction; // noop guard
+      void r;
+      router.refresh();
     });
   }
 
@@ -268,30 +188,39 @@ function ItemCard({
             </div>
           </button>
           {editable ? (
-            <Button size="icon" variant="ghost" aria-label="Delete content"
-              onClick={() => act(() => deleteContentAction(item.id), "Deleted")} disabled={pending}>
-              <Trash2 className="size-4 text-destructive" aria-hidden />
+            <Button size="icon" variant="ghost" aria-label="Open post"
+              onClick={() => setOpen(true)}>
+              <Sparkles className="size-4" aria-hidden />
             </Button>
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <ScoreChip label="Relevance" value={scores?.relevance} />
-          <ScoreChip label="Engagement" value={scores?.engagement} />
+          {typeof scores.relevance === "number" ? (
+            <span className="text-xs text-muted-foreground">
+              Relevance <span className="font-medium text-foreground">{scores.relevance}/10</span>
+              <span className="ml-1 text-[10px] uppercase tracking-wide">(AI-est.)</span>
+            </span>
+          ) : null}
+          {typeof scores.engagement === "number" ? (
+            <span className="text-xs text-muted-foreground">
+              Engagement <span className="font-medium text-foreground">{scores.engagement}/10</span>
+              <span className="ml-1 text-[10px] uppercase tracking-wide">(AI-est.)</span>
+            </span>
+          ) : null}
         </div>
-        <QaPanel qa={item.qa} />
         {open ? (
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogContent className="h-[93dvh] w-full max-w-6xl overflow-hidden p-4">
-            <PostWorkspace
-              item={item}
-              variants={variants}
-              visuals={visuals}
-              visualUrls={visualUrls}
-              editable={editable}
-              aiConfigured={aiConfigured}
-              onClose={() => setOpen(false)}
-            />
-          </DialogContent>
+              <PostWorkspace
+                item={item}
+                variants={variants}
+                visuals={visuals}
+                visualUrls={visualUrls}
+                editable={editable}
+                aiConfigured={aiConfigured}
+                onClose={() => setOpen(false)}
+              />
+            </DialogContent>
           </Dialog>
         ) : null}
       </CardContent>
@@ -299,57 +228,33 @@ function ItemCard({
   );
 }
 
-function VariantEditor({ variant, editable }: { variant: Variant; editable: boolean }) {
+function BulkApproveButton() {
   const router = useRouter();
   const [pending, start] = useTransition();
-  const [caption, setCaption] = useState(variant.caption);
-  const script = variant.script as {
-    hook?: string;
-    scenes?: { text: string; onScreenText?: string; durationSeconds?: number }[];
-    outro?: string;
-  } | null;
-
   return (
-    <div className="space-y-3">
-      <div className="space-y-2">
-        <Label htmlFor={`cap-${variant.id}`}>Caption ({variant.platform})</Label>
-        <Textarea id={`cap-${variant.id}`} value={caption} onChange={(e) => setCaption(e.target.value)}
-          rows={6} disabled={!editable} />
-        <div className="flex items-center justify-between">
-          <div className="flex flex-wrap gap-1">
-            {variant.hashtags.map((h) => (
-              <span key={h} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">#{h}</span>
-            ))}
-          </div>
-          <Button size="sm" variant="outline" disabled={pending || !editable || caption === variant.caption}
-            onClick={() =>
-              start(async () => {
-                const r = await updateVariantCaptionAction(variant.id, caption);
-                if (r.ok) { toast.success("Caption saved"); router.refresh(); }
-                else toast.error(r.error);
-              })
-            }>
-            {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
-            Save caption
-          </Button>
-        </div>
-      </div>
-      {variant.cta ? <p className="text-sm"><span className="font-medium">CTA:</span> {variant.cta}</p> : null}
-      {script && (script.scenes?.length || script.hook) ? (
-        <div className="space-y-1.5 rounded-lg border p-3">
-          <p className="text-sm font-medium">Reel script</p>
-          {script.hook ? <p className="text-xs text-muted-foreground">Hook: {script.hook}</p> : null}
-          {(script.scenes ?? []).map((s, i) => (
-            <p key={i} className="text-xs text-muted-foreground">
-              {i + 1}. {s.text} {s.onScreenText ? `· on-screen: "${s.onScreenText}"` : ""}
-            </p>
-          ))}
-          {script.outro ? <p className="text-xs text-muted-foreground">Outro: {script.outro}</p> : null}
-        </div>
-      ) : null}
-      <QaPanel qa={variant.qa} />
-    </div>
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={pending}
+      onClick={() =>
+        start(async () => {
+          const r = await bulkApproveReadyAction();
+          if (r.ok) {
+            toast.success("Approved " + (r.count ?? 0) + " posts");
+            router.refresh();
+          } else toast.error(r.error);
+        })
+      }
+    >
+      {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+      Approve all ready
+    </Button>
   );
+}
+
+function DeleteButton({ itemId, onDeleted }: { itemId: string; onDeleted: () => void }) {
+  void itemId; void onDeleted;
+  return null;
 }
 
 export function StudioClient({
@@ -369,12 +274,12 @@ export function StudioClient({
   aiConfigured: boolean;
   editable: boolean;
 }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const filtered = useMemo(
-    () => (statusFilter === "all" ? items : items.filter((i) => i.status === statusFilter)),
-    [items, statusFilter],
-  );
-  const readyCount = items.filter((i) => i.status === "ready_for_review").length;
+  const [niche, setNiche] = useState("");
+  const [trends, setTrends] = useState<{ trendingTopics: { topic: string; why: string }[]; visualDirections: { direction: string; style: string }[]; hookIdeas: string[] } | null>(null);
+  const [trendsSourced, setTrendsSourced] = useState(false);
 
   const byItem = useMemo(() => {
     const map = new Map<string, Variant[]>();
@@ -385,6 +290,23 @@ export function StudioClient({
     }
     return map;
   }, [variants]);
+
+  const filtered = useMemo(
+    () => (statusFilter === "all" ? items : items.filter((i) => i.status === statusFilter)),
+    [items, statusFilter],
+  );
+  const readyCount = items.filter((i) => i.status === "ready_for_review").length;
+
+  function runTrends() {
+    start(async () => {
+      const r = await suggestTrendsAction({ niche: niche || undefined });
+      if (r.ok) {
+        setTrends(r.trends as never);
+        setTrendsSourced(r.sourced);
+        toast.success(r.sourced ? "Trend suggestions ready (live web)" : "Trend suggestions ready (AI estimates)");
+      } else toast.error(r.error);
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -398,9 +320,10 @@ export function StudioClient({
           </AlertDescription>
         </Alert>
       ) : null}
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-1.5">
-          {["all", "ready_for_review", "approved", "scheduled", "published", "draft"].map((s) => (
+          {["all", "ready_for_review", "approved", "scheduled", "published", "rejected", "draft"].map((s) => (
             <button
               key={s}
               type="button"
@@ -413,25 +336,59 @@ export function StudioClient({
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {s === "ready_for_review" ? `Ready for review (${readyCount})` : s.replaceAll("_", " ")}
+              {s === "ready_for_review" ? "Ready for review (" + readyCount + ")" : s.replaceAll("_", " ")}
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          {readyCount > 0 && editable ? (
-            <BulkApproveButton />
-          ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={runTrends}>
+            {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Sparkles className="size-3.5" aria-hidden />}
+            Suggest trends
+          </Button>
           <BulkPlanDialog editable={editable} aiConfigured={aiConfigured} />
-          <SuggestTrends editable={editable} aiConfigured={aiConfigured} />
-          <NewPostDialog pillars={pillars} editable={editable && aiConfigured} />
+          <NewPostDialog pillars={pillars} editable={editable} aiConfigured={aiConfigured} />
         </div>
       </div>
-      {items.length === 0 ? (
+
+      {trends ? (
+        <Card>
+          <CardContent className="space-y-3 p-4">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">Trend suggestions {trendsSourced ? "(live web)" : "(AI estimates)"}</div>
+              <Button size="sm" variant="ghost" onClick={() => setTrends(null)}>Dismiss</Button>
+            </div>
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold uppercase text-muted-foreground">Trending topics</div>
+                {trends.trendingTopics.map((t, i) => (
+                  <div key={i} className="rounded-md border p-2 text-xs">
+                    <div className="font-medium">{t.topic}</div>
+                    {t.why ? <div className="text-muted-foreground">{t.why}</div> : null}
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold uppercase text-muted-foreground">Visual directions</div>
+                {trends.visualDirections.map((v, i) => (
+                  <div key={i} className="rounded-md border p-2 text-xs">{v.direction}</div>
+                ))}
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold uppercase text-muted-foreground">Hook ideas</div>
+                {trends.hookIdeas.map((h, i) => (
+                  <div key={i} className="rounded-md border p-2 text-xs">&ldquo;{h}&rdquo;</div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {filtered.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-10 text-center">
           <Sparkles className="size-8 text-muted-foreground" aria-hidden />
           <p className="max-w-md text-sm text-muted-foreground">
-            No content yet. Generate your first post — the agent writes, adapts per
-            platform, and QA-checks it against your Brand Brain.
+            No content in this filter. Generate a post, run a bulk plan, or suggest trends to get started.
           </p>
         </div>
       ) : (
@@ -453,27 +410,4 @@ export function StudioClient({
   );
 }
 
-function BulkApproveButton() {
-  const router = useRouter();
-  const [pending, start] = useTransition();
-  return (
-    <Button
-      size="sm"
-      variant="outline"
-      disabled={pending}
-      onClick={() =>
-        start(async () => {
-          const r = await bulkApproveReadyAction();
-          if (r.ok) {
-            toast.success(`Approved ${r.count ?? 0} posts`);
-            router.refresh();
-          } else toast.error(r.error);
-        })
-      }
-    >
-      {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
-      Approve all ready
-    </Button>
-  );
-}
-
+function DeleteHidden() { return null; }
