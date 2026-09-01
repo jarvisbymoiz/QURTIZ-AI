@@ -209,6 +209,10 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
             updatedAt: new Date(),
           })
           .where(eq(jobs.id, jobId));
+        await db
+          .update(agentRuns)
+          .set({ status: "cancelled", finishedAt: new Date() })
+          .where(eq(agentRuns.id, run.id));
         return;
       }
 
@@ -297,15 +301,20 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
 
     // ── 7. Finish ───────────────────────────────────────────────────
     if (created.length === 0) {
+      const reason = failedItems.slice(0, 3).join("; ") || "No posts were generated";
       await db
         .update(jobs)
         .set({
           status: "failed",
-          error: failedItems.slice(0, 3).join("; ") || "No posts were generated",
+          error: reason,
           result: { stage: "Failed", failures: failedItems } as Record<string, unknown>,
           updatedAt: new Date(),
         })
         .where(eq(jobs.id, jobId));
+      await db
+        .update(agentRuns)
+        .set({ status: "failed", error: reason, finishedAt: new Date() })
+        .where(eq(agentRuns.id, run.id));
       await db.insert(notifications).values({
         workspaceId: job.workspaceId,
         userId: job.userId,
@@ -347,6 +356,10 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       .update(jobs)
       .set({ status: "failed", error: message, result: { stage: "Failed" } as Record<string, unknown>, updatedAt: new Date() })
       .where(eq(jobs.id, jobId));
+    await db
+      .update(agentRuns)
+      .set({ status: "failed", error: message, finishedAt: new Date() })
+      .where(eq(agentRuns.id, run.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
       userId: job.userId,

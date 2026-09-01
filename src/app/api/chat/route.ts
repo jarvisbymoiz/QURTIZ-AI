@@ -65,18 +65,9 @@ export async function POST(request: NextRequest) {
     .orderBy(desc(brandMemory.createdAt))
     .limit(60);
 
-  const [run] = await db
-    .insert(agentRuns)
-    .values({ workspaceId, userId: user.id, kind: "chat", model: getModelId() })
-    .returning();
-
-  const system = buildSystemPrompt({
-    brandSummary: summarizeBrandBrain(brandRow ?? null),
-    memories,
-    workspaceName: brandRow?.businessName ?? workspaceId,
-  });
-
-  // Attachment validation: images + PDF only, sane size caps.
+  // Attachment validation: images + PDF only, sane size caps. Runs BEFORE the
+  // agent_run row is created so a rejected request cannot leave an orphaned
+  // "running" run behind.
   const ALLOWED_MEDIA = new Set(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
   const MAX_PART_CHARS = 12_000_000; // ~9MB binary per part when base64
   let totalChars = 0;
@@ -97,6 +88,17 @@ export async function POST(request: NextRequest) {
   if (totalChars > 30_000_000) {
     return NextResponse.json({ error: "TOO_MANY_ATTACHMENTS", message: "Total attachments exceed 22MB." }, { status: 400 });
   }
+
+  const [run] = await db
+    .insert(agentRuns)
+    .values({ workspaceId, userId: user.id, kind: "chat", model: getModelId() })
+    .returning();
+
+  const system = buildSystemPrompt({
+    brandSummary: summarizeBrandBrain(brandRow ?? null),
+    memories,
+    workspaceName: brandRow?.businessName ?? workspaceId,
+  });
 
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);
 

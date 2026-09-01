@@ -198,10 +198,20 @@ export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> 
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const db = getDb();
+  const [job] = await db
+    .select({ id: jobs.id, status: jobs.status })
+    .from(jobs)
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+  if (!job) return { ok: false, error: "Job not found." };
+  // Only non-terminal jobs can be cancelled — flipping a completed/failed job
+  // to "cancelled" would rewrite real history.
+  if (job.status !== "queued" && job.status !== "running") {
+    return { ok: false, error: `A ${job.status} job cannot be cancelled.` };
+  }
   await db
     .update(jobs)
     .set({ status: "cancelled", updatedAt: new Date() })
-    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+    .where(eq(jobs.id, jobId));
   revalidatePath("/content-studio");
   return { ok: true };
 }

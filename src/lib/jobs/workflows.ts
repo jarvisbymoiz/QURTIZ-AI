@@ -1,6 +1,6 @@
 ﻿import "server-only";
 
-import { and, asc, desc, eq, lte } from "drizzle-orm";
+import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   contentItems,
@@ -26,6 +26,17 @@ import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { createServiceClient } from "@/lib/supabase/service";
 
+const MAX_PUBLISH_ATTEMPTS = 3;
+const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
+const STUCK_PROCESSING_MS = 10 * 60_000; // a claim older than this is treated as lost
+
+/** Rate-limit / network-class platform errors are retryable; auth, content
+ *  and permission errors are permanent. */
+function isTransientPublishError(message: string): boolean {
+  const m = message.toLowerCase();
+  return /rate limit|too many requests|\b429\b|timeout|timed out|econnreset|socket|network|unavailable|temporar|internal server|bad gateway|\b5\d\d\b/.test(m);
+}
+
 /**
  * Attempt to publish one due publishing job. M4 will provide the real Meta
  * adapters; until then this fails HONESTLY with a clear reason so the UI
@@ -33,8 +44,21 @@ import { createServiceClient } from "@/lib/supabase/service";
  */
 async function attemptPublish(publishingJobId: string): Promise<void> {
   const db = getDb();
-  const [job] = await db.select().from(publishingJobs).where(eq(publishingJobs.id, publishingJobId));
-  if (!job || job.status !== "pending") return;
+
+  // Atomic claim: the conditional UPDATE (status='pending') means only one
+  // worker can win — a concurrent claim matches 0 rows and returns
+  // immediately. Without it, two workers could both read "pending" and
+  // publish the same variant twice.
+  const [job] = await db
+    .update(publishingJobs)
+    .set({
+      status: "processing",
+      attempts: sql`${publishingJobs.attempts} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(publishingJobs.id, publishingJobId), eq(publishingJobs.status, "pending")))
+    .returning();
+  if (!job) return;
 
   // Notification recipient is the workspace creator, never the workspace UUID
   // (M3: live rows had user_id polluted with the workspace id).
@@ -43,11 +67,6 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     .from(workspaces)
     .where(eq(workspaces.id, job.workspaceId));
   const recipientId = ws?.createdBy ?? job.workspaceId;
-
-  await db
-    .update(publishingJobs)
-    .set({ status: "processing", attempts: job.attempts + 1, updatedAt: new Date() })
-    .where(eq(publishingJobs.id, job.id));
 
   const [conn] = await db
     .select()
@@ -203,24 +222,89 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       link: "/content-studio",
     });
   } else {
-    await db
-      .update(publishingJobs)
-      .set({ status: "failed", lastError: result.message, updatedAt: new Date() })
-      .where(eq(publishingJobs.id, job.id));
-    await db.insert(notifications).values({
-      workspaceId: job.workspaceId,
-      userId: recipientId,
-      kind: "publishing_failed",
-      title: "Publishing failed",
-      body: result.message,
-      link: "/content-studio",
-    });
+    // Transient failures (rate limit / network) are requeued with a backoff
+    // up to MAX_PUBLISH_ATTEMPTS; everything else fails permanently. Either
+    // way the row leaves "processing" — never left running forever.
+    if (isTransientPublishError(result.message) && job.attempts < MAX_PUBLISH_ATTEMPTS) {
+      await db
+        .update(publishingJobs)
+        .set({
+          status: "pending",
+          scheduledAt: new Date(Date.now() + PUBLISH_RETRY_BACKOFF_MS),
+          lastError: result.message,
+          updatedAt: new Date(),
+        })
+        .where(eq(publishingJobs.id, job.id));
+    } else {
+      await db
+        .update(publishingJobs)
+        .set({ status: "failed", lastError: result.message, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, job.id));
+      await db.insert(notifications).values({
+        workspaceId: job.workspaceId,
+        userId: recipientId,
+        kind: "publishing_failed",
+        title: "Publishing failed",
+        body: result.message,
+        link: "/content-studio",
+      });
+    }
+  }
+}
+
+/** Recover publish jobs stuck in "processing" (a worker died mid-publish):
+ *  requeue them while attempts remain, otherwise fail them permanently. */
+async function recoverStuckPublishJobs(): Promise<void> {
+  const db = getDb();
+  const stale = await db
+    .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId })
+    .from(publishingJobs)
+    .where(
+      and(
+        eq(publishingJobs.status, "processing"),
+        lte(publishingJobs.updatedAt, new Date(Date.now() - STUCK_PROCESSING_MS)),
+      ),
+    )
+    .limit(10);
+  for (const job of stale) {
+    if (job.attempts >= MAX_PUBLISH_ATTEMPTS) {
+      const reason = "Publish job was stuck in processing (worker lost) and exceeded the attempt limit.";
+      await db
+        .update(publishingJobs)
+        .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, job.id));
+      const [ws] = await db
+        .select({ createdBy: workspaces.createdBy })
+        .from(workspaces)
+        .where(eq(workspaces.id, job.workspaceId));
+      await db.insert(notifications).values({
+        workspaceId: job.workspaceId,
+        userId: ws?.createdBy ?? job.workspaceId,
+        kind: "publishing_failed",
+        title: "Publishing failed",
+        body: reason,
+        link: "/content-studio",
+      });
+    } else {
+      // Requeue; the claim on the next pick-up counts another attempt, so the
+      // stuck/recover cycle is bounded by MAX_PUBLISH_ATTEMPTS.
+      await db
+        .update(publishingJobs)
+        .set({
+          status: "pending",
+          scheduledAt: new Date(),
+          lastError: "Recovered from a stuck processing state; requeued.",
+          updatedAt: new Date(),
+        })
+        .where(eq(publishingJobs.id, job.id));
+    }
   }
 }
 
 /** Scan for due publishing jobs (runs every minute via pg-boss cron). */
 async function publishDueScan(): Promise<void> {
   const db = getDb();
+  await recoverStuckPublishJobs();
   const due = await db
     .select({ id: publishingJobs.id })
     .from(publishingJobs)
@@ -245,7 +329,26 @@ async function bulkGenerate(jobId: string): Promise<void> {
 async function generateCampaign(campaignId: string): Promise<void> {
   const db = getDb();
   const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
-  if (!campaign || campaign.status !== "generating") return;
+  if (!campaign) return;
+  if (campaign.status !== "generating") {
+    // The worker ran after the campaign left "generating" (e.g. the user
+    // cancelled it). Finalize the app job row so it never sits in "queued"
+    // forever — but never downgrade an already-terminal row.
+    if (campaign.jobId) {
+      const [jobRow] = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, campaign.jobId));
+      if (jobRow && jobRow.status === "queued") {
+        await db
+          .update(jobs)
+          .set({
+            status: "cancelled",
+            error: `Campaign was ${campaign.status} when the worker ran — no content was generated.`,
+            updatedAt: new Date(),
+          })
+          .where(eq(jobs.id, campaign.jobId));
+      }
+    }
+    return;
+  }
 
   const days = await db
     .select()
@@ -442,18 +545,16 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
       .where(eq(platformConnections.status, "connected"));
     for (const row of conns) {
       try {
-        await syncInsightsForWorkspace(row.workspaceId);
+        const result = await syncInsightsForWorkspace(row.workspaceId);
+        if (result.errors.length > 0) {
+          console.error(`[sync-insights] workspace ${row.workspaceId}: ${result.synced} synced, ${result.errors.length} failed — ${result.errors.slice(0, 3).join("; ")}`);
+        } else if (result.synced > 0) {
+          console.log(`[sync-insights] workspace ${row.workspaceId}: ${result.synced} post(s) synced`);
+        }
       } catch (e) {
         console.error("[sync-insights]", e instanceof Error ? e.message : e);
       }
     }
-  });
-  await boss.work(Q.autopilotLoop, async () => {
-    await autopilotLoop();
-  });
-  await boss.work(Q.campaignGenerate, async (job) => {
-    const data = (job as { data?: { campaignId?: string } }).data;
-    if (data?.campaignId) await generateCampaign(data.campaignId);
   });
   await boss.work(Q.autopilotLoop, async () => {
     await autopilotLoop();
