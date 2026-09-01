@@ -51,6 +51,53 @@ export async function scheduleContentAction(input: { itemId: string; dateIso: st
   return { ok: true };
 }
 
+/**
+ * Reschedule an already-scheduled (or approved) content item to a new date
+ * and/or time. H2 guard: only `scheduled`/`approved` items may move —
+ * published items are live and never receive a new slot (that would
+ * double-post). Pending publish jobs are deleted by scheduleItem and
+ * re-created at the new time, so no stale job can fire at the old slot.
+ */
+export async function rescheduleContentAction(input: {
+  itemId: string;
+  dateIso: string;
+  timeStr: string;
+  timezone?: string;
+}): Promise<ActionResult & { scheduledAt?: string; variants?: number }> {
+  const ctx = await getActiveContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.dateIso)) return { ok: false, error: "Invalid date." };
+  if (!input.timeStr || !/^\d{2}:\d{2}$/.test(input.timeStr)) return { ok: false, error: "Invalid time — use HH:MM." };
+
+  const db = getDb();
+  const [item] = await db
+    .select()
+    .from(contentItems)
+    .where(and(eq(contentItems.id, input.itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (!item) return { ok: false, error: "Content item not found." };
+  if (item.status === "published") {
+    return { ok: false, error: "This item is already published and cannot be rescheduled." };
+  }
+  if (item.status !== "scheduled" && item.status !== "approved") {
+    return { ok: false, error: "Only scheduled or approved content can be rescheduled." };
+  }
+
+  const result = await scheduleItem({
+    workspaceId: ctx.workspaceId,
+    itemId: input.itemId,
+    dateIso: input.dateIso,
+    timeStr: input.timeStr,
+    timezone: input.timezone ?? ctx.timezone,
+  });
+  if (!result.ok) return { ok: false, error: result.message };
+
+  revalidatePath("/calendar");
+  revalidatePath("/content-studio");
+  revalidatePath("/");
+  return { ok: true, scheduledAt: result.scheduledAt.toISOString(), variants: result.variants };
+}
+
 export async function unscheduleContentAction(itemId: string): Promise<ActionResult> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };

@@ -7,7 +7,8 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { getModelId } from "@/lib/ai/provider";
-import { scheduleItem } from "@/lib/scheduling/engine";
+import { scheduleItem, type ScheduleOutcome } from "@/lib/scheduling/engine";
+import { isValidTimezone } from "@/lib/scheduling/time";
 import { startBulkPlanCore } from "@/lib/jobs/bulk";
 import { makeWebSearchTool } from "@/lib/ai/search-tool";
 import { workspaces } from "@/db/schema";
@@ -163,43 +164,69 @@ export function buildAgentTools(ctx: AgentToolContext) {
 
   const scheduleContent = tool({
     description:
-      "Schedule an existing content item for publishing on a specific date (and optional time, default 18:30 workspace time). Use after create_content when the user names a date/time. Publishing requires connected accounts; scheduling itself always works.",
+      "Schedule (or reschedule) an APPROVED content item at a specific date and time in the workspace timezone. Use when the user asks to post content at a named date/time. Reschedules the item if it is already scheduled (moves it to the new slot, cancelling the old one). Time defaults to 18:30 workspace time if omitted. Publishing itself still requires a connected platform account.",
     inputSchema: z.object({
-      itemId: z.string().uuid().optional().describe("The content item id (returned by create_content). If omitted, the most recent Ready-for-Review item is used."),
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Schedule date, YYYY-MM-DD"),
-      time: z.string().regex(/^\d{2}:\d{2}$/).optional().describe("Optional time HH:mm in workspace timezone"),
+      contentItemId: z.string().describe("The content item id (returned by create_content or search_content_library)"),
+      date: z.string().describe("Schedule date: YYYY-MM-DD or an ISO date string"),
+      time: z.string().regex(/^\d{2}:\d{2}$/).optional().describe("Time HH:MM in the target timezone (default 18:30 workspace time)"),
+      timezone: z.string().optional().describe("IANA timezone, e.g. Asia/Karachi. Defaults to the workspace timezone."),
     }),
     execute: async (input) => {
       const db = getDb();
-      let itemId: string | null = input.itemId ?? null;
-      if (!itemId) {
-          const latest = await db
-          .select({ id: contentItems.id, status: contentItems.status, createdAt: contentItems.createdAt })
-          .from(contentItems)
-          .where(and(eq(contentItems.workspaceId, ctx.workspaceId), eq(contentItems.status, "ready_for_review")))
-          .orderBy(desc(contentItems.createdAt))
-          .limit(1);
-        if (latest.length === 0) {
-          await logStep("schedule_content", input, { ok: false });
-          return { scheduled: false, message: "No Ready-for-Review content found. Create content first." };
-        }
-        itemId = latest[0].id ?? null;
-      }
       const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
-      const result = await scheduleItem({
-        workspaceId: ctx.workspaceId,
-        itemId,
-        dateIso: input.date,
-        timeStr: input.time,
-        timezone: ws?.timezone ?? "Asia/Karachi",
-      });
-      await logStep("schedule_content", input, { ok: result.ok });
+      const tz = input.timezone ?? ws?.timezone ?? "Asia/Karachi";
+      if (!isValidTimezone(tz)) {
+        return { scheduled: false, message: `Unknown timezone "${tz}". Use an IANA timezone such as Asia/Karachi or America/New_York.` };
+      }
+      const dateIso = input.date.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
+        return { scheduled: false, message: `Invalid date "${input.date}". Use YYYY-MM-DD.` };
+      }
+
+      // Workspace-scoped lookup: items outside this workspace simply don't exist.
+      const [item] = await db
+        .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status })
+        .from(contentItems)
+        .where(and(eq(contentItems.id, input.contentItemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+      if (!item) {
+        await logStep("schedule_content", input, { ok: false });
+        return { scheduled: false, message: "Content item not found in this workspace." };
+      }
+      // H2 guard: only approved or scheduled items can be booked. Drafts and
+      // review items must be approved first; published items are already live.
+      if (!["approved", "scheduled"].includes(item.status)) {
+        await logStep("schedule_content", input, { ok: false });
+        return {
+          scheduled: false,
+          message:
+            item.status === "published"
+              ? "This item is already published and cannot be scheduled again."
+              : "This content is not approved yet — approve it first.",
+        };
+      }
+
+      let result: ScheduleOutcome;
+      try {
+        result = await scheduleItem({
+          workspaceId: ctx.workspaceId,
+          itemId: item.id,
+          dateIso,
+          timeStr: input.time,
+          timezone: tz,
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "Scheduling failed";
+        return { scheduled: false, message: msg };
+      }
+      await logStep("schedule_content", input, { ok: result.ok, scheduledAt: result.ok ? result.scheduledAt.toISOString() : undefined });
       if (!result.ok) return { scheduled: false, message: result.message };
+
+      const wallClock = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(result.scheduledAt);
       return {
         scheduled: true,
         scheduledAt: result.scheduledAt.toISOString(),
         variants: result.variants,
-        message: `Scheduled for ${input.date} ${input.time ?? "18:30"} (workspace time) across ${result.variants} platform variants. It will publish automatically if the platform is connected.`,
+        message: `Scheduled "${item.topic}" for ${dateIso} ${wallClock} (${tz}) across ${result.variants} platform variant${result.variants === 1 ? "" : "s"}.`,
       };
     },
   });

@@ -25,5 +25,8 @@ Every visual prompt must specifically match the Brand Brain, brand identity, pos
 - Carousel: produce a separate detailed visual direction for EVERY slide while keeping ONE consistent design system across all slides.
 - Reels: produce a detailed scene-by-scene visual and script direction with timing.
 
+### Scheduling
+- When the user asks to post at a specific date/time, schedule the approved post with the schedule_content tool (times are in the workspace timezone, default 18:30).
+
 ### Never do
 - Generic AI prompts, repeated ideas, random colors, or designs that do not match the brand.`;

@@ -99,6 +99,33 @@ describe("scheduleItem", () => {
     expect(calls.filter((c) => c.kind === "insert")).toHaveLength(0);
   });
 
+  it("reschedules: deletes the old pending job and re-creates it at the new time", async () => {
+    const { db, calls } = makeDb({
+      item: { id: "item-1", status: "scheduled" },
+      variants: [{ id: "v-fb", platform: "facebook", status: "scheduled" }],
+    });
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({
+      workspaceId: "ws-1",
+      itemId: "item-1",
+      dateIso: "2026-09-10",
+      timeStr: "09:15",
+      timezone: "Asia/Karachi",
+    });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    // The stale pending job is deleted before the new one is inserted
+    // (Asia/Karachi is UTC+5, so 09:15 local = 04:15 UTC).
+    expect(calls.filter((c) => c.kind === "delete")).toHaveLength(1);
+    const inserts = calls.filter((c) => c.kind === "insert");
+    expect(inserts).toHaveLength(1);
+    expect((inserts[0].values?.scheduledAt as Date).toISOString()).toBe("2026-09-10T04:15:00.000Z");
+    expect(res.scheduledAt.toISOString()).toBe("2026-09-10T04:15:00.000Z");
+  });
+
   it("rejects items that are not in a reviewable state", async () => {
     const { db } = makeDb({ item: { id: "item-1", status: "draft" }, variants: [] });
     mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);

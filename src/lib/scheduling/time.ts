@@ -52,6 +52,16 @@ export function parseZonedDateTime(dateIso: string, timeStr: string, tz: string)
   return zonedToUtc(y, m, d, h, min, tz);
 }
 
+/** True when `tz` is a valid IANA timezone (e.g. "Asia/Karachi"). */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The default posting slot for a given day in tz: 18:30 local. */
 export function defaultSlotFor(dateIso: string, tz: string): Date {
   return parseZonedDateTime(dateIso, "18:30", tz);

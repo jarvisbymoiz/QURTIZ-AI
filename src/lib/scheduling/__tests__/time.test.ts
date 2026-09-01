@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from "vitest";
-import { parseZonedDateTime, planContentDays, defaultSlotFor } from "@/lib/scheduling/time";
+import { parseZonedDateTime, planContentDays, defaultSlotFor, isValidTimezone } from "@/lib/scheduling/time";
 
 describe("parseZonedDateTime", () => {
   it("converts Asia/Karachi 18:30 to 13:30 UTC (no DST)", () => {
@@ -22,6 +22,20 @@ describe("defaultSlotFor", () => {
   it("uses 18:30 in the workspace timezone", () => {
     const d = defaultSlotFor("2026-09-02", "Asia/Karachi");
     expect(d.toISOString()).toBe("2026-09-02T13:30:00.000Z");
+  });
+});
+
+describe("isValidTimezone", () => {
+  it("accepts real IANA timezones", () => {
+    expect(isValidTimezone("Asia/Karachi")).toBe(true);
+    expect(isValidTimezone("America/New_York")).toBe(true);
+    expect(isValidTimezone("UTC")).toBe(true);
+  });
+
+  it("rejects garbage and empty strings", () => {
+    expect(isValidTimezone("Mars/Olympus")).toBe(false);
+    expect(isValidTimezone("not-a-tz")).toBe(false);
+    expect(isValidTimezone("")).toBe(false);
   });
 });
 

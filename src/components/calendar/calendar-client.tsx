@@ -3,15 +3,18 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronLeft, ChevronRight, ListChecks } from "lucide-react";
+import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, ListChecks } from "lucide-react";
 import type { contentItems, publishingJobs } from "@/db/schema";
 import {
+  rescheduleContentAction,
   scheduleContentAction,
   unscheduleContentAction,
 } from "@/server/actions/schedule";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
@@ -36,6 +39,11 @@ const STATUS_DOT: Record<string, string> = {
   failed: "bg-destructive",
 };
 
+/** "HH:MM" of a Date rendered in the workspace timezone (24h). */
+function fmtTime(d: Date, timezone: string): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+}
+
 export function CalendarClient({
   items,
   pJobs,
@@ -55,6 +63,10 @@ export function CalendarClient({
   const [weekOffset, setWeekOffset] = useState(0);
   const [selected, setSelected] = useState<Item | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
+  // Pending booking: item + date prefilled from the drop target. `time` is
+  // empty for new bookings (the user must pick one — no silent default slot)
+  // and prefilled with the current time when rescheduling an existing post.
+  const [scheduleDraft, setScheduleDraft] = useState<{ item: Item; dateIso: string; time: string } | null>(null);
 
   const monthView = useMemo(() => {
     const base = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
@@ -89,8 +101,10 @@ export function CalendarClient({
     return map;
   }, [items, timezone]);
 
+  // Sidebar shows ONLY approved posts from Content Studio — nothing else can
+  // be dragged onto the calendar (review items must be approved first).
   const unscheduledQueue = useMemo(
-    () => items.filter((i) => !i.scheduledAt && (i.status === "ready_for_review" || i.status === "approved")),
+    () => items.filter((i) => !i.scheduledAt && i.status === "approved"),
     [items],
   );
 
@@ -106,21 +120,75 @@ export function CalendarClient({
     return map;
   }, [pJobs]);
 
-  function scheduleOn(itemId: string, dateIso: string) {
-    start(async () => {
-      const r = await scheduleContentAction({ itemId, dateIso });
-      if (r.ok) {
-        toast.success(`Scheduled for ${dateIso} at 18:30 (${timezone})`);
-        router.refresh();
-      } else toast.error(r.error);
-    });
+  /** Open the schedule picker for a drop/click — never books anything itself. */
+  function openScheduleDraft(item: Item, dateIso: string) {
+    if (!editable) return;
+    const time = item.scheduledAt ? fmtTime(new Date(item.scheduledAt), timezone) : "";
+    setScheduleDraft({ item, dateIso, time });
   }
 
   function handleDrop(e: React.DragEvent, dateIso: string) {
     e.preventDefault();
     setDragOver(null);
     const itemId = e.dataTransfer.getData("text/qurtiz-item");
-    if (itemId && editable) scheduleOn(itemId, dateIso);
+    if (!itemId || !editable) return;
+    const item = items.find((i) => i.id === itemId);
+    if (!item) return;
+    if (item.status === "published") {
+      toast.error("Published posts cannot be scheduled again.");
+      return;
+    }
+    if (item.status !== "approved" && item.status !== "scheduled") {
+      toast.error("Only approved posts can be scheduled.");
+      return;
+    }
+    openScheduleDraft(item, dateIso);
+  }
+
+  function confirmScheduleDraft() {
+    if (!scheduleDraft) return;
+    const { item, dateIso, time } = scheduleDraft;
+    start(async () => {
+      const isReschedule = item.status === "scheduled";
+      const r = isReschedule
+        ? await rescheduleContentAction({ itemId: item.id, dateIso, timeStr: time })
+        : await scheduleContentAction({ itemId: item.id, dateIso, timeStr: time });
+      if (r.ok) {
+        toast.success((isReschedule ? "Rescheduled" : "Scheduled") + ` for ${dateIso} ${time} (${timezone})`);
+        setScheduleDraft(null);
+        router.refresh();
+      } else toast.error(r.error);
+    });
+  }
+
+  /** A scheduled/published item chip inside a day cell. */
+  function renderDayItem(item: Item) {
+    const failed = failedJobsByItem.get(item.id);
+    return (
+      <div
+        key={item.id}
+        draggable={editable && (item.status === "approved" || item.status === "scheduled")}
+        onDragStart={(e) => e.dataTransfer.setData("text/qurtiz-item", item.id)}
+        onClick={() => setSelected(item)}
+        className="cursor-pointer rounded border bg-background px-1.5 py-1 text-[11px] leading-tight hover:bg-accent"
+        title={item.topic}
+      >
+        <div className="flex items-center gap-1">
+          <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[item.status] ?? "bg-muted-foreground")} />
+          <span className="truncate">{item.topic}</span>
+          {item.scheduledAt ? (
+            <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground">
+              {fmtTime(new Date(item.scheduledAt), timezone)}
+            </span>
+          ) : null}
+        </div>
+        {failed && failed.length > 0 ? (
+          <div className="mt-0.5 flex items-center gap-1 text-destructive">
+            <AlertTriangle className="size-3" aria-hidden /> publish failed
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -192,29 +260,7 @@ export function CalendarClient({
                       {date.getDate()}
                     </div>
                     <div className="space-y-1">
-                      {dayItems.slice(0, 3).map((item) => {
-                        const failed = failedJobsByItem.get(item.id);
-                        return (
-                          <div
-                            key={item.id}
-                            draggable={editable}
-                            onDragStart={(e) => e.dataTransfer.setData("text/qurtiz-item", item.id)}
-                            onClick={() => setSelected(item)}
-                            className="cursor-pointer rounded border bg-background px-1.5 py-1 text-[11px] leading-tight hover:bg-accent"
-                            title={item.topic}
-                          >
-                            <div className="flex items-center gap-1">
-                              <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[item.status] ?? "bg-muted-foreground")} />
-                              <span className="truncate">{item.topic}</span>
-                            </div>
-                            {failed && failed.length > 0 ? (
-                              <div className="mt-0.5 flex items-center gap-1 text-destructive">
-                                <AlertTriangle className="size-3" aria-hidden /> publish failed
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
+                      {dayItems.slice(0, 3).map(renderDayItem)}
                       {dayItems.length > 3 ? (
                         <div className="px-1 text-[10px] text-muted-foreground">+{dayItems.length - 3} more</div>
                       ) : null}
@@ -254,29 +300,7 @@ export function CalendarClient({
                       {date.getDate()}
                     </div>
                     <div className="space-y-1">
-                      {dayItems.slice(0, 3).map((item) => {
-                        const failed = failedJobsByItem.get(item.id);
-                        return (
-                          <div
-                            key={item.id}
-                            draggable={editable}
-                            onDragStart={(e) => e.dataTransfer.setData("text/qurtiz-item", item.id)}
-                            onClick={() => setSelected(item)}
-                            className="cursor-pointer rounded border bg-background px-1.5 py-1 text-[11px] leading-tight hover:bg-accent"
-                            title={item.topic}
-                          >
-                            <div className="flex items-center gap-1">
-                              <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[item.status] ?? "bg-muted-foreground")} />
-                              <span className="truncate">{item.topic}</span>
-                            </div>
-                            {failed && failed.length > 0 ? (
-                              <div className="mt-0.5 flex items-center gap-1 text-destructive">
-                                <AlertTriangle className="size-3" aria-hidden /> publish failed
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
+                      {dayItems.slice(0, 3).map(renderDayItem)}
                       {dayItems.length > 3 ? (
                         <div className="px-1 text-[10px] text-muted-foreground">+{dayItems.length - 3} more</div>
                       ) : null}
@@ -293,12 +317,12 @@ export function CalendarClient({
         <Card className="h-fit">
           <CardContent className="space-y-2 p-3">
             <div className="flex items-center gap-2 text-sm font-medium">
-              <ListChecks className="size-4" aria-hidden /> Ready to schedule ({unscheduledQueue.length})
+              <ListChecks className="size-4" aria-hidden /> Approved to schedule ({unscheduledQueue.length})
             </div>
-            <p className="text-xs text-muted-foreground">Drag onto a day to schedule at 18:30.</p>
+            <p className="text-xs text-muted-foreground">Drag onto a day, then pick a time.</p>
             {unscheduledQueue.length === 0 ? (
               <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
-                Nothing waiting. Approve content in the Studio, then drag it here onto a day.
+                No approved posts. Approve content in the Studio, then drag it here onto a day.
               </p>
             ) : (
               <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
@@ -321,6 +345,54 @@ export function CalendarClient({
           </CardContent>
         </Card>
       </div>
+
+      {/* Schedule / reschedule picker — every booking goes through this
+          dialog (drop, sidebar click, or Edit schedule), so nothing can ever
+          be booked silently at a default time. */}
+      <Dialog open={scheduleDraft !== null} onOpenChange={(o) => !o && setScheduleDraft(null)}>
+        <DialogContent className="max-w-md">
+          {scheduleDraft ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{scheduleDraft.item.status === "scheduled" ? "Reschedule post" : "Schedule post"}</DialogTitle>
+                <DialogDescription>
+                  {scheduleDraft.item.topic} · {timezone}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="cal-schedule-date">Date (workspace time)</Label>
+                  <Input
+                    id="cal-schedule-date"
+                    type="date"
+                    value={scheduleDraft.dateIso}
+                    onChange={(e) => setScheduleDraft((d) => (d ? { ...d, dateIso: e.target.value } : d))}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cal-schedule-time">Time (workspace time)</Label>
+                  <Input
+                    id="cal-schedule-time"
+                    type="time"
+                    value={scheduleDraft.time}
+                    onChange={(e) => setScheduleDraft((d) => (d ? { ...d, time: e.target.value } : d))}
+                  />
+                  {scheduleDraft.time === "" ? (
+                    <p className="text-xs text-muted-foreground">Pick a time — nothing is booked until you confirm.</p>
+                  ) : null}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button size="sm" variant="ghost" onClick={() => setScheduleDraft(null)}>Cancel</Button>
+                  <Button size="sm" disabled={pending || scheduleDraft.time === ""} onClick={confirmScheduleDraft}>
+                    <CalendarClock className="size-3.5" aria-hidden />
+                    {scheduleDraft.item.status === "scheduled" ? "Reschedule" : "Schedule"}
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       {/* Item detail */}
       <Dialog open={selected !== null} onOpenChange={(o) => !o && setSelected(null)}>
@@ -348,6 +420,17 @@ export function CalendarClient({
                   </div>
                 ))}
                 <div className="flex flex-wrap gap-2">
+                  {selected.status === "scheduled" && editable ? (
+                    <Button size="sm" variant="outline" disabled={pending}
+                      onClick={() => {
+                        if (selected.scheduledAt) {
+                          openScheduleDraft(selected, dayIso(new Date(selected.scheduledAt), timezone));
+                          setSelected(null);
+                        }
+                      }}>
+                      <CalendarClock className="size-3.5" aria-hidden /> Edit schedule
+                    </Button>
+                  ) : null}
                   {selected.status === "scheduled" && editable ? (
                     <Button size="sm" variant="outline" disabled={pending}
                       onClick={() => start(async () => {
