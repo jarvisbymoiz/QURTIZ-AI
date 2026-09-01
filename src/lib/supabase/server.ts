@@ -17,6 +17,11 @@ export async function createClient() {
   }
 
   return createServerClient(url, anonKey, {
+    // M13: session cookies carry the access token — keep them out of JS reach
+    // (httpOnly) and TLS-only (secure). The browser client on the login page
+    // still works: document.cookie writes ignore httpOnly, and localhost is a
+    // trustworthy origin for Secure cookies.
+    cookieOptions: { httpOnly: true, secure: true, sameSite: "lax" },
     cookies: {
       getAll() {
         return cookieStore.getAll();

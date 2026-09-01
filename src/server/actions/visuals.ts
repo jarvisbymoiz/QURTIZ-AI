@@ -6,6 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { can, type Capability } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { generateVisual, type VisualMode } from "@/lib/visuals/generate";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
@@ -101,6 +102,9 @@ export async function generateVisualAction(
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
+  const rl = rateLimit("visual-gen:" + ctx.workspaceId, 6, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Visual generation limit reached. Try again in a few minutes." };
+
   try {
     const result = await generateVisual({
       workspaceId: ctx.workspaceId,
@@ -118,9 +122,16 @@ export async function generateVisualAction(
 }
 
 export async function getAssetSignedUrl(storagePath: string): Promise<string | null> {
+  // M9: signed URLs are bearer URLs — require a session AND workspace
+  // membership, not just the forgeable qurtiz_workspace cookie.
+  const user = await getSessionUser();
+  if (!user) return null;
   const cookieStore = await cookies();
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId || !storagePath.startsWith(`${workspaceId}/`)) return null;
+  if (!workspaceId) return null;
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership) return null;
+  if (!storagePath.startsWith(`${workspaceId}/`)) return null;
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
   const { data } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 3600);
@@ -144,6 +155,9 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
+  const rl = rateLimit("visual-upload:" + ctx.workspaceId, 10, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Upload limit reached. Try again in a few minutes." };
+
   const itemId = String(formData.get("itemId") ?? "");
   const slideIndexRaw = formData.get("slideIndex");
   const slideIndex = slideIndexRaw === null || slideIndexRaw === "" ? null : Number(slideIndexRaw);
@@ -156,6 +170,16 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
   }
   if (file.size > 9 * 1024 * 1024) return { ok: false, error: "Image must be 9MB or smaller." };
 
+  // M8: the itemId is user-supplied — verify the content item belongs to this
+  // workspace BEFORE uploading/inserting, or a cross-workspace visual_assets
+  // row (and storage object) could be injected.
+  const db = getDb();
+  const [item] = await db
+    .select({ id: contentItems.id, status: contentItems.status })
+    .from(contentItems)
+    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (!item) return { ok: false, error: "Content item not found in this workspace." };
+
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
   const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
@@ -165,7 +189,6 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
     .upload(storagePath, file, { contentType: file.type, upsert: false });
   if (uploadError) return { ok: false, error: "Upload failed: " + uploadError.message };
 
-  const db = getDb();
   await db.insert(visualAssets).values({
     workspaceId: ctx.workspaceId,
     contentItemId: itemId,
@@ -177,11 +200,7 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
   });
 
   // Approval transition: draft -> ready_for_review once a visual exists.
-  const [item] = await db
-    .select({ status: contentItems.status })
-    .from(contentItems)
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-  if (item?.status === "draft") {
+  if (item.status === "draft") {
     await db
       .update(contentItems)
       .set({ status: "ready_for_review", updatedAt: new Date() })

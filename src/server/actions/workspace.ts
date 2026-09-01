@@ -62,6 +62,7 @@ export async function createWorkspaceAction(formData: FormData): Promise<ActionR
   const cookieStore = await cookies();
   cookieStore.set(WORKSPACE_COOKIE, workspace.id, {
     httpOnly: true,
+    secure: true,
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 24 * 365,
@@ -81,6 +82,7 @@ export async function switchWorkspaceAction(workspaceId: string): Promise<Action
   const cookieStore = await cookies();
   cookieStore.set(WORKSPACE_COOKIE, workspaceId, {
     httpOnly: true,
+    secure: true,
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 24 * 365,

@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
   const response = NextResponse.redirect(buildOAuthUrl(origin, state));
   response.cookies.set("qurtiz_meta_oauth", Buffer.from(JSON.stringify(stateStore)).toString("base64url"), {
     httpOnly: true,
+    secure: true,
     sameSite: "lax",
     path: "/",
     maxAge: 600,

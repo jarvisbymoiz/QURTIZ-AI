@@ -9,6 +9,7 @@ import { getDb } from "@/db";
 import { campaigns, campaignItems, jobs } from "@/db/schema";
 import { getModel } from "@/lib/ai/provider";
 import { can, type Capability } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -60,6 +61,9 @@ export async function startCampaignAction(input: {
 }): Promise<ActionResult & { campaignId?: string }> {
   const ctx = await activeContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("campaign-start:" + ctx.workspaceId, 3, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Too many campaign starts. Try again in a few minutes." };
 
   const parsed = createSchema.safeParse({
     name: input.name,

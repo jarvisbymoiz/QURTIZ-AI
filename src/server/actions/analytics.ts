@@ -10,6 +10,7 @@ import { getModel, getModelId } from "@/lib/ai/provider";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { can, type Capability } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -81,6 +82,9 @@ async function buildRows(workspaceId: string, timezone: string): Promise<Metrics
 export async function runPerformanceAnalysisAction(): Promise<ActionResult & { insight?: string }> {
   const ctx = await activeContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("performance:" + ctx.workspaceId, 6, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Analysis limit reached. Try again in a few minutes." };
 
   const model = getModel();
   if (!model) return { ok: false, error: "AI is not configured (GEMINI_API_KEY missing)." };

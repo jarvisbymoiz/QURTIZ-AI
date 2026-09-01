@@ -36,6 +36,14 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
   const [job] = await db.select().from(publishingJobs).where(eq(publishingJobs.id, publishingJobId));
   if (!job || job.status !== "pending") return;
 
+  // Notification recipient is the workspace creator, never the workspace UUID
+  // (M3: live rows had user_id polluted with the workspace id).
+  const [ws] = await db
+    .select({ createdBy: workspaces.createdBy })
+    .from(workspaces)
+    .where(eq(workspaces.id, job.workspaceId));
+  const recipientId = ws?.createdBy ?? job.workspaceId;
+
   await db
     .update(publishingJobs)
     .set({ status: "processing", attempts: job.attempts + 1, updatedAt: new Date() })
@@ -59,7 +67,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       .where(eq(publishingJobs.id, job.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: job.workspaceId,
+      userId: recipientId,
       kind: "publishing_failed",
       title: "Publishing failed",
       body: reason,
@@ -90,7 +98,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       .where(eq(publishingJobs.id, job.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: job.workspaceId,
+      userId: recipientId,
       kind: "publishing_failed",
       title: "Publishing skipped",
       body: reason,
@@ -128,7 +136,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
         .where(eq(publishingJobs.id, job.id));
       await db.insert(notifications).values({
         workspaceId: job.workspaceId,
-        userId: job.workspaceId,
+        userId: recipientId,
         kind: "publishing_failed",
         title: "Publishing failed",
         body: reason,
@@ -144,7 +152,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     await db.update(publishingJobs).set({ status: "failed", lastError: reason, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: job.workspaceId,
+      userId: recipientId,
       kind: "auth_expired",
       title: "Reconnection required",
       body: reason,
@@ -188,7 +196,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     }
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: job.workspaceId,
+      userId: recipientId,
       kind: "publishing_completed",
       title: "Published successfully",
       body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} post is live${result.permalink ? `: ${result.permalink}` : "."}`,
@@ -201,7 +209,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       .where(eq(publishingJobs.id, job.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
-      userId: job.workspaceId,
+      userId: recipientId,
       kind: "publishing_failed",
       title: "Publishing failed",
       body: result.message,

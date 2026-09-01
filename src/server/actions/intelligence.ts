@@ -18,6 +18,7 @@ import { getModel } from "@/lib/ai/provider";
 import { sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { refreshCompetitor } from "@/lib/competitors/discovery";
 import { can, type Capability } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -174,6 +175,10 @@ export async function updateAutopilotSettingsAction(input: {
 }): Promise<ActionResult> {
   const ctx = await activeContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("autopilot:" + ctx.workspaceId, 10, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Autopilot settings update limit reached. Try again in a few minutes." };
+
   const parsed = autopilotSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
 
@@ -202,6 +207,10 @@ export async function updateAutopilotSettingsAction(input: {
 export async function runGrowthSynthesisAction(): Promise<ActionResult & { plan?: string }> {
   const ctx = await activeContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("growth:" + ctx.workspaceId, 6, 10 * 60_000);
+  if (!rl.allowed) return { ok: false, error: "Synthesis limit reached. Try again in a few minutes." };
+
   const model = getModel();
   if (!model) return { ok: false, error: "AI is not configured (GEMINI_API_KEY missing)." };
 

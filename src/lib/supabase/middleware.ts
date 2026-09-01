@@ -24,6 +24,9 @@ export async function updateSession(request: NextRequest) {
   }
 
   const supabase = createServerClient(url, anonKey, {
+    // M13: session cookies carry the access token — keep them out of JS reach
+    // (httpOnly) and TLS-only (secure). Edge-safe: no Node APIs here.
+    cookieOptions: { httpOnly: true, secure: true, sameSite: "lax" },
     cookies: {
       getAll() {
         return request.cookies.getAll();
