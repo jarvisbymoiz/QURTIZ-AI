@@ -222,12 +222,30 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
 
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
 
+  // Reference images the prompt describes: brand reference assets (style
+  // references) and visuals the user uploaded for this post. The images
+  // themselves travel with the user to the external tool; the prompt tells
+  // the tool how to use them.
+  const brandRefs = await db
+    .select({ label: brandAssets.label })
+    .from(brandAssets)
+    .where(and(eq(brandAssets.workspaceId, ctx.workspaceId), eq(brandAssets.kind, "reference")));
+  const postUploads = await db
+    .select({ kind: visualAssets.kind })
+    .from(visualAssets)
+    .where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.kind, "upload")));
+  const referenceImages = [
+    ...brandRefs.map((r) => ({ kind: "brand" as const, label: r.label })),
+    ...postUploads.map(() => ({ kind: "post" as const, label: null })),
+  ];
+
   const { buildMasterPrompt } = await import("@/lib/ai/master-prompt");
   const prompt = buildMasterPrompt({
     brand: brand ?? null,
     platform: variant.platform,
     contentType: variant.format,
     title: item.topic,
+    objective: item.objective,
     hook: item.hook,
     caption: variant.caption || item.caption,
     cta: variant.cta ?? item.cta,
@@ -236,7 +254,7 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
     visualConcept: item.visualConcept,
     slides: (variant.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
     script: variant.format === "reel" ? (variant.script as Record<string, unknown> as never) : null,
-    referenceNote: "Uploaded brand/reference images from Brand Brain are used as style references; the logo is composited afterwards.",
+    referenceImages,
   });
 
   return { ok: true, prompt };
