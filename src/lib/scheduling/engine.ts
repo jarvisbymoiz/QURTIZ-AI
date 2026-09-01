@@ -10,6 +10,13 @@ export type ScheduleOutcome =
   | { ok: false; reason: string; message: string };
 
 /**
+ * Variant states that may still be (re)scheduled. `published` variants are
+ * deliberately excluded: they are already live and must never receive a new
+ * publish job or be flipped back to `scheduled` (that would double-post).
+ */
+const SCHEDULABLE_VARIANT_STATUSES = ["ready_for_review", "approved", "scheduled"] as const;
+
+/**
  * Schedule a content item: creates one publishing job per variant and flips
  * statuses to scheduled. Approval gate enforced: draft items cannot be
  * scheduled (Manual-mode safety).
@@ -45,14 +52,27 @@ export async function scheduleItem(args: {
   void h; void mi; void y; void mo; void d;
 
   const variants = await db
-    .select({ id: contentVariants.id, platform: contentVariants.platform })
+    .select({ id: contentVariants.id, platform: contentVariants.platform, status: contentVariants.status })
     .from(contentVariants)
     .where(and(eq(contentVariants.contentItemId, item.id), eq(contentVariants.workspaceId, args.workspaceId)));
   if (variants.length === 0) {
     return { ok: false, reason: "no_variants", message: "This item has no platform variants to schedule." };
   }
 
-  for (const v of variants) {
+  // Never re-queue variants that are already published (partial-publish
+  // reschedule) and never flip them back to `scheduled`.
+  const schedulable = variants.filter((v) =>
+    (SCHEDULABLE_VARIANT_STATUSES as readonly string[]).includes(v.status),
+  );
+  if (schedulable.length === 0) {
+    return {
+      ok: false,
+      reason: "already_published",
+      message: "All variants of this item are already published — nothing to schedule.",
+    };
+  }
+
+  for (const v of schedulable) {
     await db
       .delete(publishingJobs)
       .where(and(eq(publishingJobs.contentVariantId, v.id), eq(publishingJobs.status, "pending")));
@@ -64,16 +84,16 @@ export async function scheduleItem(args: {
       scheduledAt,
       status: "pending",
     });
+    await db
+      .update(contentVariants)
+      .set({ status: "scheduled", updatedAt: new Date() })
+      .where(eq(contentVariants.id, v.id));
   }
 
   await db
     .update(contentItems)
     .set({ status: "scheduled", scheduledAt, updatedAt: new Date() })
     .where(eq(contentItems.id, item.id));
-  await db
-    .update(contentVariants)
-    .set({ status: "scheduled", updatedAt: new Date() })
-    .where(eq(contentVariants.contentItemId, item.id));
 
-  return { ok: true, scheduledAt, variants: variants.length };
+  return { ok: true, scheduledAt, variants: schedulable.length };
 }

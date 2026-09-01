@@ -2,10 +2,10 @@
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants } from "@/db/schema";
+import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { approveItem, rejectItem, archiveItem, getItem } from "@/lib/content/lifecycle";
 import { can, type Capability } from "@/lib/permissions";
@@ -83,6 +83,35 @@ export async function setContentStatusAction(
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
+  const [item] = await db
+    .select({ status: contentItems.status })
+    .from(contentItems)
+    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  if (!item) return { ok: false, error: "Content item not found." };
+
+  // Published content stays published: moving it back to a reviewable state
+  // would re-enable a live post (and could re-post it). Archiving remains
+  // allowed — it hides the item in-app without touching the live post.
+  if (item.status === "published" && status !== "archived") {
+    return { ok: false, error: "Published content cannot be moved back to a reviewable state." };
+  }
+
+  // Leaving approved/scheduled (draft, back-to-review, archive) must cancel
+  // pending publish jobs — otherwise the item would still go live at its
+  // scheduled time.
+  const leavingPublishEnabled =
+    (item.status === "approved" || item.status === "scheduled") &&
+    !(["approved", "scheduled"] as readonly string[]).includes(status);
+  if (leavingPublishEnabled) {
+    await db
+      .delete(publishingJobs)
+      .where(and(
+        eq(publishingJobs.contentItemId, itemId),
+        eq(publishingJobs.workspaceId, ctx.workspaceId),
+        eq(publishingJobs.status, "pending"),
+      ));
+  }
+
   await db
     .update(contentItems)
     .set({ status, updatedAt: new Date() })
@@ -92,7 +121,12 @@ export async function setContentStatusAction(
   await db
     .update(contentVariants)
     .set({ status: variantStatus, updatedAt: new Date() })
-    .where(and(eq(contentVariants.contentItemId, itemId), eq(contentVariants.workspaceId, ctx.workspaceId)));
+    .where(and(
+      eq(contentVariants.contentItemId, itemId),
+      eq(contentVariants.workspaceId, ctx.workspaceId),
+      // A published variant (partial publish) is never flipped back.
+      ne(contentVariants.status, "published"),
+    ));
 
   revalidatePath("/content-studio");
   revalidatePath("/");

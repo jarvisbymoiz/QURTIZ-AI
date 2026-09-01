@@ -23,7 +23,7 @@ import { getModel, withRateLimitRetry } from "@/lib/ai/provider";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { planContentDays } from "@/lib/scheduling/time";
 import { renderTemplateVisual } from "@/lib/visuals/template";
-import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 
 export type BulkStage =
   | "Preparing"
@@ -195,6 +195,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
     await setStage(jobId, "Generating posts", 0, plan.length);
     const created: string[] = [];
     const failedItems: string[] = [];
+    const visualWarnings: string[] = [];
 
     for (let i = 0; i < plan.length; i++) {
       // Cancellation check before each post
@@ -204,7 +205,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
           .update(jobs)
           .set({
             status: "cancelled",
-            result: { stage: "Cancelled", createdCount: created.length, failures: failedItems } as Record<string, unknown>,
+            result: { stage: "Cancelled", createdCount: created.length, failures: failedItems, visualWarnings } as Record<string, unknown>,
             updatedAt: new Date(),
           })
           .where(eq(jobs.id, jobId));
@@ -272,8 +273,12 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
               layout: planItem.format === "carousel" ? "promo" : "promo",
             });
             await storeVisual(job.workspaceId, finalItemId, png, job.userId);
-          } catch {
-            // visual is best-effort; content still saved
+          } catch (e) {
+            // visual is best-effort; content is still saved — but the
+            // failure is recorded on the job result, never silently dropped.
+            visualWarnings.push(
+              `Post ${i + 1} ("${planItem.topic.slice(0, 50)}"): visual failed — ${e instanceof Error ? e.message : "unknown error"}`,
+            );
           }
         }
       } catch (e) {
@@ -321,6 +326,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
           stage: "Completed",
           createdCount: created.length,
           failures: failedItems,
+          visualWarnings,
           qaFailed: created.filter(Boolean).length - created.length,
         } as Record<string, unknown>,
         updatedAt: new Date(),
@@ -332,7 +338,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       userId: job.userId,
       kind: "job_completed",
       title: "Bulk content plan ready",
-      body: `${created.length} of ${plan.length} posts generated and waiting for your approval${failedItems.length ? ` (${failedItems.length} failed)` : ""}.`,
+      body: `${created.length} of ${plan.length} posts generated and waiting for your approval${failedItems.length ? ` (${failedItems.length} failed)` : ""}${visualWarnings.length ? ` — ${visualWarnings.length} post${visualWarnings.length === 1 ? "" : "s"} saved without a visual` : ""}.`,
       link: "/content-studio",
     });
   } catch (error) {
@@ -363,7 +369,7 @@ async function fetchLogoDataUrl(workspaceId: string): Promise<string | null> {
       .orderBy(desc(brandAssets.createdAt))
       .limit(1);
     if (!asset) return null;
-    const supabase = await createClient();
+    const supabase = createServiceClient();
     const { data } = await supabase.storage.from("brand-assets").download(asset.storagePath);
     if (!data) return null;
     const buf = Buffer.from(await data.arrayBuffer());
@@ -375,10 +381,10 @@ async function fetchLogoDataUrl(workspaceId: string): Promise<string | null> {
 
 async function storeVisual(workspaceId: string, contentItemId: string, png: Buffer, userId: string): Promise<void> {
   const { visualAssets } = await import("@/db/schema");
-  const supabase = await createClient();
+  const supabase = createServiceClient();
   const storagePath = `${workspaceId}/visuals/${contentItemId}-${Date.now()}.png`;
   const { error } = await supabase.storage.from("brand-assets").upload(storagePath, png, { contentType: "image/png" });
-  if (error) return;
+  if (error) throw new Error(`Storage upload failed: ${error.message}`);
   const db = getDb();
   await db.insert(visualAssets).values({
     workspaceId,

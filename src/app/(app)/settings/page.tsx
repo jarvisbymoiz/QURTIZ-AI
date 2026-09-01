@@ -34,6 +34,7 @@ export default async function SettingsPage() {
 
       <AutopilotCard
         initial={{ enabled: autopilot.enabled ?? false, requireApproval: autopilot.requireApproval ?? true, nicheFocus: autopilot.nicheFocus ?? "", maxPostsPerRun: autopilot.maxPostsPerRun ?? 1 }}
+        editable={can(ctx.role, "workspace:manage")}
       />
 
       <Card>

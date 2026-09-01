@@ -2,7 +2,7 @@
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs, jobs, workspaces } from "@/db/schema";
@@ -74,23 +74,45 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
-  await db
-    .delete(publishingJobs)
-    .where(and(eq(publishingJobs.contentItemId, itemId), eq(publishingJobs.workspaceId, ctx.workspaceId), eq(publishingJobs.status, "pending")));
-
   const [item] = await db
     .select({ status: contentItems.status })
     .from(contentItems)
     .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-  if (item?.status === "scheduled") {
+  if (!item) return { ok: false, error: "Content item not found." };
+
+  // Only unpublished variants (approved/scheduled) are unscheduled — a
+  // variant that is already published stays published and is never flipped
+  // back to approved.
+  const unscheduled = await db
+    .select({ id: contentVariants.id })
+    .from(contentVariants)
+    .where(and(
+      eq(contentVariants.contentItemId, itemId),
+      eq(contentVariants.workspaceId, ctx.workspaceId),
+      inArray(contentVariants.status, ["approved", "scheduled"]),
+    ));
+  const variantIds = unscheduled.map((v) => v.id);
+
+  if (variantIds.length > 0) {
+    await db
+      .delete(publishingJobs)
+      .where(and(
+        eq(publishingJobs.contentItemId, itemId),
+        eq(publishingJobs.workspaceId, ctx.workspaceId),
+        inArray(publishingJobs.contentVariantId, variantIds),
+        eq(publishingJobs.status, "pending"),
+      ));
+    await db
+      .update(contentVariants)
+      .set({ status: "approved", updatedAt: new Date() })
+      .where(inArray(contentVariants.id, variantIds));
+  }
+
+  if (item.status === "scheduled" && variantIds.length > 0) {
     await db
       .update(contentItems)
       .set({ status: "approved", scheduledAt: null, updatedAt: new Date() })
       .where(eq(contentItems.id, itemId));
-    await db
-      .update(contentVariants)
-      .set({ status: "approved", updatedAt: new Date() })
-      .where(eq(contentVariants.contentItemId, itemId));
   }
 
   revalidatePath("/calendar");

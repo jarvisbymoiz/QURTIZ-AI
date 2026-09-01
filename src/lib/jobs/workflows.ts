@@ -24,6 +24,7 @@ import { campaigns, campaignItems } from "@/db/schema";
 import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { createServiceClient } from "@/lib/supabase/service";
 
 /**
  * Attempt to publish one due publishing job. M4 will provide the real Meta
@@ -75,6 +76,29 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
   }
   const [item] = await db.select().from(contentItems).where(eq(contentItems.id, variant.contentItemId));
 
+  // H2 guard: never post content that is no longer scheduled/approved. A
+  // variant may already be published (partial publish + reschedule) or the
+  // item may have been moved back to draft after the job was queued — both
+  // would otherwise cause a silent double post.
+  const variantPublishable = variant.status === "scheduled" || variant.status === "approved";
+  const itemPublishable = item?.status === "scheduled" || item?.status === "approved";
+  if (!item || !variantPublishable || !itemPublishable) {
+    const reason = `Publish skipped: item "${item?.status ?? "deleted"}" / variant "${variant.status}" — content is no longer scheduled.`;
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.workspaceId,
+      kind: "publishing_failed",
+      title: "Publishing skipped",
+      body: reason,
+      link: "/content-studio",
+    });
+    return;
+  }
+
   // Latest template or AI visual for this item
   const [visual] = await db
     .select()
@@ -83,13 +107,35 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     .orderBy(desc(visualAssets.createdAt))
     .limit(1);
 
-  // Signed public URL for the image (IG requires a reachable URL)
+  // Signed public URL for the image (IG requires a reachable URL). Uses the
+  // service-role client: this worker runs outside any request scope, so the
+  // cookies()-based client would throw here.
   let imageUrl: string | null = null;
   if (visual) {
-    const { createClient } = await import("@/lib/supabase/server");
-    const supabase = await createClient();
-    const { data } = await supabase.storage.from("brand-assets").createSignedUrl(visual.storagePath, 60 * 60 * 24 * 6);
-    imageUrl = data?.signedUrl ?? null;
+    try {
+      const { data } = await createServiceClient()
+        .storage.from("brand-assets")
+        .createSignedUrl(visual.storagePath, 60 * 60 * 24 * 6);
+      imageUrl = data?.signedUrl ?? null;
+    } catch {
+      imageUrl = null;
+    }
+    if (!imageUrl) {
+      const reason = "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.";
+      await db
+        .update(publishingJobs)
+        .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, job.id));
+      await db.insert(notifications).values({
+        workspaceId: job.workspaceId,
+        userId: job.workspaceId,
+        kind: "publishing_failed",
+        title: "Publishing failed",
+        body: reason,
+        link: "/content-studio",
+      });
+      return;
+    }
   }
 
   const token = decryptToken(conn.encryptedToken);
