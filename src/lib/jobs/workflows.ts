@@ -255,6 +255,14 @@ async function generateCampaign(campaignId: string): Promise<void> {
 
   const platforms = (campaign.platforms ?? ["facebook", "instagram"]) as ("facebook" | "instagram")[];
 
+  // Honest accounting: count real successes, not attempts. The run/job row is
+  // updated so the UI shows real progress and a truthful terminal state.
+  let generated = 0;
+  let failed = 0;
+  if (campaign.jobId) {
+    await db.update(jobs).set({ status: "running", progress: 0, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
+  }
+
   for (const day of pending) {
     try {
       const { itemId } = await generateAndPersistContent({
@@ -268,18 +276,46 @@ async function generateCampaign(campaignId: string): Promise<void> {
         },
       });
       await db.update(campaignItems).set({ contentItemId: itemId }).where(eq(campaignItems.id, day.id));
+      generated++;
+      if (campaign.jobId) {
+        await db.update(jobs).set({ progress: generated, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
+      }
     } catch (e) {
+      failed++;
       console.error("[campaign] day failed", e instanceof Error ? e.message : e);
     }
   }
 
+  if (generated === 0) {
+    // Nothing was created — never claim an active campaign. The campaign enum
+    // has no "failed" state, so "cancelled" is the honest terminal state; the
+    // job row carries the failure and the notification explains it.
+    const reason = `All ${failed} campaign day${failed === 1 ? "" : "s"} failed to generate. No content was created.`;
+    if (campaign.jobId) {
+      await db.update(jobs).set({ status: "failed", error: reason, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
+    }
+    await db.update(campaigns).set({ status: "cancelled", updatedAt: new Date() }).where(eq(campaigns.id, campaignId));
+    await db.insert(notifications).values({
+      workspaceId: campaign.workspaceId,
+      userId: campaign.createdBy ?? campaign.workspaceId,
+      kind: "job_completed",
+      title: "Campaign generation failed",
+      body: reason,
+      link: "/campaigns",
+    });
+    return;
+  }
+
+  if (campaign.jobId) {
+    await db.update(jobs).set({ status: "completed", progress: generated, result: { generated, failed }, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
+  }
   await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, campaignId));
   await db.insert(notifications).values({
     workspaceId: campaign.workspaceId,
     userId: campaign.createdBy ?? campaign.workspaceId,
     kind: "job_completed",
     title: "Campaign content ready",
-    body: pending.length + " posts generated.",
+    body: generated + " of " + pending.length + " posts generated" + (failed > 0 ? " — " + failed + " failed." : "."),
     link: "/campaigns",
   });
 }
@@ -320,14 +356,17 @@ async function autopilotLoop(): Promise<void> {
         .slice(0, cfg.maxPostsPerRun ?? 1);
 
       for (const t of top) {
-        const { itemId } = await generateAndPersistContent({
+        const { itemId, qa } = await generateAndPersistContent({
           workspaceId: row.workspaceId,
           userId: ws.createdBy,
           input: { topic: t.item.topic, objective: "Autopilot daily plan", platforms: ["facebook", "instagram"], preferredFormat: null },
         });
         await db.update(researchItems).set({ status: "converted", updatedAt: new Date() }).where(eq(researchItems.id, t.item.id));
 
-        if (cfg.requireApproval === false) {
+        // Even when approval is not required, content that failed QA must not
+        // be auto-approved or published — it goes to review like everything
+        // else until it is actually re-QA'd.
+        if (cfg.requireApproval === false && qa.passed) {
           await db.update(contentItems).set({ status: "approved", updatedAt: new Date() }).where(eq(contentItems.id, itemId));
           await db.update(contentVariants).set({ status: "approved", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, itemId));
           const slot = defaultSlotFor(new Date(Date.now() + 86400000).toISOString().slice(0, 10), ws.timezone);
@@ -356,7 +395,7 @@ async function autopilotLoop(): Promise<void> {
             userId: ws.createdBy,
             kind: "content_ready",
             title: "Autopilot created content for review",
-            body: t.item.topic,
+            body: t.item.topic + (qa.passed ? "" : " (QA needs attention — review before approving)"),
             link: "/content-studio",
           });
         }

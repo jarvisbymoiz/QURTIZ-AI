@@ -126,6 +126,10 @@ export function PostWorkspace({
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [scheduling, setScheduling] = useState(false);
+  // True once the user has picked a date/time in the scheduling panel — only
+  // then may the footer Schedule button book directly instead of opening the
+  // panel (which would silently book tomorrow 18:30 defaults otherwise).
+  const [scheduleTimeChosen, setScheduleTimeChosen] = useState(false);
   const [scheduleDate, setScheduleDate] = useState(() => {
     const d = new Date(Date.now() + 86400000);
     return d.toISOString().slice(0, 10);
@@ -136,6 +140,9 @@ export function PostWorkspace({
 
   const scores = (item.aiScores ?? {}) as Record<string, number>;
   const qa = (item.qa ?? {}) as { passed?: boolean; score?: number; issues?: { severity: string; check: string; message: string }[] } | null;
+  // Mirrors the server-side QA gate: a draft whose QA did not pass is NOT
+  // promoted to Ready for Review when a visual is attached.
+  const willPromoteOnVisual = item.status === "draft" && qa?.passed === true;
   const script = (variant?.script ?? {}) as {
     hook?: string;
     scenes?: { text?: string; voiceover?: string; visualDirection?: string; onScreenText?: string; transition?: string; durationSeconds?: number }[];
@@ -156,7 +163,7 @@ export function PostWorkspace({
     start(async () => {
       const r = await generateVisualAction(item.id, mode, slideIndex);
       if (r.ok) {
-        toast.success(r.model && r.model !== "satori-template" ? "AI visual created (" + r.model + ")" : "Visual created — moved to Ready for Review");
+        toast.success(r.model && r.model !== "satori-template" ? "AI visual created (" + r.model + ")" : willPromoteOnVisual ? "Visual created — moved to Ready for Review" : "Visual created");
         router.refresh();
       } else toast.error(r.error);
     });
@@ -236,7 +243,7 @@ export function PostWorkspace({
         if (!r.ok) toast.error(r.error);
         i++;
       }
-      toast.success("Visual(s) uploaded — moved to Ready for Review");
+      toast.success(willPromoteOnVisual ? "Visual(s) uploaded — moved to Ready for Review" : "Visual(s) uploaded");
       router.refresh();
     });
   }
@@ -444,12 +451,12 @@ export function PostWorkspace({
         {scheduling ? (
           <div className="space-y-2 rounded-lg border p-3">
             <Label htmlFor={"sd-" + item.id}>Schedule date (workspace time)</Label>
-            <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setScheduleDate(e.target.value)} />
+            <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => { setScheduleDate(e.target.value); setScheduleTimeChosen(true); }} />
             <Label htmlFor={"st-" + item.id} className="mt-2">Schedule time</Label>
-            <Input id={"st-" + item.id} type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} />
+            <Input id={"st-" + item.id} type="time" value={scheduleTime} onChange={(e) => { setScheduleTime(e.target.value); setScheduleTimeChosen(true); }} />
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setScheduling(false)}>Cancel</Button>
-              <Button size="sm" disabled={pending} onClick={schedule}>
+              <Button size="sm" disabled={pending} onClick={() => { setScheduleTimeChosen(true); schedule(); }}>
                 <CalendarClock className="size-3.5" aria-hidden /> Schedule
               </Button>
             </div>
@@ -468,7 +475,7 @@ export function PostWorkspace({
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {item.status === "approved" || item.status === "ready_for_review" || item.status === "rejected" ? (
-            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={schedule}>
+            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => { if (scheduleTimeChosen) schedule(); else setScheduling(true); }}>
               <CalendarClock className="size-3.5" aria-hidden /> Schedule
             </Button>
           ) : null}

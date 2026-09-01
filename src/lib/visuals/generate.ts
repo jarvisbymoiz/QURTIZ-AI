@@ -153,9 +153,16 @@ export async function generateVisual(args: {
       })
       .returning();
 
-    // Visual attached: content moves to Approval/Review if still a draft.
-    const [freshItem] = await db.select({ status: contentItems.status }).from(contentItems).where(eq(contentItems.id, args.contentItemId));
-    if (freshItem?.status === "draft") {
+    // Visual attached: content moves to Approval/Review if still a draft —
+    // but only when QA passed. Attaching a visual must not promote a
+    // QA-failed draft (status "draft" + qa.passed=false); it stays a draft
+    // until the content is actually re-QA'd.
+    const [freshItem] = await db
+      .select({ status: contentItems.status, qa: contentItems.qa })
+      .from(contentItems)
+      .where(eq(contentItems.id, args.contentItemId));
+    const qaPassed = (freshItem?.qa as { passed?: boolean } | null)?.passed === true;
+    if (freshItem?.status === "draft" && qaPassed) {
       await db.update(contentItems).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentItems.id, args.contentItemId));
       await db.update(contentVariants).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, args.contentItemId));
     }

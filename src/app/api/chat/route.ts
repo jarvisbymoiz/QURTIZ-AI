@@ -10,7 +10,7 @@ import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
-import { estimateCostFromUsage, getModel, getModelId, withRateLimitRetry } from "@/lib/ai/provider";
+import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
 import { can } from "@/lib/permissions";
 import { cookies } from "next/headers";
 import { and, desc } from "drizzle-orm";
@@ -101,8 +101,14 @@ export async function POST(request: NextRequest) {
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);
 
   try {
-const result = await withRateLimitRetry(() =>
-    streamText({
+    // M6: AI SDK v5 streamText() returns synchronously — provider errors
+    // (429/5xx) arrive later as error parts inside the stream, so a retry
+    // wrapper around the call itself can never catch them (the old
+    // withRateLimitRetry was dead code here). The SDK retries the request
+    // phase internally; stream errors are captured via onError and surfaced
+    // as an honest failure below instead of a silent truncated stream.
+    let streamError: string | null = null;
+    const result = streamText({
       model,
       system,
       messages: convertToModelMessages(recent),
@@ -111,9 +117,12 @@ const result = await withRateLimitRetry(() =>
       providerOptions: {
         google: { thinkingConfig: { includeThoughts: true } },
       },
+      onError: (error) => {
+        streamError = error instanceof Error ? error.message : "Provider stream error";
+      },
       onFinish: async ({ usage, finishReason }) => {
         try {
-          const failed = finishReason === "error";
+          const failed = finishReason === "error" || streamError !== null;
           await db
             .update(agentRuns)
             .set({
@@ -124,15 +133,14 @@ const result = await withRateLimitRetry(() =>
                 ? estimateCostFromUsage(getModelId(), usage).toFixed(6)
                 : null,
               finishedAt: new Date(),
-              error: failed ? "Generation failed (finishReason=error)" : null,
+              error: failed ? streamError ?? "Generation failed (finishReason=error)" : null,
             })
             .where(eq(agentRuns.id, run.id));
         } catch {
           // Never let run bookkeeping break the response.
         }
       },
-    })
-  );
+    });
 
     return result.toUIMessageStreamResponse();
   } catch (error) {

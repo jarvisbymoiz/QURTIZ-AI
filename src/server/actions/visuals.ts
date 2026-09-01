@@ -175,7 +175,7 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
   // row (and storage object) could be injected.
   const db = getDb();
   const [item] = await db
-    .select({ id: contentItems.id, status: contentItems.status })
+    .select({ id: contentItems.id, status: contentItems.status, qa: contentItems.qa })
     .from(contentItems)
     .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
   if (!item) return { ok: false, error: "Content item not found in this workspace." };
@@ -199,8 +199,12 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
     meta: { source: "manual-upload" },
   });
 
-  // Approval transition: draft -> ready_for_review once a visual exists.
-  if (item.status === "draft") {
+  // Approval transition: draft -> ready_for_review once a visual exists —
+  // but only when QA passed. Attaching a visual must not promote a QA-failed
+  // draft (status "draft" + qa.passed=false); it stays a draft until the
+  // content is actually re-QA'd.
+  const qaPassed = (item.qa as { passed?: boolean } | null)?.passed === true;
+  if (item.status === "draft" && qaPassed) {
     await db
       .update(contentItems)
       .set({ status: "ready_for_review", updatedAt: new Date() })

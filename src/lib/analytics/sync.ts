@@ -52,7 +52,9 @@ async function collectMetrics(
     impressions: m.impressions ?? 0,
     likes: m.reactions_like_total ?? m.likes ?? 0,
     comments: m.comments_count ?? m.comments ?? 0,
-    shares: m.shares ?? 0,
+    // Facebook returns "post_shares_count" (normalized to shares_count above);
+    // Instagram returns "shares" — same fallback pattern as likes/comments.
+    shares: m.shares_count ?? m.shares ?? 0,
     saves: m.saves ?? 0,
     videoViews: m.video_views ?? 0,
   };

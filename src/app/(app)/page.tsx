@@ -27,10 +27,17 @@ export default async function DashboardPage() {
   const db = getDb();
 
   const contentRows = await db
-    .select({ status: contentItems.status, id: contentItems.id })
+    .select({ id: contentItems.id, status: contentItems.status, topic: contentItems.topic, scheduledAt: contentItems.scheduledAt })
     .from(contentItems)
     .where(and(eq(contentItems.workspaceId, ctx.workspace.id)));
   const generatedCount = contentRows.filter((r) => r.status !== "draft").length;
+  const approvedCount = contentRows.filter((r) => r.status === "approved").length;
+  const scheduledCount = contentRows.filter((r) => r.status === "scheduled").length;
+  const publishedCount = contentRows.filter((r) => r.status === "published").length;
+  const upcoming = contentRows
+    .filter((r) => r.status === "scheduled" && r.scheduledAt !== null)
+    .sort((a, b) => (a.scheduledAt?.getTime() ?? 0) - (b.scheduledAt?.getTime() ?? 0))
+    .slice(0, 5);
 
   const connections = await db
     .select()
@@ -64,7 +71,7 @@ export default async function DashboardPage() {
     <div className="space-y-8">
       <PageHeader
         title={`Good to see you, ${ctx.workspace.name}`}
-        description="Your social media operating system. Content engine, calendar and publishing arrive in the next milestones — Brand Brain and AI Chat are live now."
+        description="Your AI social media operating system — content generation, approval, scheduling and publishing are live."
       />
 
       {/* Today&apos;s activity */}
@@ -75,9 +82,9 @@ export default async function DashboardPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: "Posts generated", value: generatedCount, icon: Sparkles },
-            { label: "Posts approved", value: 0, icon: CheckCircle2 },
-            { label: "Posts scheduled", value: 0, icon: CalendarClock },
-            { label: "Posts published", value: 0, icon: TrendingUp },
+            { label: "Posts approved", value: approvedCount, icon: CheckCircle2 },
+            { label: "Posts scheduled", value: scheduledCount, icon: CalendarClock },
+            { label: "Posts published", value: publishedCount, icon: TrendingUp },
           ].map((s) => (
             <Card key={s.label}>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -89,7 +96,7 @@ export default async function DashboardPage() {
               <CardContent>
                 <div className="text-2xl font-semibold">{s.value}</div>
                 <p className="text-xs text-muted-foreground">
-                  Content engine ships in M2 — real counts appear here then.
+                  Live counts from this workspace&apos;s content library.
                 </p>
               </CardContent>
             </Card>
@@ -102,7 +109,7 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Platform status</CardTitle>
-            <CardDescription>Official Meta integrations arrive in M4.</CardDescription>
+            <CardDescription>Facebook and Instagram publishing via the official Meta APIs.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {(["facebook", "instagram"] as const).map((platform) => {
@@ -122,7 +129,7 @@ export default async function DashboardPage() {
                       </div>
                       <div className="text-xs text-muted-foreground">
                         {status === "not_connected"
-                          ? "Not connected — integration ships in M4"
+                          ? "Not connected — connect it on the Connections page"
                           : status}
                       </div>
                     </div>
@@ -196,17 +203,32 @@ export default async function DashboardPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Upcoming content</CardTitle>
-          <CardDescription>Scheduled posts will appear here after M3.</CardDescription>
+          <CardDescription>Scheduled posts publish automatically via the background worker.</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-8 text-center">
-            <PenSquare className="size-8 text-muted-foreground" aria-hidden />
-            <p className="text-sm text-muted-foreground">
-              Nothing scheduled yet. The content calendar and scheduling engine ship in M3;
-              content generation arrives in M2.
-            </p>
-            <Button nativeButton={false} variant="outline" render={<Link href="/brand-brain" />}>Fill your Brand Brain first</Button>
-          </div>
+          {upcoming.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-8 text-center">
+              <PenSquare className="size-8 text-muted-foreground" aria-hidden />
+              <p className="text-sm text-muted-foreground">
+                Nothing scheduled yet. Approve content in Content Studio and schedule it — the
+                worker publishes it automatically.
+              </p>
+              <Button nativeButton={false} variant="outline" render={<Link href="/content-studio" />}>Open Content Studio</Button>
+            </div>
+          ) : (
+            <ul className="divide-y rounded-lg border">
+              {upcoming.map((r) => (
+                <li key={r.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+                  <Link href="/content-studio" className="min-w-0 truncate hover:underline">{r.topic}</Link>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {r.scheduledAt
+                      ? new Intl.DateTimeFormat("en", { timeZone: ctx.workspace.timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(r.scheduledAt))
+                      : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </CardContent>
       </Card>
 
