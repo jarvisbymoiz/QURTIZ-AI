@@ -1,6 +1,5 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq, ne } from "drizzle-orm";
 import { z } from "zod";
@@ -8,9 +7,8 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { approveItem, rejectItem, archiveItem, getItem } from "@/lib/content/lifecycle";
-import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -21,28 +19,13 @@ const createContentSchema = z.object({
   preferredFormat: z.enum(["single_image", "carousel", "reel", "story", "text_post"]).optional(),
 });
 
-type ActiveContext = { error: string } | { userId: string; workspaceId: string };
-
-async function activeContext(capability: Capability): Promise<ActiveContext> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) {
-    return { error: "You do not have permission for this action." };
-  }
-  return { userId: user.id, workspaceId };
-}
 export async function createContentAction(input: {
   topic: string;
   objective?: string;
   platforms: ("facebook" | "instagram")[];
   preferredFormat?: "single_image" | "carousel" | "reel" | "story" | "text_post";
 }): Promise<ActionResult & { itemId?: string; qaScore?: number }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("content:" + ctx.workspaceId, 10, 10 * 60_000);
@@ -79,7 +62,7 @@ export async function setContentStatusAction(
   itemId: string,
   status: "ready_for_review" | "approved" | "archived" | "draft",
 ): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -137,7 +120,7 @@ export async function updateVariantCaptionAction(
   variantId: string,
   caption: string,
 ): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   if (caption.trim().length === 0 || caption.length > 3000) {
@@ -155,7 +138,7 @@ export async function updateVariantCaptionAction(
 }
 
 export async function deleteContentAction(itemId: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -172,7 +155,7 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
 
 
 export async function approveContentAction(itemId: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const item = await getItem(ctx.workspaceId, itemId);
   if (!item) return { ok: false, error: "Content item not found." };
@@ -185,7 +168,7 @@ export async function approveContentAction(itemId: string): Promise<ActionResult
 }
 
 export async function rejectContentAction(itemId: string, reason?: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const item = await getItem(ctx.workspaceId, itemId);
   if (!item) return { ok: false, error: "Content item not found." };
@@ -198,7 +181,7 @@ export async function rejectContentAction(itemId: string, reason?: string): Prom
 }
 
 export async function regenerateContentAction(itemId: string): Promise<ActionResult & { newItemId?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const item = await getItem(ctx.workspaceId, itemId);
   if (!item) return { ok: false, error: "Content item not found." };
@@ -217,6 +200,7 @@ export async function regenerateContentAction(itemId: string): Promise<ActionRes
     revalidatePath("/content-studio");
     return { ok: true, newItemId: created.itemId };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Regeneration failed" };
+    const message = error instanceof Error ? error.message : "Regeneration failed";
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
   }
 }

@@ -1,36 +1,20 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
-import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { generateVisual, type VisualMode } from "@/lib/visuals/generate";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-type Ctx = { error: string } | { userId: string; workspaceId: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  return { userId: user.id, workspaceId };
-}
 
 const ALLOWED_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MAX_BYTES = 5 * 1024 * 1024;
 
 export async function uploadBrandAssetAction(formData: FormData): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const kind = String(formData.get("kind") ?? "");
@@ -75,7 +59,7 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
 }
 
 export async function deleteBrandAssetAction(assetId: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -99,7 +83,7 @@ export async function generateVisualAction(
   mode: VisualMode,
   slideIndex?: number,
 ): Promise<ActionResult & { visualId?: string; model?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("visual-gen:" + ctx.workspaceId, 6, 10 * 60_000);
@@ -117,21 +101,17 @@ export async function generateVisualAction(
     revalidatePath("/content-studio");
     return { ok: true, visualId: result.visualId, model: result.model };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Visual generation failed" };
+    const message = error instanceof Error ? error.message : "Visual generation failed";
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
   }
 }
 
 export async function getAssetSignedUrl(storagePath: string): Promise<string | null> {
-  // M9: signed URLs are bearer URLs — require a session AND workspace
+  // Signed URLs are bearer URLs — require a session AND workspace
   // membership, not just the forgeable qurtiz_workspace cookie.
-  const user = await getSessionUser();
-  if (!user) return null;
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return null;
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return null;
-  if (!storagePath.startsWith(`${workspaceId}/`)) return null;
+  const ctx = await getActiveContext("brand:read");
+  if ("error" in ctx) return null;
+  if (!storagePath.startsWith(`${ctx.workspaceId}/`)) return null;
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
   const { data } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 3600);
@@ -152,7 +132,7 @@ export async function listAssetSignedUrls(paths: string[]): Promise<Record<strin
  * still a draft, per the approval-first workflow.
  */
 export async function uploadVisualUploadAction(formData: FormData): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("visual-upload:" + ctx.workspaceId, 10, 10 * 60_000);
@@ -223,7 +203,7 @@ export async function uploadVisualUploadAction(formData: FormData): Promise<Acti
 export async function buildMasterPromptAction(itemId: string, variantId?: string): Promise<
   { ok: true; prompt: string } | { ok: false; error: string }
 > {
-  const ctx = await activeContext("brand:read");
+  const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();

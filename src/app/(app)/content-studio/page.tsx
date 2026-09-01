@@ -57,6 +57,7 @@ export default async function ContentStudioPage() {
         visualUrls={visualUrls}
         aiConfigured={isAiConfigured()}
         editable={can(ctx.role, "brand:write")}
+        timezone={ctx.workspace.timezone}
       />
     </div>
   );

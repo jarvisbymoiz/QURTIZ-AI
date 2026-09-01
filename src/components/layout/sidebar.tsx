@@ -35,19 +35,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const NAV_MAIN = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/chat", label: "AI Chat", icon: MessageSquare },
-  { href: "/content-studio", label: "Content Studio", icon: PenSquare, soon: "M2" },
-  { href: "/research-lab", label: "Research Lab", icon: FlaskConical, soon: "M2" },
-  { href: "/calendar", label: "Content Calendar", icon: CalendarDays, soon: "M3" },
-  { href: "/campaigns", label: "Campaigns", icon: Megaphone, soon: "M3" },
-  { href: "/analytics", label: "Analytics", icon: BarChart3, soon: "M5" },
-  { href: "/competitors", label: "Competitors", icon: Target, soon: "M6" },
+  { href: "/content-studio", label: "Content Studio", icon: PenSquare },
+  { href: "/research-lab", label: "Research Lab", icon: FlaskConical },
+  { href: "/calendar", label: "Content Calendar", icon: CalendarDays },
+  { href: "/campaigns", label: "Campaigns", icon: Megaphone },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/competitors", label: "Competitors", icon: Target },
   { href: "/brand-brain", label: "Brand Brain", icon: Brain },
-  { href: "/connections", label: "Connections", icon: Plug, soon: "M4" },
+  { href: "/connections", label: "Connections", icon: Plug },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -154,7 +153,7 @@ export function Sidebar({
         {NAV_MAIN.map((item) => {
           const active =
             item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-          const link = (
+          return (
             <Link
               key={item.href}
               href={item.href}
@@ -167,20 +166,7 @@ export function Sidebar({
             >
               <item.icon className="size-4 shrink-0" aria-hidden />
               <span className="flex-1 truncate">{item.label}</span>
-              {item.soon ? (
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
-                  {item.soon}
-                </span>
-              ) : null}
             </Link>
-          );
-          return item.soon ? (
-            <Tooltip key={item.href}>
-              <TooltipTrigger render={link} />
-              <TooltipContent>Planned for milestone {item.soon}</TooltipContent>
-            </Tooltip>
-          ) : (
-            link
           );
         })}
       </nav>

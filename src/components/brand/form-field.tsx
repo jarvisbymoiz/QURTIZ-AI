@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { useActionState } from "react";
+import { useEffect, useRef, useState, useActionState } from "react";
 import type { ActionResult } from "@/server/actions/workspace";
 
 const initial: ActionResult = { ok: true };
@@ -36,6 +36,16 @@ export function BrandForm({
     initial,
   );
 
+  // The success toast fires only AFTER the server action resolves — never
+  // optimistically on submit. Failures surface through the inline alert.
+  const [submitted, setSubmitted] = useState(false);
+  const lastResult = useRef<ActionResult>(initial);
+  useEffect(() => {
+    if (!submitted || lastResult.current === state) return;
+    lastResult.current = state;
+    if (state.ok) toast.success("Saved");
+  }, [state, submitted]);
+
   return (
     <Card>
       <CardHeader>
@@ -46,10 +56,7 @@ export function BrandForm({
         <form
           action={formAction}
           className="space-y-4"
-          onSubmit={() => {
-            if (state.ok === false) return;
-            toast.success("Saved");
-          }}
+          onSubmit={() => setSubmitted(true)}
         >
           {children}
           {state.ok === false ? (

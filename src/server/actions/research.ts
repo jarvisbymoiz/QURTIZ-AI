@@ -1,6 +1,5 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -8,25 +7,10 @@ import { getDb } from "@/db";
 import { researchItems } from "@/db/schema";
 import { researchTopics } from "@/lib/ai/research";
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { can, type Capability } from "@/lib/permissions";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-type Ctx = { error: string } | { userId: string; workspaceId: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  return { userId: user.id, workspaceId };
-}
 
 const runSchema = z.object({
   niche: z.string().trim().min(4, "Describe your niche or topic (min 4 chars)").max(300),
@@ -37,7 +21,7 @@ export async function runResearchAction(input: {
   niche: string;
   notes?: string;
 }): Promise<ActionResult & { count?: number; sourced?: boolean; note?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("research:" + ctx.workspaceId, 6, 10 * 60_000);
@@ -58,14 +42,15 @@ export async function runResearchAction(input: {
     revalidatePath("/");
     return { ok: true, count: result.count, sourced: result.sourced, note: result.note };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Research failed" };
+    const message = error instanceof Error ? error.message : "Research failed";
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
   }
 }
 
 const STATUS_VALUES = ["new", "saved", "converted", "dismissed"] as const;
 
 export async function setResearchStatusAction(id: string, status: (typeof STATUS_VALUES)[number]): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   if (!STATUS_VALUES.includes(status)) return { ok: false, error: "Invalid status." };
 
@@ -80,7 +65,7 @@ export async function setResearchStatusAction(id: string, status: (typeof STATUS
 }
 
 export async function createContentFromResearchAction(itemId: string): Promise<ActionResult & { contentItemId?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -123,7 +108,8 @@ export async function createContentFromResearchAction(itemId: string): Promise<A
     revalidatePath("/content-studio");
     return { ok: true, contentItemId };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Content generation failed" };
+    const message = error instanceof Error ? error.message : "Content generation failed";
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
   }
 }
 
@@ -134,16 +120,11 @@ import { suggestTrends } from "@/lib/ai/trends";
 export async function suggestTrendsAction(input: { niche?: string }): Promise<
   { ok: true; sourced: boolean; trends: unknown } | { ok: false; error: string }
 > {
-  const user = await getSessionUser();
-  if (!user) return { ok: false, error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { ok: false, error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership || !can(membership.role, "brand:write")) return { ok: false, error: "Not allowed." };
+  const ctx = await getActiveContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
 
   try {
-    const result = await suggestTrends({ workspaceId, niche: input.niche });
+    const result = await suggestTrends({ workspaceId: ctx.workspaceId, niche: input.niche });
     if (!result.ok) return { ok: false, error: result.message };
     return { ok: true, sourced: result.sourced, trends: result.trends };
   } catch (error) {

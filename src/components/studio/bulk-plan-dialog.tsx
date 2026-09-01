@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { CalendarPlus, Loader2, Sparkles } from "lucide-react";
@@ -30,8 +30,28 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [stage, setStage] = useState("Preparing");
   const [jobFailed, setJobFailed] = useState<string | null>(null);
+  // Polling timer must be cleared on unmount AND when the job reaches a
+  // terminal state — otherwise the interval leaks and keeps calling the API.
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current);
+        pollTimer.current = null;
+      }
+    };
+  }, []);
+
+  function stopPolling() {
+    if (pollTimer.current) {
+      clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }
 
   function startPlan() {
+    stopPolling();
     setJobFailed(null);
     start(async () => {
       const r = await startBulkPlanAction({ count, niche: niche || undefined });
@@ -50,29 +70,30 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
   }
 
   function poll(id: string) {
-    const timer = setInterval(async () => {
+    stopPolling();
+    pollTimer.current = setInterval(async () => {
       const s = await getJobStatusAction(id);
       if (!s.ok) {
-        clearInterval(timer);
+        stopPolling();
         return;
       }
       setProgress({ done: s.progress ?? 0, total: s.total ?? 0 });
       if (s.stage) setStage(s.stage);
       if (s.status === "completed") {
-        clearInterval(timer);
+        stopPolling();
         toast.success("Bulk plan finished — new posts are Ready for Review below");
         setOpen(false);
         setJobId(null);
         router.refresh();
       }
       if (s.status === "cancelled") {
-        clearInterval(timer);
+        stopPolling();
         toast.success("Bulk plan cancelled — completed posts were kept");
         setJobId(null);
         router.refresh();
       }
       if (s.status === "failed") {
-        clearInterval(timer);
+        stopPolling();
         setJobFailed(s.error ?? "Bulk plan failed");
         setJobId(null);
       }

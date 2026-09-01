@@ -19,8 +19,12 @@ type PJob = typeof publishingJobs.$inferSelect;
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-function dayIso(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// Day cells must be keyed/labeled in the same timezone the app schedules in
+// (the workspace timezone) — otherwise items land on the wrong visual day
+// whenever the browser tz differs from the workspace tz. "en-CA" yields
+// YYYY-MM-DD, matching the scheduledByDay keys below.
+function dayIso(d: Date, timezone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(d);
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -168,9 +172,9 @@ export function CalendarClient({
             <div className="grid grid-cols-7 gap-1">
               {(monthView.cells as (Date | null)[]).map((date: Date | null, i: number) => {
                 if (!date) return <div key={`e-${i}`} className="min-h-24 rounded-lg bg-muted/30" />;
-                const iso = dayIso(date);
+                const iso = dayIso(date, timezone);
                 const dayItems = scheduledByDay.get(iso) ?? [];
-                const isToday = iso === dayIso(today);
+                const isToday = iso === dayIso(today, timezone);
                 return (
                   <div
                     key={iso}
@@ -230,9 +234,9 @@ export function CalendarClient({
             <div className="grid grid-cols-7 gap-1">
               {weekDates.map((date: Date, i: number) => {
                 if (!date) return <div key={`e-${i}`} className="min-h-24 rounded-lg bg-muted/30" />;
-                const iso = dayIso(date);
+                const iso = dayIso(date, timezone);
                 const dayItems = scheduledByDay.get(iso) ?? [];
-                const isToday = iso === dayIso(today);
+                const isToday = iso === dayIso(today, timezone);
                 return (
                   <div
                     key={iso}

@@ -12,7 +12,7 @@ export function VisualForm({ brand, editable }: { brand: Brand; editable: boolea
     <BrandForm
       action={updateVisualIdentityAction}
       title="Visual identity"
-      description="Brand tokens the visual engine will respect in every generated design (M2). Logo upload arrives with storage setup."
+      description="Brand tokens the visual engine respects in every generated design. Upload your logo and colors for brand-consistent visuals."
       editable={editable}
     >
       <div className="grid gap-4 sm:grid-cols-2">

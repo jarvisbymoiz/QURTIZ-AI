@@ -27,9 +27,9 @@ import { scheduleContentAction } from "@/server/actions/schedule";
 import {
   rejectContentAction,
   regenerateContentAction,
+  setContentStatusAction,
   updateVariantCaptionAction,
 } from "@/server/actions/content";
-import { setContentStatusAction } from "@/server/actions/content";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -106,6 +106,7 @@ export function PostWorkspace({
   visualUrls,
   editable,
   aiConfigured,
+  timezone,
   onClose,
 }: {
   item: Item;
@@ -114,9 +115,12 @@ export function PostWorkspace({
   visualUrls: Record<string, string | null>;
   editable: boolean;
   aiConfigured: boolean;
+  /** Workspace timezone (e.g. "Asia/Karachi"); falls back to the browser's. */
+  timezone?: string;
   onClose: () => void;
 }) {
   const router = useRouter();
+  const displayTimezone = timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [pending, start] = useTransition();
   const [activeVariantId, setActiveVariantId] = useState<string>(variants[0]?.id ?? "");
   const variant = variants.find((v) => v.id === activeVariantId) ?? variants[0] ?? null;
@@ -232,6 +236,8 @@ export function PostWorkspace({
       } else {
         targets.push(undefined);
       }
+      let uploaded = 0;
+      let failed = 0;
       let i = 0;
       for (const file of Array.from(files)) {
         const fd = new FormData();
@@ -240,10 +246,20 @@ export function PostWorkspace({
         if (t !== undefined) fd.set("slideIndex", String(t));
         fd.set("file", file);
         const r = await uploadVisualUploadAction(fd);
-        if (!r.ok) toast.error(r.error);
+        if (r.ok) uploaded++;
+        else {
+          failed++;
+          toast.error(r.error);
+        }
         i++;
       }
-      toast.success(willPromoteOnVisual ? "Visual(s) uploaded — moved to Ready for Review" : "Visual(s) uploaded");
+      if (failed === 0) {
+        toast.success(willPromoteOnVisual ? "Visual(s) uploaded — moved to Ready for Review" : "Visual(s) uploaded");
+      } else if (uploaded === 0) {
+        toast.error("Upload failed — no visual was saved.");
+      } else {
+        toast.error(`${failed} upload${failed === 1 ? "" : "s"} failed — ${uploaded} saved.`);
+      }
       router.refresh();
     });
   }
@@ -465,7 +481,7 @@ export function PostWorkspace({
         {item.status === "scheduled" ? (
           <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2.5 text-xs text-indigo-300">
             <CalendarClock className="size-3.5" aria-hidden />
-            Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} — the background worker publishes automatically.
+            Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: displayTimezone, dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} ({displayTimezone}) — the background worker publishes automatically.
           </div>
         ) : null}
         {item.status === "failed" ? (

@@ -80,11 +80,11 @@ export default async function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Meta platforms</CardTitle>
-          <CardDescription>Facebook &amp; Instagram connections arrive in M4 via official Meta OAuth.</CardDescription>
+          <CardDescription>Connect Facebook &amp; Instagram via official Meta OAuth — manage connections from the Connections page.</CardDescription>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          No connections configured yet. M4 adds the OAuth flow, encrypted token storage,
-          and real connection status.
+          Tokens are encrypted at rest and never exposed to the browser. Publishing and
+          analytics sync only run for platforms you connect.
         </CardContent>
       </Card>
     </div>

@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useActionState } from "react";
+import { useEffect, useRef, useState, useActionState } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { updateWorkspaceAction } from "@/server/actions/workspace";
@@ -36,6 +36,16 @@ export function WorkspaceSettingsForm({
     initial,
   );
 
+  // The success toast fires only AFTER the server action resolves — never
+  // optimistically on submit. Failures surface through the inline alert.
+  const [submitted, setSubmitted] = useState(false);
+  const lastResult = useRef<ActionResult>(initial);
+  useEffect(() => {
+    if (!submitted || lastResult.current === state) return;
+    lastResult.current = state;
+    if (state.ok) toast.success("Workspace updated");
+  }, [state, submitted]);
+
   const timezones = TIMEZONES.includes(initialTimezone)
     ? TIMEZONES
     : [initialTimezone, ...TIMEZONES];
@@ -52,7 +62,7 @@ export function WorkspaceSettingsForm({
         <form
           action={formAction}
           className="space-y-4"
-          onSubmit={() => state.ok && toast.success("Workspace updated")}
+          onSubmit={() => setSubmitted(true)}
         >
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">

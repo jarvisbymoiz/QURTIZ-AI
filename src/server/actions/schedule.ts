@@ -1,35 +1,17 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs, jobs, workspaces } from "@/db/schema";
-import { can, type Capability } from "@/lib/permissions";
+import { contentItems, contentVariants, publishingJobs, jobs } from "@/db/schema";
 
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-type Ctx = { error: string } | { userId: string; workspaceId: string; timezone: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  const db = getDb();
-  const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, workspaceId));
-  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
-}
 
 /**
  * Schedule an approved (or ready) content item: creates one publishing job
@@ -38,7 +20,7 @@ async function activeContext(capability: Capability): Promise<Ctx> {
  * jump from draft to scheduled (Manual mode safety).
  */
 export async function scheduleContentAction(input: { itemId: string; dateIso: string; timeStr?: string }): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(input.dateIso);
@@ -70,7 +52,7 @@ export async function scheduleContentAction(input: { itemId: string; dateIso: st
 }
 
 export async function unscheduleContentAction(itemId: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -122,7 +104,7 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
 
 /** Bulk approve everything currently Ready for Review. */
 export async function bulkApproveReadyAction(): Promise<ActionResult & { count?: number }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -159,7 +141,7 @@ const bulkPlanSchema = z.object({
  * getJobStatusAction.
  */
 export async function startBulkPlanAction(input: { count?: number; niche?: string }): Promise<ActionResult & { jobId?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("bulk:" + ctx.workspaceId, 3, 10 * 60_000);
@@ -195,7 +177,7 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
 }
 
 export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const db = getDb();
   const [job] = await db
@@ -217,7 +199,7 @@ export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> 
 }
 
 export async function retryBulkFailedAction(jobId: string): Promise<ActionResult & { jobId?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const db = getDb();
   const [prev] = await db
@@ -239,19 +221,14 @@ export async function getJobStatusAction(jobId: string): Promise<{
   stage?: string | null;
   error?: string;
 }> {
-  const user = await getSessionUser();
-  if (!user) return { ok: false };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { ok: false };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { ok: false };
+  const ctx = await getActiveContext("brand:read");
+  if ("error" in ctx) return { ok: false };
 
   const db = getDb();
   const [job] = await db
     .select({ status: jobs.status, progress: jobs.progress, total: jobs.total, error: jobs.error, result: jobs.result })
     .from(jobs)
-    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, workspaceId)));
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
   if (!job) return { ok: false };
   const stage = (job.result as { stage?: string } | null)?.stage ?? null;
   return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined };

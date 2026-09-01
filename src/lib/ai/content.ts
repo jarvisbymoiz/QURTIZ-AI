@@ -237,7 +237,10 @@ Produce one variant per target platform.`;
         rules,
         existingCaptions,
       }) as unknown as Record<string, unknown>,
-      status: (qa.passed ? "ready_for_review" : "generating") as "ready_for_review" | "generating",
+      // QA-gate semantics: a variant that fails QA is NOT reviewable and is
+      // left in a stable terminal state (failed) until re-generated — never
+      // stuck in "generating" forever.
+      status: (qa.passed ? "ready_for_review" : "failed") as "ready_for_review" | "failed",
     })),
   );
 

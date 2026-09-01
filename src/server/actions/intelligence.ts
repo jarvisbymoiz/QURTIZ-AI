@@ -1,6 +1,5 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -17,27 +16,10 @@ import {
 import { getModel } from "@/lib/ai/provider";
 import { sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { refreshCompetitor } from "@/lib/competitors/discovery";
-import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-type Ctx = { error: string } | { userId: string; workspaceId: string; timezone: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  const db = getDb();
-  const [ws] = await db.select({ timezone: (await import("@/db/schema")).workspaces.timezone }).from((await import("@/db/schema")).workspaces).where(eq((await import("@/db/schema")).workspaces.id, workspaceId));
-  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
-}
 
 const addCompetitorSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -46,7 +28,7 @@ const addCompetitorSchema = z.object({
 });
 
 export async function addCompetitorAction(input: { name: string; handle: string; notes?: string }): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const parsed = addCompetitorSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
@@ -64,7 +46,7 @@ export async function addCompetitorAction(input: { name: string; handle: string;
 }
 
 export async function removeCompetitorAction(id: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const db = getDb();
   await db.delete(competitors).where(and(eq(competitors.id, id), eq(competitors.workspaceId, ctx.workspaceId)));
@@ -73,7 +55,7 @@ export async function removeCompetitorAction(id: string): Promise<ActionResult> 
 }
 
 export async function refreshCompetitorAction(id: string): Promise<ActionResult> {
-  const ctx = await activeContext("brand:read");
+  const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -103,7 +85,7 @@ export async function refreshCompetitorAction(id: string): Promise<ActionResult>
 
 /** Adaptive learning: derive measured strategy stats and store as strategy memory. */
 export async function learnStrategyAction(): Promise<ActionResult & { summary?: string }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
@@ -173,7 +155,7 @@ export async function updateAutopilotSettingsAction(input: {
   nicheFocus?: string;
   maxPostsPerRun: number;
 }): Promise<ActionResult> {
-  const ctx = await activeContext("workspace:manage");
+  const ctx = await getActiveContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("autopilot:" + ctx.workspaceId, 10, 10 * 60_000);
@@ -205,7 +187,7 @@ export async function updateAutopilotSettingsAction(input: {
 }
 
 export async function runGrowthSynthesisAction(): Promise<ActionResult & { plan?: string }> {
-  const ctx = await activeContext("brand:read");
+  const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("growth:" + ctx.workspaceId, 6, 10 * 60_000);

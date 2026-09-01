@@ -3,6 +3,8 @@
 import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
+  campaigns,
+  campaignItems,
   contentItems,
   contentVariants,
   workspaces,
@@ -20,8 +22,6 @@ import { publishPost } from "@/lib/meta/publish";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { researchTopics } from "@/lib/ai/research";
 import { defaultSlotFor } from "@/lib/scheduling/time";
-import { campaigns, campaignItems } from "@/db/schema";
-import { QUEUES as Q } from "./boss";
 import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -38,9 +38,10 @@ function isTransientPublishError(message: string): boolean {
 }
 
 /**
- * Attempt to publish one due publishing job. M4 will provide the real Meta
- * adapters; until then this fails HONESTLY with a clear reason so the UI
- * shows a genuine failure state instead of pretending success.
+ * Attempt to publish one due publishing job through the connected platform
+ * adapter (official Meta Graph API). Failures surface HONESTLY with a clear
+ * reason so the UI shows a genuine failure state instead of pretending
+ * success.
  */
 async function attemptPublish(publishingJobId: string): Promise<void> {
   const db = getDb();
@@ -529,11 +530,11 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
       await bulkGenerate(row.id);
     }
   });
-  await boss.work(Q.campaignGenerate, async (job) => {
+  await boss.work(QUEUES.campaignGenerate, async (job) => {
     const data = (job as { data?: { campaignId?: string } }).data;
     if (data?.campaignId) await generateCampaign(data.campaignId);
   });
-  await boss.work(Q.syncInsights, async () => {
+  await boss.work(QUEUES.syncInsights, async () => {
     // The cron schedule passes workspace scoping by iterating all connected
     // workspaces via platform_connections (service-style scan).
     const { getDb } = await import("@/db");
@@ -556,7 +557,7 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
       }
     }
   });
-  await boss.work(Q.autopilotLoop, async () => {
+  await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();
   });
   console.log("[qurtiz] workers registered");

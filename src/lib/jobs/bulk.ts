@@ -196,6 +196,9 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
     const created: string[] = [];
     const failedItems: string[] = [];
     const visualWarnings: string[] = [];
+    // Posts persisted even though the final QA did not pass (kept as drafts,
+    // unreviewable until regenerated).
+    let qaFailedCount = 0;
 
     for (let i = 0; i < plan.length; i++) {
       // Cancellation check before each post
@@ -237,6 +240,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         // Verification retry: if QA failed hard, one regeneration attempt.
         let finalItemId = itemId;
         let finalQa = qa;
+        let supersededItemId: string | null = null;
         if (!qa.passed) {
           await db
             .update(jobs)
@@ -253,11 +257,25 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
             },
           });
           if (retry.qa.passed || retry.qa.score > finalQa.score) {
+            supersededItemId = finalItemId;
             finalItemId = retry.itemId;
             finalQa = retry.qa;
+          } else {
+            supersededItemId = retry.itemId;
           }
         }
         created.push(finalItemId);
+
+        // The superseded attempt is an orphaned draft — mark it failed so the
+        // studio shows why it is there instead of leaving it as an unlabeled draft.
+        if (supersededItemId) {
+          await db
+            .update(contentItems)
+            .set({ status: "failed", updatedAt: new Date() })
+            .where(eq(contentItems.id, supersededItemId));
+        }
+        // Honest QA-failed count for the job result/notification.
+        if (!finalQa.passed) qaFailedCount++;
 
         // Free deterministic brand visual for image formats
         if (planItem.format === "single_image" || planItem.format === "carousel") {
@@ -286,7 +304,10 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
           }
         }
       } catch (e) {
-        failedItems.push(`Post ${i + 1} ("${planItem.topic.slice(0, 50)}"): ${e instanceof Error ? e.message : "failed"}`);
+        const raw = e instanceof Error ? e.message : "failed";
+        failedItems.push(
+          `Post ${i + 1} ("${planItem.topic.slice(0, 50)}"): ${raw === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)" : raw}`,
+        );
       }
 
       await db.update(jobs).set({ progress: i + 1, updatedAt: new Date() }).where(eq(jobs.id, jobId));
@@ -336,7 +357,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
           createdCount: created.length,
           failures: failedItems,
           visualWarnings,
-          qaFailed: created.filter(Boolean).length - created.length,
+          qaFailed: qaFailedCount,
         } as Record<string, unknown>,
         updatedAt: new Date(),
       })
@@ -347,7 +368,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       userId: job.userId,
       kind: "job_completed",
       title: "Bulk content plan ready",
-      body: `${created.length} of ${plan.length} posts generated and waiting for your approval${failedItems.length ? ` (${failedItems.length} failed)` : ""}${visualWarnings.length ? ` — ${visualWarnings.length} post${visualWarnings.length === 1 ? "" : "s"} saved without a visual` : ""}.`,
+      body: `${created.length - qaFailedCount} of ${plan.length} posts generated and waiting for your approval${qaFailedCount ? `; ${qaFailedCount} failed QA and need regeneration` : ""}${failedItems.length ? ` (${failedItems.length} failed)` : ""}${visualWarnings.length ? ` — ${visualWarnings.length} post${visualWarnings.length === 1 ? "" : "s"} saved without a visual` : ""}.`,
       link: "/content-studio",
     });
   } catch (error) {

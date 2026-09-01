@@ -429,7 +429,9 @@ export function ChatPanel({
         <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 p-3">
           <p className="flex items-center gap-2 text-sm text-destructive">
             <AlertTriangle className="size-4" aria-hidden />
-            {error.message || "The agent could not respond."}
+            {error.message === "CONFIGURATION_REQUIRED"
+              ? "AI is not configured — add your Gemini key (GEMINI_API_KEY) to chat."
+              : error.message || "The agent could not respond."}
           </p>
           <Button size="sm" variant="outline" onClick={() => regenerate()}>Retry</Button>
         </div>

@@ -145,6 +145,7 @@ function ItemCard({
   visualUrls,
   editable,
   aiConfigured,
+  timezone,
 }: {
   item: Item;
   variants: Variant[];
@@ -152,6 +153,7 @@ function ItemCard({
   visualUrls: Record<string, string | null>;
   editable: boolean;
   aiConfigured: boolean;
+  timezone?: string;
 }) {
   const [open, setOpen] = useState(false);
   const scores = (item.aiScores ?? {}) as Record<string, number>;
@@ -193,6 +195,7 @@ function ItemCard({
                 visualUrls={visualUrls}
                 editable={editable}
                 aiConfigured={aiConfigured}
+                timezone={timezone}
                 onClose={() => setOpen(false)}
               />
             </DialogContent>
@@ -235,6 +238,7 @@ export function StudioClient({
   visualUrls,
   aiConfigured,
   editable,
+  timezone,
 }: {
   items: Item[];
   variants: Variant[];
@@ -243,6 +247,8 @@ export function StudioClient({
   visualUrls: Record<string, string | null>;
   aiConfigured: boolean;
   editable: boolean;
+  /** Workspace timezone for date display (scheduling badge). */
+  timezone?: string;
 }) {
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
@@ -318,6 +324,7 @@ export function StudioClient({
               visualUrls={visualUrls}
               editable={editable}
               aiConfigured={aiConfigured}
+              timezone={timezone}
             />
           ))}
         </div>

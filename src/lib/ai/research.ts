@@ -104,6 +104,9 @@ Research content opportunities: trending angles, audience questions, content gap
   let sourced = false;
   let note: string | undefined;
   let rawTopics: ResearchedTopic[] = [];
+  // Topics whose source was auto-assigned round-robin from the niche search
+  // context (real, but not verified as supporting that specific topic).
+  const supplementaryTopics = new Set<string>();
 
   try {
     const grounded = await groundedSources(userPrompt);
@@ -138,10 +141,18 @@ Research content opportunities: trending angles, audience questions, content gap
     // Attach grounded sources when we actually have them.
     if (grounded.length > 0) {
       sourced = true;
-      rawTopics = rawTopics.map((t, i) => ({
-        ...t,
-        sourceUrls: t.sourceUrls.length > 0 ? t.sourceUrls : [grounded[i % grounded.length].url],
-      }));
+      // Topics the model did not cite get a round-robin pick from the live
+      // search context. That source is real web context for the niche but was
+      // NOT verified as supporting THIS topic — it is labeled supplementary
+      // in the UI instead of being presented as the authoritative source.
+      rawTopics = rawTopics.map((t, i) => {
+        if (t.sourceUrls.length > 0) return t;
+        supplementaryTopics.add(t.topic);
+        return { ...t, sourceUrls: [grounded[i % grounded.length].url] };
+      });
+      if (supplementaryTopics.size > 0) {
+        note = `${supplementaryTopics.size} topic${supplementaryTopics.size === 1 ? "" : "s"} use supplementary live-web sources (picked from the niche search, not verified per topic).`;
+      }
     } else {
       note = "Live web search unavailable on the current API plan — topics are AI-knowledge estimates without live sources. Enable billing or add a search API key for sourced research.";
     }
@@ -161,7 +172,13 @@ Research content opportunities: trending angles, audience questions, content gap
       topic: t.topic,
       summary: t.angle ? `${t.angle}\n\n${t.summary}` : t.summary,
       sourceUrl: t.sourceUrls[0] ?? null,
-      sourceName: t.sourceUrls[0] ? new URL(t.sourceUrls[0]).hostname : sourced ? "web" : "AI knowledge",
+      sourceName: t.sourceUrls[0]
+        ? supplementaryTopics.has(t.topic)
+          ? "supplementary search result"
+          : new URL(t.sourceUrls[0]).hostname
+        : sourced
+          ? "web"
+          : "AI knowledge",
       category: t.category,
       scores: { ...t.scores, overall: overallOpportunity(t.scores), estimated: true } as Record<string, unknown>,
       recommendedFormats: t.recommendedFormats,

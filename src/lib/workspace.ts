@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { workspaceMembers, workspaces } from "@/db/schema";
-import type { WorkspaceRole } from "@/lib/permissions";
+import { can, type Capability, type WorkspaceRole } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 export const WORKSPACE_COOKIE = "qurtiz_workspace";
@@ -97,4 +97,28 @@ export async function getMembership(
       ),
     );
   return rows[0] ? { role: rows[0].role } : null;
+}
+
+/**
+ * Shared authorization helper for server actions: resolves the session user
+ * and the active workspace (from the workspace cookie), checks membership
+ * and the required capability, and returns the workspace timezone (with the
+ * app-default Asia/Karachi fallback) for date formatting. On any failure an
+ * `{ error }` object is returned — callers must check `"error" in ctx`
+ * before using `userId`/`workspaceId`.
+ */
+export type ActiveContext = { error: string } | { userId: string; workspaceId: string; timezone: string };
+
+export async function getActiveContext(capability: Capability): Promise<ActiveContext> {
+  const user = await getSessionUser();
+  if (!user) return { error: "You must be signed in." };
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get(WORKSPACE_COOKIE)?.value;
+  if (!workspaceId) return { error: "No active workspace." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership) return { error: "You are not a member of this workspace." };
+  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
+  const db = getDb();
+  const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, workspaceId));
+  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
 }

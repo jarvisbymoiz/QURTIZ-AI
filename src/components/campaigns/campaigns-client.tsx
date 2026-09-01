@@ -52,7 +52,9 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
         platforms: platforms as ("facebook" | "instagram")[],
       });
       if (r.ok) {
-        toast.success("Campaign queued — content generates in the background");
+        // The server returns an honest note when the AI arc generation failed
+        // and the standard default arc was used instead.
+        toast.success(r.note ?? "Campaign queued — content generates in the background");
         setName(""); setGoal(""); setOffer(""); setAudience("");
         router.refresh();
       } else toast.error(r.error);

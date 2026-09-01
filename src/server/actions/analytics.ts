@@ -1,6 +1,5 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, desc, eq } from "drizzle-orm";
 import { generateText } from "ai";
@@ -9,30 +8,13 @@ import { aiInsights, contentItems, postMetrics } from "@/db/schema";
 import { getModel, getModelId } from "@/lib/ai/provider";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
-import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
-type Ctx = { error: string } | { userId: string; workspaceId: string; timezone: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  const db = getDb();
-  const [ws] = await db.select({ timezone: (await import("@/db/schema")).workspaces.timezone }).from((await import("@/db/schema")).workspaces).where(eq((await import("@/db/schema")).workspaces.id, workspaceId));
-  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
-}
-
 export async function syncInsightsAction(): Promise<ActionResult & { synced?: number; errors?: string[] }> {
-  const ctx = await activeContext("brand:write");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   try {
@@ -80,7 +62,7 @@ async function buildRows(workspaceId: string, timezone: string): Promise<Metrics
 }
 
 export async function runPerformanceAnalysisAction(): Promise<ActionResult & { insight?: string }> {
-  const ctx = await activeContext("brand:read");
+  const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("performance:" + ctx.workspaceId, 6, 10 * 60_000);
@@ -136,18 +118,13 @@ Rules: reference the actual numbers; label estimates as estimates; no generic ad
 }
 
 export async function latestInsightAction(): Promise<string | null> {
-  const user = await getSessionUser();
-  if (!user) return null;
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return null;
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return null;
+  const ctx = await getActiveContext("brand:read");
+  if ("error" in ctx) return null;
   const db = getDb();
   const [row] = await db
     .select({ content: aiInsights.content })
     .from(aiInsights)
-    .where(and(eq(aiInsights.workspaceId, workspaceId), eq(aiInsights.kind, "performance")))
+    .where(and(eq(aiInsights.workspaceId, ctx.workspaceId), eq(aiInsights.kind, "performance")))
     .orderBy(desc(aiInsights.createdAt))
     .limit(1);
   return row?.content ?? null;

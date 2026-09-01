@@ -43,7 +43,7 @@ export default async function CalendarPage() {
     <div className="space-y-6">
       <PageHeader
         title="Content Calendar"
-        description="Drag content onto a day to schedule it (default slot 18:30 in your workspace timezone). Publishing runs through official integrations from M4 — failed publishes show honestly."
+        description="Drag content onto a day to schedule it (default slot 18:30 in your workspace timezone). Publishing runs through your connected Meta accounts — failed publishes show honestly."
       />
       <CalendarClient
         items={items}

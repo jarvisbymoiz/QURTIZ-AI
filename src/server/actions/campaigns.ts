@@ -1,6 +1,5 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -8,25 +7,10 @@ import { generateText } from "ai";
 import { getDb } from "@/db";
 import { campaigns, campaignItems, jobs } from "@/db/schema";
 import { getModel } from "@/lib/ai/provider";
-import { can, type Capability } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-type Ctx = { error: string } | { userId: string; workspaceId: string };
-
-async function activeContext(capability: Capability): Promise<Ctx> {
-  const user = await getSessionUser();
-  if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  return { userId: user.id, workspaceId };
-}
 
 const createSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -58,8 +42,8 @@ export async function startCampaignAction(input: {
   durationDays?: number;
   platforms: ("facebook" | "instagram")[];
   cta?: string;
-}): Promise<ActionResult & { campaignId?: string }> {
-  const ctx = await activeContext("brand:write");
+}): Promise<ActionResult & { campaignId?: string; note?: string }> {
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const rl = rateLimit("campaign-start:" + ctx.workspaceId, 3, 10 * 60_000);
@@ -105,7 +89,9 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
   } catch {
     // fall through to default arc
   }
+  let usedDefaultArc = false;
   if (themes.length === 0) {
+    usedDefaultArc = true;
     themes = DEFAULT_ARC.slice(0, d.durationDays).map((theme, i) => ({ dayIndex: i + 1, theme }));
   }
 
@@ -153,11 +139,15 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
   await boss.send(QUEUES.campaignGenerate, { campaignId: campaign.id, jobId: job.id });
 
   revalidatePath("/campaigns");
-  return { ok: true, campaignId: campaign.id };
+  return {
+    ok: true,
+    campaignId: campaign.id,
+    note: usedDefaultArc ? "AI arc generation failed — using the standard campaign arc instead." : undefined,
+  };
 }
 
 export async function cancelCampaignAction(campaignId: string): Promise<ActionResult> {
-  const ctx = await activeContext("workspace:manage");
+  const ctx = await getActiveContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const db = getDb();
   await db
