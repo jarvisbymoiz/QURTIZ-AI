@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { safeHttpUrl } from "@/lib/validation";
 
 type Item = typeof researchItems.$inferSelect;
 
@@ -54,6 +55,9 @@ function ResearchCard({
   const [pending, start] = useTransition();
   const scores = (item.scores ?? {}) as Record<string, number>;
   const overall = scores.overall;
+  // SSRF/URL-scheme guard: only http(s) links get rendered as links; anything
+  // else (AI research output) degrades to plain text.
+  const safeUrl = safeHttpUrl(item.sourceUrl);
 
   function act(fn: () => Promise<{ ok: boolean; error?: string; contentItemId?: string }>, msg: string) {
     start(async () => {
@@ -102,14 +106,20 @@ function ResearchCard({
         </div>
 
         {item.sourceUrl ? (
-          <a
-            href={item.sourceUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs text-primary underline-offset-4 hover:underline"
-          >
-            <ExternalLink className="size-3" aria-hidden /> Source: {item.sourceName}
-          </a>
+          safeUrl ? (
+            <a
+              href={safeUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-primary underline-offset-4 hover:underline"
+            >
+              <ExternalLink className="size-3" aria-hidden /> Source: {item.sourceName}
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              Source: {item.sourceName}
+            </span>
+          )
         ) : null}
 
         {editable ? (

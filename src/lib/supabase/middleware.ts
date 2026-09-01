@@ -1,7 +1,10 @@
 ﻿import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback", "/auth/signout"];
+// /api/meta/callback must be reachable without a session: Meta redirects the
+// browser here after OAuth, and the route itself re-verifies the session and
+// workspace membership before persisting anything.
+const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback", "/auth/signout", "/api/meta/callback"];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));

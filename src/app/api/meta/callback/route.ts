@@ -4,6 +4,7 @@ import { getDb } from "@/db";
 import { platformConnections } from "@/db/schema";
 import { encryptToken } from "@/lib/crypto/tokens";
 import { exchangeForPages } from "@/lib/meta/oauth";
+import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +29,28 @@ export async function GET(request: NextRequest) {
   }
   if (stored.state !== oauthState) {
     return NextResponse.redirect(`${origin}/connections?error=oauth_state_mismatch`);
+  }
+
+  // Re-verify the session and workspace membership before persisting anything.
+  // The state cookie proves this browser started the flow, but the caller must
+  // still be a logged-in member of the workspace it claims (defense in depth —
+  // sessions can expire or change mid-flow).
+  const sessionUser = await getSessionUser();
+  if (!sessionUser) {
+    return NextResponse.json({ error: "You must be signed in to connect Meta." }, { status: 401 });
+  }
+  if (sessionUser.id !== stored.userId) {
+    return NextResponse.json(
+      { error: "Signed-in user does not match the account that started this connection." },
+      { status: 401 },
+    );
+  }
+  const membership = await getMembership(sessionUser.id, stored.workspaceId);
+  if (!membership) {
+    return NextResponse.json(
+      { error: "You are not a member of this workspace." },
+      { status: 403 },
+    );
   }
 
   try {

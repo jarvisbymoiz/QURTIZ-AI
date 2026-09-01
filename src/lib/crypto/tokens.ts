@@ -2,14 +2,29 @@
 
 /**
  * AES-256-GCM encryption for third-party access tokens.
- * Key source: ENCRYPTION_KEY env (64 hex chars = 32 bytes). A dev fallback
- * derived from DATABASE_URL exists so local setup is frictionless, but
- * production must set a dedicated key.
+ * Key source: ENCRYPTION_KEY env (64 hex chars = 32 bytes). In production a
+ * missing/invalid key is fatal — we never silently degrade to weak crypto.
+ * A deterministic dev fallback exists so local setup is frictionless, but it
+ * logs a warning and must never be used in production.
  */
+let warnedDevFallback = false;
+
 function getKey(): Buffer {
   const envKey = process.env.ENCRYPTION_KEY;
   if (envKey && /^[0-9a-f]{64}$/i.test(envKey)) {
     return Buffer.from(envKey, "hex");
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "ENCRYPTION_KEY is missing or invalid (expected 64 hex chars = 32 bytes). " +
+        "Refusing to encrypt tokens with a weak fallback key in production.",
+    );
+  }
+  if (!warnedDevFallback) {
+    warnedDevFallback = true;
+    console.warn(
+      "ENCRYPTION_KEY missing — using insecure dev key. Set a 64-char hex key in production.",
+    );
   }
   // Deterministic dev fallback (documented in SECURITY notes).
   return crypto.createHash("sha256").update(`qurtiz-dev::${process.env.DATABASE_URL ?? "no-db"}`).digest();
