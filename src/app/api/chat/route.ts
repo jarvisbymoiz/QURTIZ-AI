@@ -7,7 +7,7 @@ import {
 } from "ai";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandMemory, brands } from "@/db/schema";
+import { agentRuns, brandMemory, brands, workspaces } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
@@ -64,6 +64,10 @@ export async function POST(request: NextRequest) {
 
   const db = getDb();
   const [brandRow] = await db.select().from(brands).where(eq(brands.workspaceId, workspaceId));
+  const [workspaceRow] = await db
+    .select({ timezone: workspaces.timezone })
+    .from(workspaces)
+    .where(eq(workspaces.id, workspaceId));
   const memories = await db
     .select()
     .from(brandMemory)
@@ -104,6 +108,7 @@ export async function POST(request: NextRequest) {
     brandSummary: summarizeBrandBrain(brandRow ?? null),
     memories,
     workspaceName: brandRow?.businessName ?? workspaceId,
+    workspaceTimezone: workspaceRow?.timezone ?? "UTC",
   });
 
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);

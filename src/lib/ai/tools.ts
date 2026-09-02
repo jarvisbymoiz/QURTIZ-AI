@@ -163,10 +163,10 @@ export function buildAgentTools(ctx: AgentToolContext) {
 
   const scheduleContent = tool({
     description:
-      "Schedule (or reschedule) an APPROVED content item at a specific date and time in the workspace timezone. Use when the user asks to post content at a named date/time. Reschedules the item if it is already scheduled (moves it to the new slot, cancelling the old one). Time defaults to 18:30 workspace time if omitted. Publishing itself still requires a connected platform account.",
+      "Schedule (or reschedule) an APPROVED content item at a specific date and time in the workspace timezone. Use when the user asks to post content at a named date/time. Reschedules the item if it is already scheduled (moves it to the new slot, cancelling the old one). Time defaults to 18:30 workspace time if omitted. Publishing itself still requires a connected platform account. The date must be TODAY or a future date — resolve the year against the current date stated in the system prompt (the engine rejects past dates).",
     inputSchema: z.object({
       contentItemId: z.string().describe("The content item id (returned by create_content or search_content_library)"),
-      date: z.string().describe("Schedule date: YYYY-MM-DD or an ISO date string"),
+      date: z.string().describe("Schedule date: YYYY-MM-DD (today or later in the workspace timezone)"),
       time: z.string().regex(/^\d{2}:\d{2}$/).optional().describe("Time HH:MM in the target timezone (default 18:30 workspace time)"),
       timezone: z.string().optional().describe("IANA timezone, e.g. Asia/Karachi. Defaults to the workspace timezone."),
     }),

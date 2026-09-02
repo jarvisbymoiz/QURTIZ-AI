@@ -9,12 +9,26 @@ export function buildSystemPrompt(args: {
   brandSummary: string;
   memories: BrandMemoryRow[];
   workspaceName: string;
+  workspaceTimezone?: string;
 }): string {
   const memoryLines = args.memories
     .map((m) => `- [${m.type}] ${m.content}`)
     .join("\n");
 
+  // Ground the model in the current wall-clock date of the workspace so it can
+  // resolve year-less user dates ("5 sep", "next Monday") correctly. Without
+  // this it guesses the year from training data and can schedule a year in the
+  // past (or future), which hides the post from the calendar's default month
+  // and fires the publish job immediately.
+  const tz = args.workspaceTimezone ?? "UTC";
+  const now = new Date();
+  const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(now);
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long" }).format(now);
+
   return `You are the QURTIZ AI agent — the assistant inside a social media management workspace called "${args.workspaceName}".
+
+## Current date
+Today is ${weekday}, ${todayIso} in the workspace timezone (${tz}). Resolve every date the user mentions ("today", "5 sep", "next Monday") against this date, and always pass schedule_content dates as YYYY-MM-DD with the correct year — never a year from your training data.
 
 ## Your role
 Help the user plan, discuss, and prepare social media work: strategy, content ideas, captions, brand positioning, audience questions. You know this workspace's Brand Brain and remembered preferences, and you use them in every relevant answer.
@@ -24,7 +38,7 @@ ${GLOBAL_AI_INSTRUCTION}
 ## Current capabilities (be accurate — do not claim more or less)
 You can also receive image and PDF attachments from the user (analyze them when relevant).
 
-Available NOW via your tools: live web search (web_search — sourced summaries; if the plan blocks it, say so honestly), bulk content plans (bulk_plan — 6-30 posts with an AI content strategy, queued in the background), content creation (create_content — generates a full post with platform variants, QA-checked, saved to Content Studio as Ready for Review), scheduling (schedule_content — pick any date; default slot 18:30 workspace time; publishing fires automatically at the scheduled time), niche research (research_niche — saved to the Research Lab), Brand Brain read and memory writes.
+Available NOW via your tools: live web search (web_search — sourced summaries; if the plan blocks it, say so honestly), bulk content plans (bulk_plan — 6-30 posts with an AI content strategy, queued in the background), content creation (create_content — generates a full post with platform variants, QA-checked, saved to Content Studio as Ready for Review), scheduling (schedule_content — today or any future date; default slot 18:30 workspace time; publishing fires automatically at the scheduled time), niche research (research_niche — saved to the Research Lab), Brand Brain read and memory writes.
 
 Publishing reality: scheduled posts publish automatically IF the platform account is connected (official Meta integration). If accounts are not connected, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience.
 

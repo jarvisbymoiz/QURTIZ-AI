@@ -1,11 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { contentItems, contentVariants } from "@/db/schema";
 import { scheduleItem } from "@/lib/scheduling/engine";
+import { dateIsoInTz, parseZonedDateTime } from "@/lib/scheduling/time";
 
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
 
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
+
+const TZ = "Asia/Karachi";
+
+/**
+ * YYYY-MM-DD `days` away from TODAY in the test timezone. The engine now
+ * rejects past dates, so fixed calendar literals would silently break on the
+ * first run after that literal's date — every scenario must be derived from
+ * the current date instead.
+ */
+function isoIn(days: number): string {
+  const [y, m, d] = dateIsoInTz(TZ).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+const YESTERDAY = isoIn(-1);
+const TODAY = isoIn(0);
+const FUTURE = isoIn(3);
 
 type Row = Record<string, unknown>;
 type Call = { kind: "insert" | "update" | "delete"; values?: Row };
@@ -47,6 +65,14 @@ function makeDb(overrides: { item?: Row; variants?: Row[] }) {
   return { db, calls };
 }
 
+/** A reviewable item with one schedulable variant. */
+function reviewableDb() {
+  return makeDb({
+    item: { id: "item-1", status: "approved" },
+    variants: [{ id: "v-1", platform: "facebook", status: "approved" }],
+  });
+}
+
 describe("scheduleItem", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,7 +87,7 @@ describe("scheduleItem", () => {
     });
     mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
 
-    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: "2026-09-10", timezone: "Asia/Karachi" });
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: FUTURE, timezone: TZ });
 
     expect(res.ok).toBe(true);
     if (!res.ok) return;
@@ -91,7 +117,7 @@ describe("scheduleItem", () => {
     });
     mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
 
-    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: "2026-09-10", timezone: "Asia/Karachi" });
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: FUTURE, timezone: TZ });
 
     expect(res.ok).toBe(false);
     if (res.ok) return;
@@ -109,9 +135,9 @@ describe("scheduleItem", () => {
     const res = await scheduleItem({
       workspaceId: "ws-1",
       itemId: "item-1",
-      dateIso: "2026-09-10",
+      dateIso: FUTURE,
       timeStr: "09:15",
-      timezone: "Asia/Karachi",
+      timezone: TZ,
     });
 
     expect(res.ok).toBe(true);
@@ -122,18 +148,68 @@ describe("scheduleItem", () => {
     expect(calls.filter((c) => c.kind === "delete")).toHaveLength(1);
     const inserts = calls.filter((c) => c.kind === "insert");
     expect(inserts).toHaveLength(1);
-    expect((inserts[0].values?.scheduledAt as Date).toISOString()).toBe("2026-09-10T04:15:00.000Z");
-    expect(res.scheduledAt.toISOString()).toBe("2026-09-10T04:15:00.000Z");
+    const expected = parseZonedDateTime(FUTURE, "09:15", TZ).toISOString();
+    expect((inserts[0].values?.scheduledAt as Date).toISOString()).toBe(expected);
+    expect(res.scheduledAt.toISOString()).toBe(expected);
   });
 
   it("rejects items that are not in a reviewable state", async () => {
     const { db } = makeDb({ item: { id: "item-1", status: "draft" }, variants: [] });
     mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
 
-    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: "2026-09-10", timezone: "Asia/Karachi" });
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: FUTURE, timezone: TZ });
 
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.reason).toBe("not_reviewable");
+  });
+});
+
+describe("scheduleItem past-date guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("rejects a past calendar day before touching the database", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: YESTERDAY, timezone: TZ });
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.reason).toBe("past_date");
+    expect(res.message).toContain("today or a future date");
+    expect(calls).toHaveLength(0); // guard fires before any read or write
+  });
+
+  it("accepts today even at an earlier wall-clock time (calendar-day guard only)", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({
+      workspaceId: "ws-1",
+      itemId: "item-1",
+      dateIso: TODAY,
+      timeStr: "00:01",
+      timezone: TZ,
+    });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scheduledAt.toISOString()).toBe(parseZonedDateTime(TODAY, "00:01", TZ).toISOString());
+    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(1);
+  });
+
+  it("accepts a future date at the default slot", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: FUTURE, timezone: TZ });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scheduledAt.toISOString()).toBe(parseZonedDateTime(FUTURE, "18:30", TZ).toISOString());
+    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(1);
   });
 });

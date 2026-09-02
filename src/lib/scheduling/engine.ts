@@ -3,7 +3,7 @@
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
-import { defaultSlotFor, parseZonedDateTime } from "./time";
+import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
 
 export type ScheduleOutcome =
   | { ok: true; scheduledAt: Date; variants: number }
@@ -31,6 +31,20 @@ export async function scheduleItem(args: {
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(args.dateIso);
   const timeStr = args.timeStr && /^\d{2}:\d{2}$/.test(args.timeStr) ? args.timeStr : "18:30";
   if (!dateOk) return { ok: false, reason: "invalid_date", message: "Date must be YYYY-MM-DD." };
+
+  // Past-date guard (calendar-day only, in the timezone that interprets the
+  // date): when a model resolves a year-less user date ("5 sep") against the
+  // wrong year, the item lands in the past — invisible on the calendar's
+  // default month view, and its publish job goes due immediately on the next
+  // scan. Same-day bookings at an earlier wall-clock time stay allowed so
+  // "schedule today evening" keeps working.
+  if (args.dateIso < dateIsoInTz(args.timezone)) {
+    return {
+      ok: false,
+      reason: "past_date",
+      message: "Can't schedule in the past — use today or a future date.",
+    };
+  }
 
   const db = getDb();
   const [item] = await db

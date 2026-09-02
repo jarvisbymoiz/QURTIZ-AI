@@ -52,6 +52,15 @@ export function parseZonedDateTime(dateIso: string, timeStr: string, tz: string)
   return zonedToUtc(y, m, d, h, min, tz);
 }
 
+/**
+ * "YYYY-MM-DD" of the instant `at` as seen in `tz` — the same en-CA keying
+ * the calendar uses for its day cells. Passing `at` keeps this pure and
+ * deterministic for tests; default is the current instant.
+ */
+export function dateIsoInTz(tz: string, at: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(at);
+}
+
 /** True when `tz` is a valid IANA timezone (e.g. "Asia/Karachi"). */
 export function isValidTimezone(tz: string): boolean {
   try {
