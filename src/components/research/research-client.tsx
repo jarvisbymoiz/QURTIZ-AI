@@ -187,7 +187,7 @@ export function ResearchClient({
           <Sparkles className="size-4" aria-hidden />
           <AlertTitle>Configuration required</AlertTitle>
           <AlertDescription>
-            Add GEMINI_API_KEY to .env.local to enable research. Nothing is generated or faked until then.
+            AI is not configured for this workspace — add your provider + API key in Workspace Settings to enable research. Nothing is generated or faked until then.
           </AlertDescription>
         </Alert>
       ) : null}

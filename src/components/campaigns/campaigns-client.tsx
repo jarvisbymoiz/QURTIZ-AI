@@ -157,7 +157,7 @@ export function CampaignsClient({
     <div className="space-y-4">
       {!aiConfigured ? (
         <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-          AI is not configured — add GEMINI_API_KEY to create campaigns.
+          AI is not configured for this workspace — add your provider + API key in Workspace Settings to create campaigns.
         </div>
       ) : null}
       <div className="flex justify-end">

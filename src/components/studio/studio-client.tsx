@@ -275,8 +275,8 @@ export function StudioClient({
           <Sparkles className="size-4" aria-hidden />
           <AlertTitle>Configuration required</AlertTitle>
           <AlertDescription>
-            Add GEMINI_API_KEY to .env.local to enable generation. Nothing will be
-            generated or faked until the key is present.
+            AI is not configured for this workspace — add your provider + API key in Workspace Settings to enable
+            generation. Nothing will be generated or faked until then.
           </AlertDescription>
         </Alert>
       ) : null}
