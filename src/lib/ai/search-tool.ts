@@ -2,14 +2,16 @@
 
 import { tool } from "ai";
 import { z } from "zod";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 
 type LogFn = (toolName: string, input: unknown, output: unknown) => Promise<void>;
 
 /**
- * Live web search via Gemini grounding (google_search tool). Honest fallback:
- * on quota/billing blocks it returns searched:false with a clear reason.
+ * Live web search via Gemini grounding (google_search tool) using the
+ * WORKSPACE's own AI key + model. Honest fallback: on quota/billing blocks
+ * or non-Gemini providers it returns searched:false with a clear reason.
  */
-export function makeWebSearchTool(ctx: { logStep: LogFn; modelId: string }) {
+export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string }) {
   return tool({
     description:
       "Search the live web for current information (trends, news, prices, recent events). Returns a sourced summary. Use when the user asks about anything current or external to the brand.",
@@ -17,17 +19,29 @@ export function makeWebSearchTool(ctx: { logStep: LogFn; modelId: string }) {
       query: z.string().min(3).max(300).describe("What to search for"),
     }),
     execute: async (input) => {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
+      // Resolved per-call from the workspace config: no global key, and the
+      // provider is re-checked so a provider change takes effect immediately.
+      let resolved;
+      try {
+        resolved = await getWorkspaceTextModel(ctx.workspaceId, "research");
+      } catch {
         await ctx.logStep("web_search", input, { ok: false });
-        return { searched: false, message: "AI key not configured." };
+        return { searched: false, message: "AI is not configured for this workspace — add your provider + API key in Workspace Settings." };
+      }
+      if (resolved.provider !== "gemini") {
+        await ctx.logStep("web_search", input, { ok: false });
+        return {
+          searched: false,
+          message:
+            "Live web search requires the Google (Gemini) provider — your current provider doesn't support it. Tell the user honestly.",
+        };
       }
       try {
         const res = await fetch(
-          "https://generativelanguage.googleapis.com/v1beta/models/" + ctx.modelId + ":generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/" + resolved.modelId + ":generateContent",
           {
             method: "POST",
-            headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+            headers: { "x-goog-api-key": resolved.apiKey, "Content-Type": "application/json" },
             body: JSON.stringify({
               contents: [{ parts: [{ text: "Search the web and summarize concisely with source URLs: " + input.query }] }],
               tools: [{ google_search: {} }],

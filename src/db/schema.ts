@@ -121,6 +121,32 @@ export const settings = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.key] })],
 );
 
+/* ── Workspace AI config (BYOK, Phase 1) ─────────────────────────────
+   Each workspace owns its own AI provider/model/keys. Keys are encrypted
+   at rest (AES-256-GCM via lib/crypto/tokens) and never leave the server
+   unmasked. Resolution happens at runtime from this single row; there is
+   NO production fallback to a shared GEMINI_API_KEY (that would mix
+   tenants). See lib/ai/config.ts + lib/ai/provider.ts. */
+
+export const workspaceAiConfig = pgTable(
+  "workspace_ai_config",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    textProvider: text("text_provider").notNull(),
+    textModel: text("text_model").notNull(),
+    textBaseUrl: text("text_base_url"),
+    textApiKeyEnc: text("text_api_key_enc").notNull(),
+    imageProvider: text("image_provider").notNull(),
+    imageModel: text("image_model").notNull(),
+    imageBaseUrl: text("image_base_url"),
+    imageApiKeyEnc: text("image_api_key_enc").notNull(),
+    taskOverrides: jsonb("task_overrides").$type<import("@/lib/ai/provider").AiTaskOverrides>(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
 /* ── Brand Brain ───────────────────────────────────────────────────── */
 
 export const brands = pgTable(

@@ -43,7 +43,7 @@ export async function runResearchAction(input: {
     return { ok: true, count: result.count, sourced: result.sourced, note: result.note };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Research failed";
-    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };
   }
 }
 
@@ -109,7 +109,7 @@ export async function createContentFromResearchAction(itemId: string): Promise<A
     return { ok: true, contentItemId };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Content generation failed";
-    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };
   }
 }
 

@@ -3,7 +3,8 @@ import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
-import { estimateCostFromUsage, getModel, getModelId, withRateLimitRetry } from "@/lib/ai/provider";
+import { estimateCostFromUsage, withRateLimitRetry } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
@@ -102,8 +103,10 @@ export async function generateAndPersistContent(ctx: {
   userId: string;
   input: GenerateContentInput;
 }): Promise<{ itemId: string; qa: QaResult }> {
-  const model = getModel();
-  if (!model) throw new Error("CONFIGURATION_REQUIRED");
+  // Workspace-isolated resolution: the model comes from THIS workspace's
+  // AI config (throws AIConfigError "CONFIGURATION_REQUIRED" when unset).
+  const resolved = await getWorkspaceTextModel(ctx.workspaceId, "content");
+  const model = resolved.model;
 
   const db = getDb();
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
@@ -137,7 +140,7 @@ export async function generateAndPersistContent(ctx: {
 
   const [run] = await db
     .insert(agentRuns)
-    .values({ workspaceId: ctx.workspaceId, userId: ctx.userId, kind: "content_generation", model: getModelId() })
+    .values({ workspaceId: ctx.workspaceId, userId: ctx.userId, kind: "content_generation", model: resolved.modelId })
     .returning();
 
   const rules = (brand?.contentRules ?? {}) as Partial<ContentRulesInput>;
@@ -175,7 +178,7 @@ Produce one variant per target platform.`;
         status: "completed",
         inputTokens: usage?.inputTokens ?? null,
         outputTokens: usage?.outputTokens ?? null,
-        costUsd: usage ? estimateCostFromUsage(getModelId(), usage).toFixed(6) : null,
+        costUsd: usage ? estimateCostFromUsage(resolved.modelId, usage).toFixed(6) : null,
         finishedAt: new Date(),
       })
       .where(eq(agentRuns.id, run.id));

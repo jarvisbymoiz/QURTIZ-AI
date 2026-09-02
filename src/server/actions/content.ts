@@ -54,7 +54,7 @@ export async function createContentAction(input: {
     return { ok: true, itemId, qaScore: qa.score };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed";
-    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };
   }
 }
 
@@ -201,6 +201,6 @@ export async function regenerateContentAction(itemId: string): Promise<ActionRes
     return { ok: true, newItemId: created.itemId };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Regeneration failed";
-    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };
   }
 }

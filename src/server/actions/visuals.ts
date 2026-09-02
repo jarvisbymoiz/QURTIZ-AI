@@ -102,7 +102,7 @@ export async function generateVisualAction(
     return { ok: true, visualId: result.visualId, model: result.model };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Visual generation failed";
-    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)." : message };
+    return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };
   }
 }
 

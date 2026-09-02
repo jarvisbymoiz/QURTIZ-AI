@@ -5,7 +5,8 @@ import { and, desc, eq } from "drizzle-orm";
 import { generateText } from "ai";
 import { getDb } from "@/db";
 import { aiInsights, contentItems, postMetrics } from "@/db/schema";
-import { getModel, getModelId } from "@/lib/ai/provider";
+import { AIConfigError } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { rateLimit } from "@/lib/security/rate-limit";
@@ -68,8 +69,14 @@ export async function runPerformanceAnalysisAction(): Promise<ActionResult & { i
   const rl = rateLimit("performance:" + ctx.workspaceId, 6, 10 * 60_000);
   if (!rl.allowed) return { ok: false, error: "Analysis limit reached. Try again in a few minutes." };
 
-  const model = getModel();
-  if (!model) return { ok: false, error: "AI is not configured (GEMINI_API_KEY missing)." };
+  // Workspace-isolated model resolution.
+  let model;
+  try {
+    model = (await getWorkspaceTextModel(ctx.workspaceId, "analytics")).model;
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return { ok: false, error: detail };
+  }
 
   const rows = await buildRows(ctx.workspaceId, ctx.timezone);
   if (rows.length === 0) {
@@ -108,7 +115,6 @@ Rules: reference the actual numbers; label estimates as estimates; no generic ad
       })
       .returning();
 
-    void getModelId;
     revalidatePath("/analytics");
     revalidatePath("/");
     return { ok: true, insight: insight.content };

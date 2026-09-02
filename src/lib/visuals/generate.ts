@@ -4,7 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { generateImage } from "@/lib/ai/image";
-import { getModelId } from "@/lib/ai/provider";
+import { getWorkspaceImageTarget } from "@/lib/ai/config";
 import { renderTemplateVisual } from "@/lib/visuals/template";
 import { createClient } from "@/lib/supabase/server";
 
@@ -75,7 +75,7 @@ export async function generateVisual(args: {
       workspaceId: args.workspaceId,
       userId: args.userId,
       kind: "visual_generation",
-      model: args.mode === "ai" ? getModelId() : "satori-template",
+      model: args.mode === "ai" ? "workspace-image-model" : "satori-template",
     })
     .returning();
 
@@ -84,6 +84,10 @@ export async function generateVisual(args: {
     let usedModel: string;
 
     if (args.mode === "ai") {
+      // Workspace-isolated: the image provider/model/key come from THIS
+      // workspace's AI config. Throws AIConfigError when unset.
+      const target = await getWorkspaceImageTarget(args.workspaceId);
+
       const refs: { mimeType: string; base64: string }[] = [];
       const avatar = await fetchAsset(args.workspaceId, "avatar");
       if (avatar) refs.push({ mimeType: avatar.mimeType, base64: avatar.data.toString("base64") });
@@ -104,6 +108,10 @@ export async function generateVisual(args: {
       const result = await generateImage({
         prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${variant?.slides && Array.isArray(variant.slides) && variant.slides[args.slideIndex ?? -1]?.visualPrompt ? variant.slides[args.slideIndex ?? -1].visualPrompt : item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
         references: refs,
+        provider: target.provider,
+        apiKey: target.apiKey,
+        modelId: target.modelId,
+        baseUrl: target.baseUrl,
       });
       if (!result.ok) {
         await db.update(agentRuns).set({ status: "failed", error: result.message, finishedAt: new Date() }).where(eq(agentRuns.id, run.id));

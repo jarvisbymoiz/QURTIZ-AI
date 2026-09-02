@@ -7,7 +7,8 @@ import { brandMemory } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { brands } from "@/db/schema";
-import { getModel } from "@/lib/ai/provider";
+import { AIConfigError } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 
 export const trendsSchema = z.object({
   trendingTopics: z.array(z.object({
@@ -30,8 +31,15 @@ export async function suggestTrends(ctx: { workspaceId: string; niche?: string }
   | { ok: true; trends: Trends; sourced: boolean }
   | { ok: false; reason: string; message: string }
 > {
-  const model = getModel();
-  if (!model) return { ok: false, reason: "config", message: "AI is not configured (GEMINI_API_KEY missing)." };
+  // Workspace-isolated: resolves THIS workspace's text model.
+  let resolved;
+  try {
+    resolved = await getWorkspaceTextModel(ctx.workspaceId, "research");
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return { ok: false, reason: "config", message: detail };
+  }
+  const model = resolved.model;
 
   const db = getDb();
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
@@ -49,17 +57,18 @@ Niche focus: ${ctx.niche || "the brand's general niche"}
 Produce structured suggestions: 3-5 trending topics relevant to this brand, 3-5 visual directions matching its visual identity, 3-5 scroll-stopping hook ideas.
 Reply ONLY with JSON: {"trendingTopics":[{"topic","why"}],"visualDirections":[{"direction","style"}],"hookIdeas":["..."]}`;
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Gemini-only live grounding with the workspace's own key/model; other
+  // providers fall through honestly to AI-knowledge suggestions.
   let sourced = false;
   let pre = "";
 
-  if (apiKey) {
+  if (resolved.provider === "gemini") {
     try {
       const res = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/" + (process.env.QURTIZ_AI_MODEL ?? "gemini-3.6-flash") + ":generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/" + resolved.modelId + ":generateContent",
         {
           method: "POST",
-          headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+          headers: { "x-goog-api-key": resolved.apiKey, "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt + "\nUse live web search before answering." }] }],
             tools: [{ google_search: {} }],

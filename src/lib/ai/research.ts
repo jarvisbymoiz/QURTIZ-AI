@@ -3,7 +3,8 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, researchItems } from "@/db/schema";
-import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
+import { estimateCostFromUsage, AIConfigError, type ResolvedTextModel } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
 import { overallOpportunity } from "@/lib/ai/scores";
 import { topicScoresSchema } from "@/lib/ai/research-types";
@@ -27,15 +28,19 @@ function extractJson(text: string): unknown {
   return JSON.parse(stripped.slice(start, end + 1));
 }
 
-async function groundedSources(prompt: string): Promise<{ url: string; title: string }[]> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return [];
+/**
+ * Gemini-only grounded web search (google_search tool) using the
+ * WORKSPACE's own key + model. Returns [] for non-Gemini providers —
+ * callers fall back honestly to AI-knowledge topics.
+ */
+async function groundedSources(prompt: string, resolved: ResolvedTextModel): Promise<{ url: string; title: string }[]> {
+  if (resolved.provider !== "gemini") return [];
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${getModelId()}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${resolved.modelId}:generateContent`,
       {
         method: "POST",
-        headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+        headers: { "x-goog-api-key": resolved.apiKey, "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           tools: [{ google_search: {} }],
@@ -70,8 +75,16 @@ export async function researchTopics(ctx: {
   niche: string;
   notes?: string | null;
 }): Promise<ResearchResult> {
-  const model = getModel();
-  if (!model) return { ok: false, reason: "config", message: "AI is not configured (GEMINI_API_KEY missing)." };
+  // Workspace-isolated: resolves THIS workspace's text model (AIConfigError
+  // when unset → honest "config" result, never another tenant's key).
+  let resolved: ResolvedTextModel;
+  try {
+    resolved = await getWorkspaceTextModel(ctx.workspaceId, "research");
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return { ok: false, reason: "config", message: detail };
+  }
+  const model = resolved.model;
 
   const db = getDb();
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
@@ -83,7 +96,7 @@ export async function researchTopics(ctx: {
 
   const [run] = await db
     .insert(agentRuns)
-    .values({ workspaceId: ctx.workspaceId, userId: ctx.userId, kind: "research", model: getModelId() })
+    .values({ workspaceId: ctx.workspaceId, userId: ctx.userId, kind: "research", model: resolved.modelId })
     .returning();
 
   const system = `You are the QURTIZ AI research analyst for "${brand?.businessName ?? ctx.workspaceId}".
@@ -109,7 +122,7 @@ Research content opportunities: trending angles, audience questions, content gap
   const supplementaryTopics = new Set<string>();
 
   try {
-    const grounded = await groundedSources(userPrompt);
+    const grounded = await groundedSources(userPrompt, resolved);
     const res = await generateText({
       model,
       system,
@@ -126,7 +139,7 @@ Research content opportunities: trending angles, audience questions, content gap
           status: "completed",
           inputTokens: res.usage?.inputTokens ?? null,
           outputTokens: res.usage?.outputTokens ?? null,
-          costUsd: res.usage ? estimateCostFromUsage(getModelId(), res.usage).toFixed(6) : null,
+          costUsd: res.usage ? estimateCostFromUsage(resolved.modelId, res.usage).toFixed(6) : null,
           finishedAt: new Date(),
         })
         .where(eq(agentRuns.id, run.id));
@@ -154,7 +167,10 @@ Research content opportunities: trending angles, audience questions, content gap
         note = `${supplementaryTopics.size} topic${supplementaryTopics.size === 1 ? "" : "s"} use supplementary live-web sources (picked from the niche search, not verified per topic).`;
       }
     } else {
-      note = "Live web search unavailable on the current API plan — topics are AI-knowledge estimates without live sources. Enable billing or add a search API key for sourced research.";
+      note =
+        resolved.provider === "gemini"
+          ? "Live web search unavailable on the current API plan — topics are AI-knowledge estimates without live sources. Enable billing or add a search API key for sourced research."
+          : "Live web grounding requires the Google (Gemini) provider — topics are AI-knowledge estimates without live sources on your current provider.";
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Research failed";

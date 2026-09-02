@@ -6,7 +6,8 @@ import { z } from "zod";
 import { generateText } from "ai";
 import { getDb } from "@/db";
 import { campaigns, campaignItems, jobs } from "@/db/schema";
-import { getModel } from "@/lib/ai/provider";
+import { AIConfigError } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 
@@ -61,8 +62,14 @@ export async function startCampaignAction(input: {
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   const d = parsed.data;
 
-  const model = getModel();
-  if (!model) return { ok: false, error: "AI is not configured (GEMINI_API_KEY missing)." };
+  // Workspace-isolated model resolution.
+  let model;
+  try {
+    model = (await getWorkspaceTextModel(ctx.workspaceId, "campaign")).model;
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return { ok: false, error: detail };
+  }
 
   const db = getDb();
 

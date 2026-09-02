@@ -19,7 +19,8 @@ import {
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
-import { getModel, withRateLimitRetry } from "@/lib/ai/provider";
+import { withRateLimitRetry } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { planContentDays } from "@/lib/scheduling/time";
 import { renderTemplateVisual } from "@/lib/visuals/template";
@@ -160,8 +161,9 @@ export async function runBulkPlan(jobId: string): Promise<void> {
 
     // ── 5. Strategy (one structured AI call decides everything) ─────
     await setStage(jobId, "Creating content strategy", 0, count);
-    const model = getModel();
-    if (!model) throw new Error("AI is not configured (GEMINI_API_KEY missing).");
+    // Workspace-isolated resolution (workers carry workspaceId on the job).
+    const resolved = await getWorkspaceTextModel(job.workspaceId, "bulk");
+    const model = resolved.model;
 
     const pillarNames = pillars.map((p) => p.name);
     const planRes = await withRateLimitRetry(() =>
@@ -306,7 +308,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       } catch (e) {
         const raw = e instanceof Error ? e.message : "failed";
         failedItems.push(
-          `Post ${i + 1} ("${planItem.topic.slice(0, 50)}"): ${raw === "CONFIGURATION_REQUIRED" ? "AI is not configured (GEMINI_API_KEY missing)" : raw}`,
+          `Post ${i + 1} ("${planItem.topic.slice(0, 50)}"): ${raw === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : raw}`,
         );
       }
 

@@ -6,7 +6,6 @@ import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { getModelId } from "@/lib/ai/provider";
 import { scheduleItem, type ScheduleOutcome } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
 import { startBulkPlanCore } from "@/lib/jobs/bulk";
@@ -338,7 +337,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
-    web_search: makeWebSearchTool({ logStep, modelId: getModelId() }),
+    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId }),
     search_content_library: searchContentLibrary,
     get_analytics: getAnalytics,
     generate_visual: generateVisualTool,

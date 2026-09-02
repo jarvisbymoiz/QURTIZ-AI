@@ -10,7 +10,8 @@ import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
-import { estimateCostFromUsage, getModel, getModelId } from "@/lib/ai/provider";
+import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
 import { cookies } from "next/headers";
 import { and, desc } from "drizzle-orm";
@@ -51,10 +52,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
   }
 
-  const model = getModel();
-  if (!model) {
-    return NextResponse.json({ error: "CONFIGURATION_REQUIRED" }, { status: 503 });
+  // Workspace-isolated model resolution: THIS workspace's own AI config.
+  let textModel;
+  try {
+    textModel = await getWorkspaceTextModel(workspaceId, "chat");
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return NextResponse.json({ error: "CONFIGURATION_REQUIRED", message: detail }, { status: 503 });
   }
+  const model = textModel.model;
 
   const db = getDb();
   const [brandRow] = await db.select().from(brands).where(eq(brands.workspaceId, workspaceId));
@@ -91,7 +97,7 @@ export async function POST(request: NextRequest) {
 
   const [run] = await db
     .insert(agentRuns)
-    .values({ workspaceId, userId: user.id, kind: "chat", model: getModelId() })
+    .values({ workspaceId, userId: user.id, kind: "chat", model: textModel.modelId })
     .returning();
 
   const system = buildSystemPrompt({
@@ -116,9 +122,10 @@ export async function POST(request: NextRequest) {
       messages: convertToModelMessages(recent),
       tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
       stopWhen: stepCountIs(6),
-      providerOptions: {
-        google: { thinkingConfig: { includeThoughts: true } },
-      },
+      // Gemini-only option; other providers (openai-compatible) ignore it.
+      ...(textModel.provider === "gemini"
+        ? { providerOptions: { google: { thinkingConfig: { includeThoughts: true } } } }
+        : {}),
       onError: (error) => {
         streamError = error instanceof Error ? error.message : "Provider stream error";
       },
@@ -132,7 +139,7 @@ export async function POST(request: NextRequest) {
               inputTokens: usage?.inputTokens ?? null,
               outputTokens: usage?.outputTokens ?? null,
               costUsd: usage
-                ? estimateCostFromUsage(getModelId(), usage).toFixed(6)
+                ? estimateCostFromUsage(textModel.modelId, usage).toFixed(6)
                 : null,
               finishedAt: new Date(),
               error: failed ? streamError ?? "Generation failed (finishReason=error)" : null,

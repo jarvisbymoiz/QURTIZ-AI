@@ -13,7 +13,8 @@ import {
   postMetrics,
   settings,
 } from "@/db/schema";
-import { getModel } from "@/lib/ai/provider";
+import { AIConfigError } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { refreshCompetitor } from "@/lib/competitors/discovery";
 import { rateLimit } from "@/lib/security/rate-limit";
@@ -193,8 +194,14 @@ export async function runGrowthSynthesisAction(): Promise<ActionResult & { plan?
   const rl = rateLimit("growth:" + ctx.workspaceId, 6, 10 * 60_000);
   if (!rl.allowed) return { ok: false, error: "Synthesis limit reached. Try again in a few minutes." };
 
-  const model = getModel();
-  if (!model) return { ok: false, error: "AI is not configured (GEMINI_API_KEY missing)." };
+  // Workspace-isolated model resolution.
+  let model;
+  try {
+    model = (await getWorkspaceTextModel(ctx.workspaceId, "growth")).model;
+  } catch (error) {
+    const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
+    return { ok: false, error: detail };
+  }
 
   const db = getDb();
   const topResearch = await db

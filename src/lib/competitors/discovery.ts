@@ -6,7 +6,7 @@ import { competitorSnapshots, competitors, platformConnections } from "@/db/sche
 import { decryptToken } from "@/lib/crypto/tokens";
 import { GRAPH_HOST, GRAPH_VERSION } from "@/lib/meta/oauth";
 import { generateText } from "ai";
-import { getModel } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
 
 export type CompetitorFetchResult =
   | { ok: true; analysis: string }
@@ -88,25 +88,26 @@ export async function refreshCompetitor(ctx: {
     ? Math.round((engagement.reduce((a, b) => a + b, 0) / engagement.length) * 10) / 10
     : 0;
 
-  // AI comparison (labeled AI-generated in UI)
+  // AI comparison (labeled AI-generated in UI). Workspace-isolated: the
+  // model comes from THIS workspace's AI config; an unset config skips the
+  // AI analysis honestly (the snapshot is still stored).
   let analysis = "";
-  const model = getModel();
-  if (model) {
-    try {
-      const res2 = await generateText({
-        model,
-        prompt: `Compare a competitor's public Instagram performance with ours and produce: 2 strengths, 2 weaknesses, 2 content opportunities for us. Be specific, reference the numbers, no generic advice.
+  try {
+    const resolved = await getWorkspaceTextModel(ctx.workspaceId, "analytics");
+    const res2 = await generateText({
+      model: resolved.model,
+      prompt: `Compare a competitor's public Instagram performance with ours and produce: 2 strengths, 2 weaknesses, 2 content opportunities for us. Be specific, reference the numbers, no generic advice.
 Competitor @${competitor.handle}: followers ${bd.followers_count ?? "?"}, posts ${bd.media_count ?? "?"}, avg engagement per recent post ${avgEngagement}.
 Recent captions (truncated): ${posts.slice(0, 6).map((p) => p.caption).join(" | ") || "(none)"}
 Our summary: ${ctx.ourSummary}
 Our measured totals: ${ctx.ourTotalsSummary}
 Format: "Strengths: ...\\nWeaknesses: ...\\nOpportunities: ..." each item on its own line starting with "- ".`,
-        maxOutputTokens: 768,
-      });
-      analysis = res2.text;
-    } catch {
-      analysis = "";
-    }
+      maxOutputTokens: 768,
+    });
+    analysis = res2.text;
+  } catch {
+    // No workspace AI config or generation failed — snapshot still stored.
+    analysis = "";
   }
 
   await db.insert(competitorSnapshots).values({
