@@ -7,6 +7,7 @@ import { sanitizeMaxPosts, sanitizeRunTimes } from "@/lib/autopilot/logic";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
 import { AiConfigCard } from "@/components/settings/ai-config-card";
+import { WorkspaceDeleteCard } from "@/components/settings/workspace-delete-card";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -68,6 +69,13 @@ export default async function SettingsPage() {
           analytics sync only run for platforms you connect.
         </CardContent>
       </Card>
+
+      <WorkspaceDeleteCard
+        workspaceId={ctx.workspace.id}
+        workspaceName={ctx.workspace.name}
+        userEmail={ctx.user.email}
+        isOwner={ctx.user.id === ctx.workspace.createdBy}
+      />
     </div>
   );
 }
