@@ -1,4 +1,4 @@
-﻿import { isAiConfigured } from "@/lib/ai/provider";
+﻿import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
@@ -28,7 +28,7 @@ export default async function ChatIndexPage() {
           workspaceName={ctx.workspace.name}
           threadId={null}
           initialMessages={[]}
-          aiConfigured={isAiConfigured()}
+          aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
         />
       </div>
     </div>

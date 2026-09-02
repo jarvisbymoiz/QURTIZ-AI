@@ -13,7 +13,7 @@ import {
 import { getDb } from "@/db";
 import { aiInsights } from "@/db/schema";
 import { agentRuns, chatThreads, contentItems, platformConnections } from "@/db/schema";
-import { isAiConfigured, getModelId } from "@/lib/ai/provider";
+import { hasWorkspaceAIConfig, getWorkspaceAIModelLabel } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,7 +65,8 @@ export default async function DashboardPage() {
     .orderBy(desc(agentRuns.startedAt))
     .limit(5);
 
-  const aiReady = isAiConfigured();
+  const aiReady = await hasWorkspaceAIConfig(ctx.workspace.id);
+  const aiModel = await getWorkspaceAIModelLabel(ctx.workspace.id);
 
   return (
     <div className="space-y-8">
@@ -155,8 +156,8 @@ export default async function DashboardPage() {
                 <div className="font-medium">{aiReady ? "Ready" : "Configuration required"}</div>
                 <div className="text-xs text-muted-foreground">
                   {aiReady
-                    ? `Model: ${getModelId()}`
-                    : "Add GEMINI_API_KEY to .env.local (see SETUP.md)"}
+                    ? `Model: ${aiModel}`
+                    : "Add your AI provider + API key in Workspace Settings"}
                 </div>
               </div>
               <Badge variant={aiReady ? "default" : "destructive"}>

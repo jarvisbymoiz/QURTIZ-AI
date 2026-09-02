@@ -122,32 +122,75 @@ export async function getWorkspaceImageTarget(workspaceId: string): Promise<Imag
 }
 
 /**
+ * Non-throwing workspace-aware capability check for UI gates. Mirrors the
+ * exact resolution path (workspace row first, dev-only env fallback second),
+ * so the UI's "configured" state matches what a real AI call would do.
+ * Non-AIConfigError failures still propagate — a broken DB must not render
+ * as "not configured".
+ */
+export async function hasWorkspaceAIConfig(workspaceId: string): Promise<boolean> {
+  try {
+    await getWorkspaceAIConfig(workspaceId);
+    return true;
+  } catch (error) {
+    if (error instanceof AIConfigError) return false;
+    throw error;
+  }
+}
+
+/**
+ * Display label for the dashboard: the workspace's configured text model,
+ * or the legacy env default when the workspace has no config (Phase 1
+ * kept getModelId() for display-only paths).
+ */
+export async function getWorkspaceAIModelLabel(workspaceId: string): Promise<string> {
+  try {
+    const config = await getWorkspaceAIConfig(workspaceId);
+    return config.textModel;
+  } catch (error) {
+    if (error instanceof AIConfigError) return getModelId();
+    throw error;
+  }
+}
+
+/**
  * Validate + prepare a user-supplied config for persistence: known
  * providers, non-empty models, encrypted keys. Returns the encrypted row
  * values or throws AIConfigError with a human reason.
+ *
+ * Blank keys mean "keep the currently stored key": when `existing` carries
+ * the encrypted values, they are reused as-is (no re-encryption churn); a
+ * blank key with no existing value is an error — a fresh config cannot be
+ * created without keys.
  */
-export function prepareConfigRow(input: {
-  workspaceId: string;
-  textProvider: string;
-  textModel: string;
-  textBaseUrl?: string | null;
-  textApiKey: string;
-  imageProvider: string;
-  imageModel: string;
-  imageBaseUrl?: string | null;
-  imageApiKey: string;
-  taskOverrides?: AiTaskOverrides | null;
-}): typeof workspaceAiConfig.$inferInsert {
+export function prepareConfigRow(
+  input: {
+    workspaceId: string;
+    textProvider: string;
+    textModel: string;
+    textBaseUrl?: string | null;
+    textApiKey?: string | null;
+    imageProvider: string;
+    imageModel: string;
+    imageBaseUrl?: string | null;
+    imageApiKey?: string | null;
+    taskOverrides?: AiTaskOverrides | null;
+  },
+  existing?: { textApiKeyEnc: string | null; imageApiKeyEnc: string | null } | null,
+): typeof workspaceAiConfig.$inferInsert {
   if (!isKnownTextProvider(input.textProvider)) {
     throw new AIConfigError("INVALID_CONFIG", `Unknown text provider "${input.textProvider}".`);
   }
   if (!isKnownImageProvider(input.imageProvider)) {
     throw new AIConfigError("INVALID_CONFIG", `Unknown image provider "${input.imageProvider}".`);
   }
-  const textKey = input.textApiKey.trim();
-  const imageKey = input.imageApiKey.trim();
-  if (!textKey || !imageKey) {
-    throw new AIConfigError("INVALID_CONFIG", "Both text and image API keys are required.");
+  const textKey = input.textApiKey?.trim() ?? "";
+  const imageKey = input.imageApiKey?.trim() ?? "";
+  if (!textKey && !existing?.textApiKeyEnc) {
+    throw new AIConfigError("INVALID_CONFIG", "A text API key is required.");
+  }
+  if (!imageKey && !existing?.imageApiKeyEnc) {
+    throw new AIConfigError("INVALID_CONFIG", "An image API key is required.");
   }
   if (!input.textModel?.trim() || !input.imageModel?.trim()) {
     throw new AIConfigError("INVALID_CONFIG", "Both text and image models are required.");
@@ -163,11 +206,11 @@ export function prepareConfigRow(input: {
     textProvider: input.textProvider,
     textModel: input.textModel.trim(),
     textBaseUrl: input.textBaseUrl?.trim() || null,
-    textApiKeyEnc: encryptKey(textKey),
+    textApiKeyEnc: textKey ? encryptKey(textKey) : (existing?.textApiKeyEnc as string),
     imageProvider: input.imageProvider,
     imageModel: input.imageModel.trim(),
     imageBaseUrl: input.imageBaseUrl?.trim() || null,
-    imageApiKeyEnc: encryptKey(imageKey),
+    imageApiKeyEnc: imageKey ? encryptKey(imageKey) : (existing?.imageApiKeyEnc as string),
     taskOverrides: input.taskOverrides && Object.keys(input.taskOverrides).length > 0 ? input.taskOverrides : null,
   };
 }

@@ -2,7 +2,7 @@
 import { getDb } from "@/db";
 import { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
 import { listAssetSignedUrls } from "@/server/actions/visuals";
-import { isAiConfigured } from "@/lib/ai/provider";
+import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -55,7 +55,7 @@ export default async function ContentStudioPage() {
         pillars={pillars}
         visuals={visuals}
         visualUrls={visualUrls}
-        aiConfigured={isAiConfigured()}
+        aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
         editable={can(ctx.role, "brand:write")}
         timezone={ctx.workspace.timezone}
       />

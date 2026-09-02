@@ -1,7 +1,7 @@
 ﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { campaignItems, campaigns, contentItems, jobs } from "@/db/schema";
-import { isAiConfigured } from "@/lib/ai/provider";
+import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -42,7 +42,7 @@ export default async function CampaignsPage() {
         items={items}
         content={content}
         jobs={jobRows.map((j) => ({ id: j.id, status: j.status, progress: j.progress, total: j.total, error: j.error }))}
-        aiConfigured={isAiConfigured()}
+        aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
         editable={can(ctx.role, "brand:write")}
       />
     </div>

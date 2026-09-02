@@ -336,6 +336,27 @@ export function ChatPanel({
 
   const busy = status === "submitted" || status === "streaming";
 
+  // The AI SDK surfaces the chat route's JSON error body as the raw message
+  // text; parse it so the human `message` field (e.g. "AI is not configured
+  // for this workspace — add your provider + API key in Workspace
+  // Settings.") is shown instead of raw JSON.
+  const errorText = (() => {
+    if (!error) return null;
+    if (error.message === "CONFIGURATION_REQUIRED") {
+      return "AI is not configured for this workspace — add your provider + API key in Workspace Settings.";
+    }
+    try {
+      const parsed = JSON.parse(error.message) as { error?: string; message?: string };
+      if (parsed?.error === "CONFIGURATION_REQUIRED") {
+        return "AI is not configured for this workspace — add your provider + API key in Workspace Settings.";
+      }
+      if (typeof parsed?.message === "string" && parsed.message) return parsed.message;
+    } catch {
+      // plain (non-JSON) error text — fall through
+    }
+    return error.message || "The agent could not respond.";
+  })();
+
   if (!aiConfigured) {
     return (
       <Card className="flex flex-col items-center gap-4 p-8 text-center">
@@ -345,10 +366,9 @@ export function ChatPanel({
         <div>
           <h2 className="text-lg font-semibold">Configuration required</h2>
           <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-            The AI agent is not configured yet. Add{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">GEMINI_API_KEY</code> to{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">.env.local</code> and restart the dev
-            server. See SETUP.md — the chat will work the moment the key is present. No responses are faked.
+            No AI provider is configured for this workspace. Add your provider + API key in{" "}
+            <span className="font-medium text-foreground">Workspace Settings</span> — the chat works the
+            moment it&apos;s saved. No responses are faked.
           </p>
         </div>
       </Card>
@@ -429,9 +449,7 @@ export function ChatPanel({
         <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 p-3">
           <p className="flex items-center gap-2 text-sm text-destructive">
             <AlertTriangle className="size-4" aria-hidden />
-            {error.message === "CONFIGURATION_REQUIRED"
-              ? "AI is not configured — add your Gemini key (GEMINI_API_KEY) to chat."
-              : error.message || "The agent could not respond."}
+            {errorText}
           </p>
           <Button size="sm" variant="outline" onClick={() => regenerate()}>Retry</Button>
         </div>

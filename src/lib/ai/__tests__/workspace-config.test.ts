@@ -3,6 +3,7 @@ import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import {
   AI_CONFIGURATION_REQUIRED_MESSAGE,
   AIConfigError,
+  DEFAULT_MODEL,
   createTextModel,
   maskApiKey,
   resolveImageTarget,
@@ -11,7 +12,12 @@ import {
   type WorkspaceAIConfig,
 } from "@/lib/ai/provider";
 import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
-import { getWorkspaceTextModel, prepareConfigRow } from "@/lib/ai/config";
+import {
+  getWorkspaceAIModelLabel,
+  getWorkspaceTextModel,
+  hasWorkspaceAIConfig,
+  prepareConfigRow,
+} from "@/lib/ai/config";
 
 /**
  * DB stub: getWorkspaceAIConfig reads a single row via getDb().select()...
@@ -146,6 +152,7 @@ describe("prepareConfigRow (encryption + validation)", () => {
   });
 
   it("rejects empty keys and models", () => {
+    // blank text key, no stored value
     expectAIConfigError(
       () =>
         prepareConfigRow({
@@ -157,7 +164,134 @@ describe("prepareConfigRow (encryption + validation)", () => {
           imageModel: "img",
           imageApiKey: "k",
         }),
-      /API keys are required/,
+      /A text API key is required/,
+    );
+    // blank image key, no stored value
+    expectAIConfigError(
+      () =>
+        prepareConfigRow({
+          workspaceId: "ws",
+          textProvider: "gemini",
+          textModel: "m",
+          textApiKey: "k",
+          imageProvider: "gemini",
+          imageModel: "img",
+          imageApiKey: "",
+        }),
+      /An image API key is required/,
+    );
+    // missing models
+    expectAIConfigError(
+      () =>
+        prepareConfigRow({
+          workspaceId: "ws",
+          textProvider: "gemini",
+          textModel: "  ",
+          textApiKey: "k",
+          imageProvider: "gemini",
+          imageModel: "img",
+          imageApiKey: "k",
+        }),
+      /models are required/,
+    );
+  });
+
+  it("keeps the stored key when a blank key is submitted (no re-encryption churn)", () => {
+    const existingEnc = {
+      textApiKeyEnc: encryptToken("stored-text-key"),
+      imageApiKeyEnc: encryptToken("stored-image-key"),
+    };
+    const row = prepareConfigRow(
+      {
+        workspaceId: "ws",
+        textProvider: "gemini",
+        textModel: "gemini-3.6-flash",
+        textApiKey: "   ", // blank → preserve
+        imageProvider: "gemini",
+        imageModel: "gemini-3.1-flash-image",
+        imageApiKey: null, // blank → preserve
+      },
+      existingEnc,
+    );
+
+    // The exact stored ciphertext is reused — nothing re-encrypted.
+    expect(row.textApiKeyEnc).toBe(existingEnc.textApiKeyEnc);
+    expect(row.imageApiKeyEnc).toBe(existingEnc.imageApiKeyEnc);
+    expect(decryptToken(row.textApiKeyEnc!)).toBe("stored-text-key");
+    expect(decryptToken(row.imageApiKeyEnc!)).toBe("stored-image-key");
+  });
+
+  it("replaces only the keys the user actually entered", () => {
+    const existingEnc = {
+      textApiKeyEnc: encryptToken("stored-text-key"),
+      imageApiKeyEnc: encryptToken("stored-image-key"),
+    };
+    const row = prepareConfigRow(
+      {
+        workspaceId: "ws",
+        textProvider: "gemini",
+        textModel: "gemini-3.6-flash",
+        textApiKey: "new-text-key",
+        imageProvider: "gemini",
+        imageModel: "gemini-3.1-flash-image",
+        imageApiKey: "", // blank → preserved
+      },
+      existingEnc,
+    );
+
+    expect(row.textApiKeyEnc).not.toBe(existingEnc.textApiKeyEnc);
+    expect(decryptToken(row.textApiKeyEnc!)).toBe("new-text-key");
+    expect(row.imageApiKeyEnc).toBe(existingEnc.imageApiKeyEnc);
+    expect(decryptToken(row.imageApiKeyEnc!)).toBe("stored-image-key");
+  });
+
+  it("still requires a key when the workspace has no stored one", () => {
+    expectAIConfigError(
+      () =>
+        prepareConfigRow(
+          {
+            workspaceId: "ws",
+            textProvider: "gemini",
+            textModel: "m",
+            textApiKey: "",
+            imageProvider: "gemini",
+            imageModel: "img",
+            imageApiKey: "k",
+          },
+          { textApiKeyEnc: null, imageApiKeyEnc: null },
+        ),
+      /A text API key is required/,
+    );
+  });
+});
+
+describe("hasWorkspaceAIConfig / getWorkspaceAIModelLabel (UI honesty gates)", () => {
+  it("reports configured when the workspace row exists", async () => {
+    dbMock.state.rows = [makeRow({ textModel: "gemini-3.6-flash" })];
+    await expect(hasWorkspaceAIConfig("00000000-0000-0000-0000-0000000000a1")).resolves.toBe(true);
+    await expect(getWorkspaceAIModelLabel("00000000-0000-0000-0000-0000000000a1")).resolves.toBe(
+      "gemini-3.6-flash",
+    );
+  });
+
+  it("reports unconfigured (no row, no env key) without throwing", async () => {
+    delete process.env.GEMINI_API_KEY;
+    dbMock.state.rows = [];
+    await expect(hasWorkspaceAIConfig("00000000-0000-0000-0000-0000000000c3")).resolves.toBe(false);
+  });
+
+  it("treats the dev-only env fallback as configured (matches real call resolution)", async () => {
+    dbMock.state.rows = [];
+    process.env.GEMINI_API_KEY = "env-key";
+    await expect(hasWorkspaceAIConfig("00000000-0000-0000-0000-0000000000c3")).resolves.toBe(true);
+  });
+
+  it("falls back to the env default model label when the workspace has no config", async () => {
+    dbMock.state.rows = [];
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.QURTIZ_AI_MODEL;
+    await expect(getWorkspaceAIModelLabel("00000000-0000-0000-0000-0000000000c3")).resolves.toBe(
+      DEFAULT_MODEL,
     );
   });
 });

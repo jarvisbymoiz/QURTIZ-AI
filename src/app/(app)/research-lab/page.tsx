@@ -1,7 +1,7 @@
 ﻿import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiInsights, researchItems } from "@/db/schema";
-import { isAiConfigured } from "@/lib/ai/provider";
+import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -35,7 +35,7 @@ export default async function ResearchLabPage() {
       />
       <ResearchClient
         items={items}
-        aiConfigured={isAiConfigured()}
+        aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
         editable={can(ctx.role, "brand:write")}
         growthPlan={growthPlan?.content ?? null}
       />

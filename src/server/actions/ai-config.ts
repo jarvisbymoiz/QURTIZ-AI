@@ -77,11 +77,11 @@ const saveAIConfigSchema = z.object({
   textProvider: z.enum(TEXT_PROVIDER_IDS),
   textModel: z.string().trim().min(1, "A text model is required."),
   textBaseUrl: z.string().trim().min(1).nullable().optional(),
-  textApiKey: z.string().trim().min(1, "A text API key is required."),
+  textApiKey: z.string().trim().optional().nullable(),
   imageProvider: z.enum(IMAGE_PROVIDER_IDS),
   imageModel: z.string().trim().min(1, "An image model is required."),
   imageBaseUrl: z.string().trim().min(1).nullable().optional(),
-  imageApiKey: z.string().trim().min(1, "An image API key is required."),
+  imageApiKey: z.string().trim().optional().nullable(),
   taskOverrides: z.record(z.enum(AI_TASKS), z.string().trim().min(1)).nullable().optional(),
 });
 
@@ -89,16 +89,20 @@ const saveAIConfigSchema = z.object({
  * Create or update the workspace's AI config. Permission: workspace:manage
  * (owner/admin). Keys are AES-256-GCM encrypted at rest via
  * lib/crypto/tokens before the row is written — never stored plaintext.
+ *
+ * Blank keys preserve the currently stored key (the settings UI shows a
+ * masked hint instead of a prefilled plaintext value); a blank key with no
+ * stored value is an error, because a config cannot exist without keys.
  */
 export async function saveWorkspaceAIConfigAction(input: {
   textProvider: string;
   textModel: string;
   textBaseUrl?: string | null;
-  textApiKey: string;
+  textApiKey?: string | null;
   imageProvider: string;
   imageModel: string;
   imageBaseUrl?: string | null;
-  imageApiKey: string;
+  imageApiKey?: string | null;
   taskOverrides?: AiTaskOverrides | null;
 }): Promise<ActionResult> {
   const ctx = await getActiveContext("workspace:manage");
@@ -121,20 +125,29 @@ export async function saveWorkspaceAIConfigAction(input: {
   });
   if (shapeError) return { ok: false, error: shapeError };
 
+  const db = getDb();
+  const [existing] = await db
+    .select({ textApiKeyEnc: workspaceAiConfig.textApiKeyEnc, imageApiKeyEnc: workspaceAiConfig.imageApiKeyEnc })
+    .from(workspaceAiConfig)
+    .where(eq(workspaceAiConfig.workspaceId, ctx.workspaceId));
+
   let row: typeof workspaceAiConfig.$inferInsert;
   try {
-    row = prepareConfigRow({
-      workspaceId: ctx.workspaceId,
-      textProvider: d.textProvider,
-      textModel: d.textModel,
-      textBaseUrl: d.textBaseUrl ?? null,
-      textApiKey: d.textApiKey,
-      imageProvider: d.imageProvider,
-      imageModel: d.imageModel,
-      imageBaseUrl: d.imageBaseUrl ?? null,
-      imageApiKey: d.imageApiKey,
-      taskOverrides: d.taskOverrides ?? null,
-    });
+    row = prepareConfigRow(
+      {
+        workspaceId: ctx.workspaceId,
+        textProvider: d.textProvider,
+        textModel: d.textModel,
+        textBaseUrl: d.textBaseUrl ?? null,
+        textApiKey: d.textApiKey ?? "",
+        imageProvider: d.imageProvider,
+        imageModel: d.imageModel,
+        imageBaseUrl: d.imageBaseUrl ?? null,
+        imageApiKey: d.imageApiKey ?? "",
+        taskOverrides: d.taskOverrides ?? null,
+      },
+      existing ?? null,
+    );
   } catch (error) {
     return {
       ok: false,
@@ -142,7 +155,6 @@ export async function saveWorkspaceAIConfigAction(input: {
     };
   }
 
-  const db = getDb();
   await db
     .insert(workspaceAiConfig)
     .values(row)

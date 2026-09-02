@@ -1,11 +1,11 @@
 ﻿import { can } from "@/lib/permissions";
-import { isAiConfigured, getModelId } from "@/lib/ai/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { settings } from "@/db/schema";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
+import { AiConfigCard } from "@/components/settings/ai-config-card";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -54,28 +54,7 @@ export default async function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">AI provider</CardTitle>
-          <CardDescription>Provider abstraction — switchable without code changes.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Default model</span>
-            <span className="font-mono text-xs">{getModelId()}</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">API key</span>
-            <Badge variant={isAiConfigured() ? "default" : "destructive"}>
-              {isAiConfigured() ? "Configured" : "Missing GEMINI_API_KEY"}
-            </Badge>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Configure via QURTIZ_AI_MODEL and GEMINI_API_KEY in .env.local. OpenAI and
-            other providers slot into the same registry in a later milestone.
-          </p>
-        </CardContent>
-      </Card>
+      <AiConfigCard editable={can(ctx.role, "workspace:manage")} />
 
       <Card>
         <CardHeader>

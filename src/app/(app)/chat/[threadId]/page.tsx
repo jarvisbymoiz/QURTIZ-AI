@@ -4,7 +4,7 @@ import type { UIMessage } from "ai";
 
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
-import { isAiConfigured } from "@/lib/ai/provider";
+import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
@@ -65,7 +65,7 @@ export default async function ThreadPage({
           threadId={thread.id}
           initialMessages={initialMessages}
           targetMessageId={targetMessageId ?? null}
-          aiConfigured={isAiConfigured()}
+          aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
         />
       </div>
     </div>
