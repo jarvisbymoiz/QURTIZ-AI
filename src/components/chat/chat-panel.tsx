@@ -401,7 +401,7 @@ export function ChatPanel({
           </div>
         </div>
       ) : (
-        <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 space-y-5 overflow-y-auto pr-2">
+        <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin">
           {messages.map((m) => {
             const isUser = m.role === "user";
             return (

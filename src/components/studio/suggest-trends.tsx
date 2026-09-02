@@ -40,7 +40,7 @@ export function SuggestTrends({ editable, aiConfigured }: { editable: boolean; a
       <DialogTrigger render={<Button variant="outline" disabled={!editable || !aiConfigured} />}>
         <Sparkles className="size-4" aria-hidden /> Suggest trends
       </DialogTrigger>
-      <DialogContent className="max-h-[88dvh] max-w-lg overflow-y-auto">
+      <DialogContent className="max-h-[88dvh] max-w-lg overflow-y-auto scroll-thin">
         <DialogHeader>
           <DialogTitle>Trend suggestions</DialogTitle>
           <DialogDescription>

@@ -121,7 +121,7 @@ function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[];
           <div className="space-y-2">
             <Label htmlFor="format">Format</Label>
             <select id="format" value={format} onChange={(e) => setFormat(e.target.value)}
-              className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+              className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50 [&>option]:bg-card [&>option]:text-card-foreground">
               <option value="single_image">Single image</option>
               <option value="carousel">Carousel</option>
               <option value="reel">Reel</option>
