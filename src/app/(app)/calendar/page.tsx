@@ -1,4 +1,4 @@
-﻿import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+﻿import { and, desc, eq, gte, inArray, isNotNull, lte, or } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, publishingJobs } from "@/db/schema";
 import { requireWorkspace } from "@/lib/workspace";
@@ -12,12 +12,23 @@ export default async function CalendarPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
+  // Exactly what the client renders: grid day cells (any item carrying a
+  // scheduledAt) plus the drag-to-schedule queue (approved items without
+  // one). No "latest N by createdAt" cap here — an AI-scheduled post that is
+  // old by creation date but still upcoming must reach its day cell, or it
+  // shows as scheduled in Chat/Studio while never appearing on the calendar.
+  // The 1000 cap is only a runaway-data safety valve, not a feature limit.
   const items = await db
     .select()
     .from(contentItems)
-    .where(and(eq(contentItems.workspaceId, ctx.workspace.id)))
+    .where(
+      and(
+        eq(contentItems.workspaceId, ctx.workspace.id),
+        or(eq(contentItems.status, "approved"), isNotNull(contentItems.scheduledAt)),
+      ),
+    )
     .orderBy(desc(contentItems.createdAt))
-    .limit(120);
+    .limit(1000);
 
 
   // Publishing jobs in a window around today for failure visibility
