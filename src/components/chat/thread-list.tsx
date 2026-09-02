@@ -163,7 +163,7 @@ export function ThreadList({ activeThreadId }: { activeThreadId: string | null }
             </Button>
           </div>
           {query.trim().length >= 2 && results !== null ? (
-            <div className="max-h-72 space-y-1 overflow-y-auto">
+            <div className="max-h-72 space-y-1 overflow-y-auto scrollbar-hide">
               {results.length === 0 ? (
                 <p className="p-2 text-xs text-muted-foreground">No matches found.</p>
               ) : (
@@ -192,7 +192,7 @@ export function ThreadList({ activeThreadId }: { activeThreadId: string | null }
       ) : active.length === 0 ? (
         <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">No conversations yet.</p>
       ) : (
-        <div className="flex-1 space-y-3 overflow-y-auto pb-2">
+        <div className="flex-1 space-y-3 overflow-y-auto pb-2 scrollbar-hide">
           {grouped.map(({ group, items }) => (
             <div key={group}>
               <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</div>

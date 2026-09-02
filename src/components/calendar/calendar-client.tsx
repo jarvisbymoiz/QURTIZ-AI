@@ -325,7 +325,7 @@ export function CalendarClient({
                 No approved posts. Approve content in the Studio, then drag it here onto a day.
               </p>
             ) : (
-              <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
+              <div className="max-h-[60vh] space-y-1.5 overflow-y-auto scrollbar-hide">
                 {unscheduledQueue.map((item) => (
                   <div
                     key={item.id}

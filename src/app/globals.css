@@ -168,4 +168,13 @@
   .scroll-thin.scroll-autohide.scroll-active:hover::-webkit-scrollbar-thumb {
     background: oklch(0.7 0 0 / 0.45);
   }
+  /* Hide the scrollbar on app surfaces (main content, sidebars, dialogs, …)
+     while keeping the element scrollable — overflow classes are untouched. */
+  .scrollbar-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
 }

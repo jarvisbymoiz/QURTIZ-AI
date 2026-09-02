@@ -25,7 +25,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         role={ctx.role}
         unreadCount={unreadCount}
       />
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto scrollbar-hide">
         <div className="mx-auto max-w-6xl p-6 lg:p-8">{children}</div>
       </main>
     </div>
