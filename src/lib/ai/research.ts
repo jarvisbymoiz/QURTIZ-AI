@@ -61,7 +61,7 @@ async function groundedSources(prompt: string, resolved: ResolvedTextModel): Pro
 }
 
 export type ResearchResult =
-  | { ok: true; sourced: boolean; note?: string; count: number }
+  | { ok: true; sourced: boolean; note?: string; count: number; insertedIds?: string[] }
   | { ok: false; reason: string; message: string };
 
 /**
@@ -74,6 +74,10 @@ export async function researchTopics(ctx: {
   userId: string;
   niche: string;
   notes?: string | null;
+  /** Optional operational context appended to the research prompt (e.g.
+   *  measured performance, competitor intel, topics to avoid repeating).
+   *  Defaults to none — other callers are unaffected. */
+  context?: string | null;
 }): Promise<ResearchResult> {
   // Workspace-isolated: resolves THIS workspace's text model (AIConfigError
   // when unset → honest "config" result, never another tenant's key).
@@ -110,6 +114,7 @@ sourceUrls: ONLY real URLs you are confident exist from search results; empty ar
 
   const userPrompt = `Niche/topic to research: ${ctx.niche}
 ${ctx.notes ? `Extra context from the user: ${ctx.notes}` : ""}
+${ctx.context ? `Operating context (apply it when choosing topics — prefer angles that fit the measured data and never repeat recently covered topics):\n${ctx.context}` : ""}
 Research content opportunities: trending angles, audience questions, content gaps, seasonal hooks.`;
 
 
@@ -182,28 +187,31 @@ Research content opportunities: trending angles, audience questions, content gap
 
   if (rawTopics.length === 0) return { ok: false, reason: "empty", message: "No topics were produced — try a more specific niche." };
 
-  await db.insert(researchItems).values(
-    rawTopics.map((t) => ({
-      workspaceId: ctx.workspaceId,
-      topic: t.topic,
-      summary: t.angle ? `${t.angle}\n\n${t.summary}` : t.summary,
-      sourceUrl: t.sourceUrls[0] ?? null,
-      sourceName: t.sourceUrls[0]
-        ? supplementaryTopics.has(t.topic)
-          ? "supplementary search result"
-          : new URL(t.sourceUrls[0]).hostname
-        : sourced
-          ? "web"
-          : "AI knowledge",
-      category: t.category,
-      scores: { ...t.scores, overall: overallOpportunity(t.scores), estimated: true } as Record<string, unknown>,
-      recommendedFormats: t.recommendedFormats,
-      status: "new",
-      createdBy: ctx.userId,
-    })),
-  );
+  const inserted = await db
+    .insert(researchItems)
+    .values(
+      rawTopics.map((t) => ({
+        workspaceId: ctx.workspaceId,
+        topic: t.topic,
+        summary: t.angle ? `${t.angle}\n\n${t.summary}` : t.summary,
+        sourceUrl: t.sourceUrls[0] ?? null,
+        sourceName: t.sourceUrls[0]
+          ? supplementaryTopics.has(t.topic)
+            ? "supplementary search result"
+            : new URL(t.sourceUrls[0]).hostname
+          : sourced
+            ? "web"
+            : "AI knowledge",
+        category: t.category,
+        scores: { ...t.scores, overall: overallOpportunity(t.scores), estimated: true } as Record<string, unknown>,
+        recommendedFormats: t.recommendedFormats,
+        status: "new",
+        createdBy: ctx.userId,
+      })),
+    )
+    .returning({ id: researchItems.id });
 
-  return { ok: true, sourced, note, count: rawTopics.length };
+  return { ok: true, sourced, note, count: rawTopics.length, insertedIds: inserted.map((r) => r.id) };
 }
 
 

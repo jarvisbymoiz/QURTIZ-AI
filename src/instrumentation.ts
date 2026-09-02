@@ -14,7 +14,11 @@ export async function register() {
     // Scan for due publishing jobs every minute.
     await boss.schedule(QUEUES.publishScan, "* * * * *");
     await boss.schedule(QUEUES.syncInsights, "0 */4 * * *"); // every 4 hours
-    await boss.schedule(QUEUES.autopilotLoop, "0 9 * * *"); // daily 09:00 UTC
+    // Autopilot: every-minute scan. Each enabled workspace runs at its own
+    // configured local run times — the loop claims occurrences via
+    // lastRunKey, so a per-minute firing is a cheap no-op elsewhere.
+    // schedule() upserts the cron definition on every restart.
+    await boss.schedule(QUEUES.autopilotLoop, "* * * * *");
     g.__qurtizSchedulerReady = true;
     console.log("[qurtiz] background scheduler started");
   } catch (e) {

@@ -1,6 +1,7 @@
 ﻿import "server-only";
 
 import { and, desc, eq } from "drizzle-orm";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getDb } from "@/db";
 import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { generateImage } from "@/lib/ai/image";
@@ -16,7 +17,11 @@ export type VisualGenResult =
   | { ok: true; visualId: string; mode: VisualMode; model?: string }
   | { ok: false; reason: string; message: string };
 
-async function fetchAsset(workspaceId: string, kind: "logo" | "avatar" | "reference"): Promise<{ data: Buffer; mimeType: string } | null> {
+async function fetchAsset(
+  supabase: SupabaseClient,
+  workspaceId: string,
+  kind: "logo" | "avatar" | "reference",
+): Promise<{ data: Buffer; mimeType: string } | null> {
   const db = getDb();
   const [asset] = await db
     .select()
@@ -26,14 +31,17 @@ async function fetchAsset(workspaceId: string, kind: "logo" | "avatar" | "refere
     .limit(1);
   if (!asset) return null;
 
-  const supabase = await createClient();
   const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
   if (error || !data) return null;
   return { data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType };
 }
 
-async function uploadVisual(workspaceId: string, contentItemId: string, png: Buffer): Promise<string> {
-  const supabase = await createClient();
+async function uploadVisual(
+  supabase: SupabaseClient,
+  workspaceId: string,
+  contentItemId: string,
+  png: Buffer,
+): Promise<string> {
   const storagePath = `${workspaceId}/visuals/${contentItemId}-${Date.now()}.png`;
   const { error } = await supabase.storage.from(BUCKET).upload(storagePath, png, { contentType: "image/png", upsert: false });
   if (error) throw new Error(`Storage upload failed: ${error.message}`);
@@ -46,6 +54,10 @@ async function uploadVisual(workspaceId: string, contentItemId: string, png: Buf
  * - ai: photographic generation; avatar/reference images are passed to the model so
  *   people keep the same face/body; the real logo is composited on top afterwards.
  *   Requires paid billing; returns an honest quota/billing state otherwise.
+ *
+ * `storage` is optional and defaults to the request-scoped client (server
+ * actions). Background workers (pg-boss) have no request scope, so they pass
+ * the service-role client explicitly — the pipeline is otherwise identical.
  */
 export async function generateVisual(args: {
   workspaceId: string;
@@ -53,6 +65,7 @@ export async function generateVisual(args: {
   contentItemId: string;
   mode: VisualMode;
   slideIndex?: number;
+  storage?: SupabaseClient;
 }): Promise<VisualGenResult> {
   const db = getDb();
   const [item] = await db
@@ -83,15 +96,19 @@ export async function generateVisual(args: {
     let png: Buffer;
     let usedModel: string;
 
+    // Request-scoped cookies() client by default; workers pass the service
+    // client via `storage` (cookies() would throw outside a request scope).
+    const supabase = args.storage ?? (await createClient());
+
     if (args.mode === "ai") {
       // Workspace-isolated: the image provider/model/key come from THIS
       // workspace's AI config. Throws AIConfigError when unset.
       const target = await getWorkspaceImageTarget(args.workspaceId);
 
       const refs: { mimeType: string; base64: string }[] = [];
-      const avatar = await fetchAsset(args.workspaceId, "avatar");
+      const avatar = await fetchAsset(supabase, args.workspaceId, "avatar");
       if (avatar) refs.push({ mimeType: avatar.mimeType, base64: avatar.data.toString("base64") });
-      const reference = await fetchAsset(args.workspaceId, "reference");
+      const reference = await fetchAsset(supabase, args.workspaceId, "reference");
       if (reference) refs.push({ mimeType: reference.mimeType, base64: reference.data.toString("base64") });
 
       const styleNote = [
@@ -121,7 +138,7 @@ export async function generateVisual(args: {
       usedModel = result.model;
 
       // Composite the REAL logo — AI never redraws the brand logo.
-      const logo = await fetchAsset(args.workspaceId, "logo");
+      const logo = await fetchAsset(supabase, args.workspaceId, "logo");
       if (logo) {
         const sharp = (await import("sharp")).default;
         const base = await sharp(png).metadata();
@@ -134,7 +151,7 @@ export async function generateVisual(args: {
           .toBuffer();
       }
     } else {
-      const logo = await fetchAsset(args.workspaceId, "logo");
+      const logo = await fetchAsset(supabase, args.workspaceId, "logo");
       png = await renderTemplateVisual({
         primaryColor: identity.primaryColor ?? "#6366f1",
         secondaryColor: identity.secondaryColor ?? "#0ea5e9",
@@ -148,7 +165,7 @@ export async function generateVisual(args: {
       usedModel = "satori-template";
     }
 
-    const storagePath = await uploadVisual(args.workspaceId, args.contentItemId, png);
+    const storagePath = await uploadVisual(supabase, args.workspaceId, args.contentItemId, png);
     const [savedVisual] = await db
       .insert(visualAssets)
       .values({

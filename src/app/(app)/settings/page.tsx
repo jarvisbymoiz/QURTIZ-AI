@@ -3,6 +3,7 @@ import { requireWorkspace } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { settings } from "@/db/schema";
+import { sanitizeMaxPosts, sanitizeRunTimes } from "@/lib/autopilot/logic";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
 import { AiConfigCard } from "@/components/settings/ai-config-card";
@@ -20,7 +21,7 @@ export default async function SettingsPage() {
     .select()
     .from(settings)
     .where(and(eq(settings.workspaceId, ctx.workspace.id), eq(settings.key, "autopilot")));
-  const autopilot = (autopilotRow?.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: number };
+  const autopilot = (autopilotRow?.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: unknown; runTimes?: unknown };
 
   return (
     <div className="space-y-6">
@@ -33,7 +34,8 @@ export default async function SettingsPage() {
       />
 
       <AutopilotCard
-        initial={{ enabled: autopilot.enabled ?? false, requireApproval: autopilot.requireApproval ?? true, nicheFocus: autopilot.nicheFocus ?? "", maxPostsPerRun: autopilot.maxPostsPerRun ?? 1 }}
+        initial={{ enabled: autopilot.enabled ?? false, requireApproval: autopilot.requireApproval ?? true, nicheFocus: autopilot.nicheFocus ?? "", maxPostsPerRun: sanitizeMaxPosts(autopilot.maxPostsPerRun), runTimes: sanitizeRunTimes(autopilot.runTimes) }}
+        timezone={ctx.workspace.timezone}
         editable={can(ctx.role, "workspace:manage")}
       />
 

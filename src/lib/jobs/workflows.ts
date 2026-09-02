@@ -1,15 +1,19 @@
 ﻿import "server-only";
 
-import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
+  aiInsights,
   campaigns,
   campaignItems,
+  competitorSnapshots,
+  competitors,
   contentItems,
   contentVariants,
   workspaces,
   notifications,
   platformConnections,
+  postMetrics,
   publishingJobs,
   visualAssets,
   researchItems,
@@ -20,10 +24,15 @@ import { QUEUES } from "./boss";
 import { decryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
+import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
+import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { researchTopics } from "@/lib/ai/research";
-import { defaultSlotFor } from "@/lib/scheduling/time";
+import { autopilotClaimKey, isAutopilotDue, pickEngagementSlot, sanitizeMaxPosts, sanitizeRunTimes } from "@/lib/autopilot/logic";
+import { generateVisual, type VisualGenResult } from "@/lib/visuals/generate";
+import { scheduleItem } from "@/lib/scheduling/engine";
+import { dateIsoInTz, hmInTz, isValidTimezone, tomorrowIsoInTz } from "@/lib/scheduling/time";
 import type { PgBoss } from "pg-boss";
-import { generateAndPersistContent } from "@/lib/ai/content";
+import { generateAndPersistContent, type GenerateContentInput } from "@/lib/ai/content";
 import { createServiceClient } from "@/lib/supabase/service";
 
 const MAX_PUBLISH_ATTEMPTS = 3;
@@ -425,9 +434,237 @@ async function generateCampaign(campaignId: string): Promise<void> {
 }
 
 
+/** Content formats the AI content engine can produce (contentFormatEnum). */
+const CONTENT_FORMATS = new Set(["single_image", "carousel", "reel", "story", "text_post"]);
+/** How many synced posts feed the measured-performance context + best-hour pick. */
+const AUTOPILOT_METRICS_WINDOW = 30;
+/** Cap each recent-topic entry in the research avoid-list. */
+const AUTOPILOT_AVOID_TOPICS = 8;
+
+type AutopilotCfg = {
+  enabled?: boolean;
+  requireApproval?: boolean;
+  nicheFocus?: unknown;
+  maxPostsPerRun?: unknown;
+  runTimes?: unknown;
+  lastRunKey?: string | null;
+};
+
+type AutopilotRunContext = {
+  text: string;
+  metricsCount: number;
+  bestHours: { hour: number; avgEngagement: number; posts: number }[];
+};
+
+/** First recommended format when it is one the content engine can produce. */
+function preferredFormatOf(recommended: string[] | null | undefined): GenerateContentInput["preferredFormat"] {
+  const first = recommended?.[0];
+  return first && CONTENT_FORMATS.has(first) ? (first as GenerateContentInput["preferredFormat"]) : null;
+}
+
+/** "No AI image (reason)." or a positive note — honest either way. */
+function autopilotImageNote(result: VisualGenResult): string {
+  if (result.ok) return "AI image attached.";
+  const reason =
+    result.message === "CONFIGURATION_REQUIRED"
+      ? "the image provider is not configured"
+      : (result.message || "generation failed").slice(0, 160);
+  return `No AI image (${reason}).`;
+}
+
+function truncate(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
 /**
- * Daily autonomous loop for workspaces with autopilot enabled.
- * Guardrails: max posts per run (1-3), approval default on, one slot per day.
+ * Read-only context for one autopilot run: measured performance (same
+ * reading as the Analytics page — compute.sumTotals/groupPerformance/
+ * bestPostingHours over postMetrics), latest AI insights, the latest
+ * snapshot per competitor, and recently covered topics. Compact by design:
+ * it steers research toward topics that fit the measured data without
+ * repeating what was already posted, and it stays cheap to send.
+ */
+async function buildAutopilotRunContext(workspaceId: string, timezone: string): Promise<AutopilotRunContext> {
+  const db = getDb();
+  const parts: string[] = [];
+
+  // Measured performance — mirror the Analytics page's interpretation of
+  // postMetrics.metrics (reach/impressions/likes/comments/shares/saves) and
+  // its local-hour resolution, so the numbers and the best hour match.
+  const metricsRows = await db
+    .select()
+    .from(postMetrics)
+    .where(eq(postMetrics.workspaceId, workspaceId))
+    .orderBy(desc(postMetrics.postedAt))
+    .limit(AUTOPILOT_METRICS_WINDOW);
+  const itemIds = [...new Set(metricsRows.map((r) => r.contentItemId).filter((id): id is string => id !== null))];
+  const itemRows = itemIds.length > 0
+    ? await db
+        .select({ id: contentItems.id, topic: contentItems.topic, format: contentItems.format })
+        .from(contentItems)
+        .where(and(eq(contentItems.workspaceId, workspaceId), inArray(contentItems.id, itemIds)))
+    : [];
+  const topicById = new Map(itemRows.map((i) => [i.id, truncate(i.topic, 70)]));
+  const formatById = new Map(itemRows.map((i) => [i.id, i.format]));
+
+  const tzFmt = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "numeric", hour12: false });
+  const metricRows: MetricsRow[] = metricsRows.map((r) => ({
+    platform: r.platform,
+    contentItemId: r.contentItemId,
+    metrics: (r.metrics ?? {}) as MetricsRow["metrics"],
+    postedAt: r.postedAt,
+    hourOfDay: r.postedAt ? Number(tzFmt.format(new Date(r.postedAt))) : null,
+    format: r.contentItemId ? (formatById.get(r.contentItemId) ?? null) : null,
+    topic: r.contentItemId ? (topicById.get(r.contentItemId) ?? null) : null,
+  }));
+
+  const totals = sumTotals(metricRows);
+  if (totals.posts > 0) {
+    const lines = [
+      `Measured performance (${totals.posts} synced posts, ${timezone}): reach ${totals.reach}, ${totals.engagement} engagements, ER ${totals.engagementRate}%.`,
+    ];
+    const byPlatform = groupPerformance(metricRows, (r) => r.platform);
+    if (byPlatform.length > 0) {
+      lines.push(
+        "Per platform: " +
+          byPlatform
+            .map((g) => `${g.key}: ${g.totals.posts} posts, ${g.totals.engagement} engagements`)
+            .join("; ") +
+          ".",
+      );
+    }
+    const byFormat = groupPerformance(metricRows, (r) => r.format ?? "unknown").filter((g) => g.key !== "unknown");
+    if (byFormat.length > 0) {
+      lines.push(
+        "Best formats: " +
+          byFormat
+            .slice(0, 3)
+            .map((g) => `${g.key}: ${g.totals.engagement} engagements over ${g.totals.posts} posts`)
+            .join("; ") +
+          ".",
+      );
+    }
+    const byTopic = groupPerformance(metricRows, (r) => r.topic ?? "unknown").filter((g) => g.key !== "unknown");
+    if (byTopic.length > 0) {
+      lines.push(
+        "Best topics: " +
+          byTopic
+            .slice(0, 3)
+            .map((g) => `"${g.key}": ${g.totals.engagement} engagements`)
+            .join("; ") +
+          ".",
+      );
+    }
+    parts.push(lines.join("\n"));
+  } else {
+    parts.push("No synced post metrics yet — no measured performance data.");
+  }
+
+  const hours = bestPostingHours(metricRows);
+  if (hours.length > 0) {
+    // %24: the analytics hour reading can emit "24" for a local midnight.
+    parts.push(
+      "Best hours (local): " +
+        hours
+          .slice(0, 3)
+          .map((h) => `${String(h.hour % 24).padStart(2, "0")}:00 (avg ${h.avgEngagement} engagements/post)`)
+          .join("; ") +
+        ".",
+    );
+  }
+
+  const insights = await db
+    .select({ kind: aiInsights.kind, content: aiInsights.content })
+    .from(aiInsights)
+    .where(eq(aiInsights.workspaceId, workspaceId))
+    .orderBy(desc(aiInsights.createdAt))
+    .limit(5);
+  if (insights.length > 0) {
+    parts.push(
+      "Latest AI insights:\n" + insights.map((i) => `- [${i.kind}] ${truncate(i.content, 300)}`).join("\n"),
+    );
+  }
+
+  // Latest snapshot per competitor (followers, avg engagement, analysis,
+  // top recent captions) — the competitor check side of the run.
+  const comps = await db
+    .select({ id: competitors.id, name: competitors.name, handle: competitors.handle })
+    .from(competitors)
+    .where(eq(competitors.workspaceId, workspaceId))
+    .orderBy(asc(competitors.name));
+  if (comps.length > 0) {
+    const snaps = await db
+      .select()
+      .from(competitorSnapshots)
+      .where(eq(competitorSnapshots.workspaceId, workspaceId))
+      .orderBy(desc(competitorSnapshots.capturedAt))
+      .limit(200);
+    const latestByComp = new Map<string, (typeof snaps)[number]>();
+    for (const s of snaps) {
+      if (!latestByComp.has(s.competitorId)) latestByComp.set(s.competitorId, s);
+    }
+    const lines: string[] = [];
+    for (const c of comps) {
+      const s = latestByComp.get(c.id);
+      if (!s) {
+        lines.push(`- ${c.name} (@${c.handle}): no competitor snapshot yet.`);
+        continue;
+      }
+      const recent = (Array.isArray(s.recentPosts) ? s.recentPosts : []) as { caption?: string; likes?: number; comments?: number }[];
+      const top3 = [...recent]
+        .sort((a, b) => (b.likes ?? 0) + (b.comments ?? 0) - ((a.likes ?? 0) + (a.comments ?? 0)))
+        .slice(0, 3)
+        .map((p) => truncate(p.caption ?? "", 90));
+      const analysis = s.analysis ? truncate(s.analysis, 240) : "no AI analysis yet";
+      lines.push(
+        `- ${c.name} (@${c.handle}): ${s.followers ?? "?"} followers, avg engagement ${s.avgEngagement ?? "?"} per recent post. Analysis: ${analysis}` +
+          (top3.length > 0 ? ` Recent posts: ${top3.map((t) => `"${t}"`).join(" | ")}` : ""),
+      );
+    }
+    parts.push("Competitor check:\n" + lines.join("\n"));
+  }
+
+  // Recently covered topics — research must not repeat these.
+  const recentItems = await db
+    .select({ topic: contentItems.topic })
+    .from(contentItems)
+    .where(
+      and(
+        eq(contentItems.workspaceId, workspaceId),
+        inArray(contentItems.status, ["published", "scheduled"] as ("published" | "scheduled")[]),
+      ),
+    )
+    .orderBy(desc(contentItems.createdAt))
+    .limit(10);
+  const covered = new Set<string>();
+  for (const t of topicById.values()) covered.add(t);
+  for (const i of recentItems) {
+    if (i.topic) covered.add(truncate(i.topic, 120));
+    if (covered.size >= AUTOPILOT_AVOID_TOPICS * 2) break;
+  }
+  const coveredList = [...covered].slice(0, AUTOPILOT_AVOID_TOPICS);
+  if (coveredList.length > 0) {
+    parts.push("Recently covered topics — do NOT choose these again:\n" + coveredList.map((t) => `- ${t}`).join("\n"));
+  }
+
+  let text = parts.join("\n\n");
+  if (text.length > 4500) text = text.slice(0, 4499) + "\n…(context truncated)";
+  return { text, metricsCount: metricRows.length, bestHours: hours };
+}
+
+/**
+ * Autopilot loop — pg-boss cron fires this every minute. Each workspace with
+ * autopilot enabled runs at every configured local run time (up to 6/day):
+ * analytics + competitor context, research, content generation with an AI
+ * visual, then approval + high-engagement scheduling (auto-approve mode) or
+ * a for-review notification. Scheduling only ever targets TOMORROW or later
+ * in the workspace timezone.
+ *
+ * Occurrences are claimed BEFORE the work via an atomic lastRunKey update
+ * (the conditional UPDATE matches 0 rows for a concurrent scan), so two
+ * minute scans can never double-fire one occurrence. The claim also survives
+ * partial failures — the scan stays a no-op until the next configured time.
  */
 async function autopilotLoop(): Promise<void> {
   const db = getDb();
@@ -436,76 +673,197 @@ async function autopilotLoop(): Promise<void> {
     .from(settings)
     .where(eq(settings.key, "autopilot"));
   for (const row of rows) {
-    const cfg = (row.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: number };
+    const cfg = (row.value ?? {}) as AutopilotCfg;
     if (!cfg.enabled) continue;
     try {
-      const [ws] = await db.select({ createdBy: workspaces.createdBy, timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, row.workspaceId));
+      const [ws] = await db
+        .select({ createdBy: workspaces.createdBy, timezone: workspaces.timezone })
+        .from(workspaces)
+        .where(eq(workspaces.id, row.workspaceId));
       if (!ws) continue;
 
-      const research = await researchTopics({
+      const runTimes = sanitizeRunTimes(cfg.runTimes);
+      if (runTimes.length === 0) {
+        console.warn(`[autopilot] workspace ${row.workspaceId}: enabled with no run times — add run times in Settings`);
+        continue;
+      }
+      if (!isValidTimezone(ws.timezone)) {
+        console.warn(`[autopilot] workspace ${row.workspaceId}: invalid timezone "${ws.timezone}" — fix it in Workspace Settings`);
+        continue;
+      }
+
+      const now = new Date();
+      const localDate = dateIsoInTz(ws.timezone, now);
+      const localHm = hmInTz(ws.timezone, now);
+      if (!isAutopilotDue(cfg, localDate, localHm)) continue;
+
+      if (!(await hasWorkspaceAIConfig(row.workspaceId))) {
+        console.warn(`[autopilot] workspace ${row.workspaceId}: run due at ${localHm} ${ws.timezone} but AI is not configured — add provider + keys in Workspace Settings`);
+        continue;
+      }
+
+      // Atomic claim of this occurrence (date + local time). jsonb_set keeps
+      // any concurrent Settings save intact; the enabled check prevents
+      // processing a workspace that was disabled after the row was read.
+      const claimKey = autopilotClaimKey(localDate, localHm);
+      const claimed = await db
+        .update(settings)
+        .set({
+          value: sql`jsonb_set(${settings.value}, '{lastRunKey}', ${JSON.stringify(claimKey)}::jsonb, true)`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(settings.workspaceId, row.workspaceId),
+            eq(settings.key, "autopilot"),
+            sql`${settings.value}->>'enabled' = 'true'`,
+            sql`${settings.value}->>'lastRunKey' IS DISTINCT FROM ${claimKey}`,
+          ),
+        )
+        .returning({ workspaceId: settings.workspaceId });
+      if (claimed.length === 0) continue; // another scan claimed it first
+
+      await runAutopilotForWorkspace({
         workspaceId: row.workspaceId,
         userId: ws.createdBy,
-        niche: cfg.nicheFocus || "the brand's niche",
-        notes: "Autopilot daily loop",
+        timezone: ws.timezone,
+        cfg,
+        localHm,
       });
-      if (!research.ok) continue;
+    } catch (e) {
+      console.error("[autopilot]", e instanceof Error ? e.message : e);
+    }
+  }
+}
 
-      const items = await db
-        .select()
-        .from(researchItems)
-        .where(and(eq(researchItems.workspaceId, row.workspaceId), eq(researchItems.status, "new")));
-      const top = items
-        .map((i) => ({ item: i, score: ((i.scores ?? {}) as Record<string, number>).overall ?? 0 }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, cfg.maxPostsPerRun ?? 1);
+/** One due run for one workspace. Never throws for item-level failures. */
+async function runAutopilotForWorkspace(args: {
+  workspaceId: string;
+  userId: string;
+  timezone: string;
+  cfg: AutopilotCfg;
+  localHm: string;
+}): Promise<void> {
+  const db = getDb();
+  const { workspaceId, userId, timezone, cfg, localHm } = args;
+  const limit = sanitizeMaxPosts(cfg.maxPostsPerRun);
 
-      for (const t of top) {
-        const { itemId, qa } = await generateAndPersistContent({
-          workspaceId: row.workspaceId,
-          userId: ws.createdBy,
-          input: { topic: t.item.topic, objective: "Autopilot daily plan", platforms: ["facebook", "instagram"], preferredFormat: null },
-        });
-        await db.update(researchItems).set({ status: "converted", updatedAt: new Date() }).where(eq(researchItems.id, t.item.id));
+  const runCtx = await buildAutopilotRunContext(workspaceId, timezone);
+  const niche = typeof cfg.nicheFocus === "string" && cfg.nicheFocus.trim().length > 0 ? cfg.nicheFocus : "the brand's niche";
+  const research = await researchTopics({
+    workspaceId,
+    userId,
+    niche,
+    notes: `Autopilot run at ${localHm} (${timezone})`,
+    context: runCtx.text || null,
+  });
+  if (!research.ok) {
+    // The occurrence is already claimed — no per-minute retry storm. The
+    // next configured run time retries with a fresh research call.
+    console.warn(`[autopilot] workspace ${workspaceId}: research failed at ${localHm} — ${research.message}`);
+    return;
+  }
+  const ids = research.insertedIds ?? [];
+  if (ids.length === 0) return;
 
-        // Even when approval is not required, content that failed QA must not
-        // be auto-approved or published — it goes to review like everything
-        // else until it is actually re-QA'd.
-        if (cfg.requireApproval === false && qa.passed) {
-          await db.update(contentItems).set({ status: "approved", updatedAt: new Date() }).where(eq(contentItems.id, itemId));
-          await db.update(contentVariants).set({ status: "approved", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, itemId));
-          const slot = defaultSlotFor(new Date(Date.now() + 86400000).toISOString().slice(0, 10), ws.timezone);
-          const variants = await db.select({ id: contentVariants.id, platform: contentVariants.platform }).from(contentVariants).where(eq(contentVariants.contentItemId, itemId));
-          for (const v of variants) {
-            await db.insert(publishingJobs).values({
-              workspaceId: row.workspaceId,
-              contentItemId: itemId,
-              contentVariantId: v.id,
-              platform: v.platform,
-              scheduledAt: slot,
-            });
-          }
-          await db.update(contentItems).set({ status: "scheduled", scheduledAt: slot, updatedAt: new Date() }).where(eq(contentItems.id, itemId));
+  const candidates = await db
+    .select()
+    .from(researchItems)
+    .where(and(eq(researchItems.workspaceId, workspaceId), eq(researchItems.status, "new"), inArray(researchItems.id, ids)));
+  const top = candidates
+    .map((item) => ({ item, score: ((item.scores ?? {}) as Record<string, number>).overall ?? 0 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+  if (top.length === 0) {
+    console.warn(`[autopilot] workspace ${workspaceId}: no research items persisted for the ${localHm} run`);
+    return;
+  }
+  console.log(`[autopilot] workspace ${workspaceId}: ${localHm} ${timezone} run — up to ${top.length} post(s)`);
+
+  // One slot per run: the analytics best local hour (18:30 while there are
+  // fewer than 3 measured posts), always TOMORROW in the workspace timezone.
+  const slot = pickEngagementSlot(runCtx.bestHours, runCtx.metricsCount);
+  const slotDate = tomorrowIsoInTz(timezone);
+
+  // Service-role storage client for image upload. Resolution is hoisted so a
+  // missing SUPABASE_SERVICE_ROLE_KEY degrades per item to an honest
+  // "No AI image" note instead of throwing mid-run and silently dropping the
+  // auto-approve/schedule + notification for an otherwise-created post.
+  let storage: ReturnType<typeof createServiceClient> | null = null;
+  try {
+    storage = createServiceClient();
+  } catch (e) {
+    console.error(`[autopilot] workspace ${workspaceId}: service-role storage unavailable — AI images skipped (${e instanceof Error ? e.message : e})`);
+  }
+
+  for (const t of top) {
+    try {
+      const { itemId, qa } = await generateAndPersistContent({
+        workspaceId,
+        userId,
+        input: {
+          topic: t.item.topic,
+          objective: "Autopilot run " + localHm,
+          platforms: ["facebook", "instagram"],
+          preferredFormat: preferredFormatOf(t.item.recommendedFormats),
+        },
+      });
+      await db.update(researchItems).set({ status: "converted", updatedAt: new Date() }).where(eq(researchItems.id, t.item.id));
+
+      // AI visual — the same pipeline as Content Studio's "Generate AI
+      // visual" (mode "ai"), but with the service-role storage client:
+      // this worker has no request scope, so the cookies()-based client
+      // would throw. Non-fatal: the notification says so honestly.
+      const visual = storage
+        ? await generateVisual({
+            workspaceId,
+            userId,
+            contentItemId: itemId,
+            mode: "ai",
+            storage,
+          })
+        : { ok: false as const, reason: "config_error" as const, message: "Supabase service-role key is not configured" };
+      const imageNote = autopilotImageNote(visual);
+
+      // QA-gate: content that failed QA is NEVER auto-approved or
+      // auto-scheduled — it goes to review like everything else.
+      if (cfg.requireApproval === false && qa.passed) {
+        await db.update(contentItems).set({ status: "approved", updatedAt: new Date() }).where(eq(contentItems.id, itemId));
+        await db.update(contentVariants).set({ status: "approved", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, itemId));
+        const sched = await scheduleItem({ workspaceId, itemId, dateIso: slotDate, timeStr: slot, timezone });
+        if (sched.ok) {
           await db.insert(notifications).values({
-            workspaceId: row.workspaceId,
-            userId: ws.createdBy,
+            workspaceId,
+            userId,
             kind: "content_ready",
             title: "Autopilot scheduled a post",
-            body: "Tomorrow at 18:30: " + t.item.topic,
+            body: `Tomorrow at ${slot} (${timezone}): ${t.item.topic}. ${imageNote}`,
             link: "/calendar",
           });
         } else {
+          console.error(`[autopilot] workspace ${workspaceId}: scheduling failed for "${t.item.topic}" — ${sched.message}`);
           await db.insert(notifications).values({
-            workspaceId: row.workspaceId,
-            userId: ws.createdBy,
+            workspaceId,
+            userId,
             kind: "content_ready",
-            title: "Autopilot created content for review",
-            body: t.item.topic + (qa.passed ? "" : " (QA needs attention — review before approving)"),
+            title: "Autopilot post not scheduled",
+            body: `${t.item.topic}: ${sched.message} Approve and schedule it manually in Content Studio.`,
             link: "/content-studio",
           });
         }
+      } else {
+        await db.insert(notifications).values({
+          workspaceId,
+          userId,
+          kind: "content_ready",
+          title: "Autopilot created content for review",
+          body: `${t.item.topic}${qa.passed ? "" : " (QA needs attention — review before approving)"}. ${imageNote}`,
+          link: "/content-studio",
+        });
       }
     } catch (e) {
-      console.error("[autopilot]", e instanceof Error ? e.message : e);
+      // One item must not sink the rest of the run.
+      console.error(`[autopilot] workspace ${workspaceId}: item "${t.item.topic}" failed`, e instanceof Error ? e.message : e);
     }
   }
 }

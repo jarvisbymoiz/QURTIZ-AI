@@ -71,6 +71,31 @@ export function isValidTimezone(tz: string): boolean {
   }
 }
 
+/**
+ * Local wall-clock time "HH:MM" (24h, zero-padded) of the instant `at` as
+ * seen in `tz`. hourCycle "h23" pins midnight to "00:00" — the default
+ * en-US hour12:false cycle can emit "24:00", which is not a valid HH:MM.
+ */
+export function hmInTz(tz: string, at: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(at);
+}
+
+/**
+ * "YYYY-MM-DD" of the NEXT calendar day after the instant `at` as seen in
+ * `tz` (tomorrow). Adds one calendar day to the local date key, so it is
+ * correct across DST transitions and late-night UTC rollovers where
+ * `at + 86400000` would skip a local day.
+ */
+export function tomorrowIsoInTz(tz: string, at: Date = new Date()): string {
+  const [y, m, d] = dateIsoInTz(tz, at).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+}
+
 /** The default posting slot for a given day in tz: 18:30 local. */
 export function defaultSlotFor(dateIso: string, tz: string): Date {
   return parseZonedDateTime(dateIso, "18:30", tz);

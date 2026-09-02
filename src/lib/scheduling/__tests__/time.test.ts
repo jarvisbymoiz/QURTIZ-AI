@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from "vitest";
-import { parseZonedDateTime, planContentDays, defaultSlotFor, isValidTimezone, dateIsoInTz } from "@/lib/scheduling/time";
+import { parseZonedDateTime, planContentDays, defaultSlotFor, isValidTimezone, dateIsoInTz, hmInTz, tomorrowIsoInTz } from "@/lib/scheduling/time";
 
 describe("parseZonedDateTime", () => {
   it("converts Asia/Karachi 18:30 to 13:30 UTC (no DST)", () => {
@@ -58,6 +58,51 @@ describe("isValidTimezone", () => {
     expect(isValidTimezone("Mars/Olympus")).toBe(false);
     expect(isValidTimezone("not-a-tz")).toBe(false);
     expect(isValidTimezone("")).toBe(false);
+  });
+});
+
+describe("hmInTz", () => {
+  it("returns the local 24-hour HH:MM of the instant as seen in tz", () => {
+    const at = new Date("2026-09-02T23:30:00.000Z"); // 2026-09-03 04:30 in Asia/Karachi (UTC+5)
+    expect(hmInTz("Asia/Karachi", at)).toBe("04:30");
+    expect(hmInTz("UTC", at)).toBe("23:30");
+    expect(hmInTz("America/New_York", at)).toBe("19:30"); // EDT (UTC-4)
+  });
+
+  it("pins midnight to 00:00 (hourCycle h23) instead of 24:00", () => {
+    // 2026-09-02 07:00 UTC is exactly midnight in Los Angeles (PDT, UTC-7).
+    const midnight = new Date("2026-09-02T07:00:00.000Z");
+    expect(hmInTz("America/Los_Angeles", midnight)).toBe("00:00");
+    expect(/^([01]\d|2[0-3]):[0-5]\d$/.test(hmInTz("America/Los_Angeles", midnight))).toBe(true);
+  });
+
+  it("zero-pads single-digit hours and minutes", () => {
+    expect(hmInTz("Asia/Karachi", new Date("2026-09-03T00:05:00.000Z"))).toBe("05:05"); // 05:05 local (UTC+5)
+  });
+});
+
+describe("tomorrowIsoInTz", () => {
+  it("adds one local calendar day to the instant as seen in tz", () => {
+    const at = new Date("2026-09-02T23:30:00.000Z"); // already 2026-09-03 in Asia/Karachi
+    expect(tomorrowIsoInTz("Asia/Karachi", at)).toBe("2026-09-04");
+    expect(tomorrowIsoInTz("UTC", at)).toBe("2026-09-03");
+  });
+
+  it("survives DST spring-forward where a naive +86400000 skips a local day", () => {
+    // New York DST starts 2026-03-08 07:00Z. 04:30Z is Mar 7 23:30 EST; adding
+    // 24 real hours lands Mar 9 00:30 EDT — the naive UTC add skips Mar 8,
+    // while the local-calendar add must yield the next local day, Mar 8.
+    const at = new Date("2026-03-08T04:30:00.000Z");
+    expect(dateIsoInTz("America/New_York", at)).toBe("2026-03-07");
+    expect(tomorrowIsoInTz("America/New_York", at)).toBe("2026-03-08");
+    expect(new Date(at.getTime() + 86400000).toISOString().slice(0, 10)).toBe("2026-03-09");
+  });
+
+  it("handles DST boundaries (spring-forward local day still advances by one)", () => {
+    // New York: 2026-03-08 06:30Z is 2026-03-08 01:30 EST (DST starts 07:00Z).
+    const at = new Date("2026-03-08T06:30:00.000Z");
+    expect(dateIsoInTz("America/New_York", at)).toBe("2026-03-08");
+    expect(tomorrowIsoInTz("America/New_York", at)).toBe("2026-03-09");
   });
 });
 

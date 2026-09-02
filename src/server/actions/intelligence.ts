@@ -15,6 +15,7 @@ import {
 } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
 import { sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { refreshCompetitor } from "@/lib/competitors/discovery";
 import { rateLimit } from "@/lib/security/rate-limit";
@@ -143,18 +144,14 @@ export async function learnStrategyAction(): Promise<ActionResult & { summary?: 
   return { ok: true, summary: stats };
 }
 
-const autopilotSchema = z.object({
-  enabled: z.boolean(),
-  requireApproval: z.boolean().default(true),
-  nicheFocus: z.string().trim().max(300).optional().or(z.literal("")),
-  maxPostsPerRun: z.number().int().min(1).max(3).default(1),
-});
+const autopilotSchema = autopilotSettingsSchema;
 
 export async function updateAutopilotSettingsAction(input: {
   enabled: boolean;
   requireApproval: boolean;
   nicheFocus?: string;
   maxPostsPerRun: number;
+  runTimes?: string[];
 }): Promise<ActionResult> {
   const ctx = await getActiveContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
@@ -164,6 +161,9 @@ export async function updateAutopilotSettingsAction(input: {
 
   const parsed = autopilotSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  if (parsed.data.enabled && parsed.data.runTimes.length === 0) {
+    return { ok: false, error: "Add at least one run time before enabling Autopilot." };
+  }
 
   const db = getDb();
   const existing = await db
