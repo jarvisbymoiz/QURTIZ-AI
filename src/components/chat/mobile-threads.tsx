@@ -18,7 +18,7 @@ export function MobileThreads({ activeThreadId }: { activeThreadId: string | nul
         <SheetHeader>
           <SheetTitle>Chats</SheetTitle>
         </SheetHeader>
-        <div className="h-[calc(100dvh-6rem)] overflow-y-auto scroll-thin">
+        <div className="h-[calc(100dvh-6rem)] overflow-y-auto">
           <ThreadList activeThreadId={activeThreadId} />
         </div>
       </SheetContent>

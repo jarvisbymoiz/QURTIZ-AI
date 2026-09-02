@@ -30,6 +30,8 @@ import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/chat/markdown";
 
 const MAX_FILE_MB = 9;
+// How long the conversation scrollbar stays visible after the last scroll event.
+const SCROLL_HIDE_DELAY_MS = 600;
 
 function toolDisplayName(type: string): string {
   const name = type.replace(/^tool-/, "");
@@ -208,8 +210,10 @@ export function ChatPanel({
   const currentThreadId = useRef<string | null>(threadId);
   const persisting = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const [scrolling, setScrolling] = useState(false);
   const [editingText, setEditingText] = useState("");
 
   const { messages, sendMessage, status, error, stop, regenerate, setMessages } = useChat({
@@ -255,7 +259,18 @@ export function ChatPanel({
     const el = scrollRef.current;
     if (!el) return;
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    // Keep the scrollbar visible while scrolling, then auto-hide it after a pause.
+    setScrolling(true);
+    if (scrollHideTimer.current) clearTimeout(scrollHideTimer.current);
+    scrollHideTimer.current = setTimeout(() => setScrolling(false), SCROLL_HIDE_DELAY_MS);
   }
+
+  // Clear the auto-hide timer when the panel unmounts.
+  useEffect(() => {
+    return () => {
+      if (scrollHideTimer.current) clearTimeout(scrollHideTimer.current);
+    };
+  }, []);
 
   // Persist new messages after a completed turn.
   useEffect(() => {
@@ -401,7 +416,8 @@ export function ChatPanel({
           </div>
         </div>
       ) : (
-        <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin">
+        <div ref={scrollRef} onScroll={handleScroll}
+          className={cn("relative flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin scroll-autohide", scrolling && "scroll-active")}>
           {messages.map((m) => {
             const isUser = m.role === "user";
             return (

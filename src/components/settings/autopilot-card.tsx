@@ -65,7 +65,7 @@ export function AutopilotCard({
           <div className="space-y-2">
             <Label htmlFor="ap-max">Posts per run</Label>
             <select id="ap-max" value={maxPosts} onChange={(e) => setMaxPosts(Number(e.target.value))} disabled={!editable}
-              className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground">
+              className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground [color-scheme:dark]">
               {[1, 2, 3].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </div>

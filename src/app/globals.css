@@ -49,7 +49,6 @@
 }
 
 :root {
-  color-scheme: light;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -85,7 +84,6 @@
 }
 
 .dark {
-  color-scheme: dark;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -152,10 +150,22 @@
   .scroll-thin:hover::-webkit-scrollbar-thumb {
     background: oklch(0.6 0 0 / 0.35);
   }
-  .dark .scroll-thin:hover {
-    scrollbar-color: oklch(0.7 0 0 / 0.4) transparent;
+  /* AI Chat conversation scroller: thumb is hidden by default (even on hover)
+     and appears only while .scroll-active is set — i.e. while the user is
+     actively scrolling (see chat-panel.tsx, which clears it after an idle
+     timeout). .scroll-autohide marks the opt-in container. */
+  .scroll-thin.scroll-autohide:hover {
+    scrollbar-color: transparent transparent;
   }
-  .dark .scroll-thin:hover::-webkit-scrollbar-thumb {
-    background: oklch(0.7 0 0 / 0.4);
+  .scroll-thin.scroll-autohide:hover::-webkit-scrollbar-thumb {
+    background: transparent;
+  }
+  .scroll-thin.scroll-autohide.scroll-active,
+  .scroll-thin.scroll-autohide.scroll-active:hover {
+    scrollbar-color: oklch(0.7 0 0 / 0.45) transparent;
+  }
+  .scroll-thin.scroll-autohide.scroll-active::-webkit-scrollbar-thumb,
+  .scroll-thin.scroll-autohide.scroll-active:hover::-webkit-scrollbar-thumb {
+    background: oklch(0.7 0 0 / 0.45);
   }
 }

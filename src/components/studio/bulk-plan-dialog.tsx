@@ -150,7 +150,7 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
                   id="bulk-count"
                   value={count}
                   onChange={(e) => setCount(Number(e.target.value))}
-                  className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground"
+                  className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground [color-scheme:dark]"
                 >
                   {[6, 12, 18, 24, 30].map((n) => (
                     <option key={n} value={n}>

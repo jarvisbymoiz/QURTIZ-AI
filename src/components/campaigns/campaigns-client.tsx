@@ -89,7 +89,7 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
             <div className="space-y-2">
               <Label htmlFor="c-days">Duration (days)</Label>
               <select id="c-days" value={durationDays} onChange={(e) => setDurationDays(Number(e.target.value))}
-                className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground">
+                className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm shadow-sm outline-none [&>option]:bg-card [&>option]:text-card-foreground [color-scheme:dark]">
                 {[3, 5, 7, 10, 14].map((n) => <option key={n} value={n}>{n}</option>)}
               </select>
             </div>
