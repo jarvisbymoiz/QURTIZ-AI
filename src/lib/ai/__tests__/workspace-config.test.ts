@@ -11,6 +11,16 @@ import {
   validateAIConfigShape,
   type WorkspaceAIConfig,
 } from "@/lib/ai/provider";
+import {
+  AI_PROVIDER_CATALOG,
+  CATALOG_PROVIDER_IDS,
+  PROVIDER_GROUP_ORDER,
+  catalogEntry,
+  isCatalogProviderId,
+  isKnownProvider,
+  resolvedBaseUrl,
+  type CatalogProviderId,
+} from "@/lib/ai/provider-catalog";
 import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
 import {
   getWorkspaceAIModelLabel,
@@ -18,6 +28,7 @@ import {
   hasWorkspaceAIConfig,
   prepareConfigRow,
 } from "@/lib/ai/config";
+import { saveAIConfigInputSchema } from "@/lib/ai/ai-config-schema";
 
 /**
  * DB stub: getWorkspaceAIConfig reads a single row via getDb().select()...
@@ -103,7 +114,7 @@ describe("prepareConfigRow (encryption + validation)", () => {
       textModel: "gemini-3.6-flash",
       textBaseUrl: null,
       textApiKey: "  sk-text-1234567890  ",
-      imageProvider: "openai-compatible",
+      imageProvider: "custom",
       imageModel: "gpt-image-1",
       imageBaseUrl: "https://api.openai.com/v1",
       imageApiKey: "sk-image-0987654321",
@@ -135,12 +146,12 @@ describe("prepareConfigRow (encryption + validation)", () => {
     );
   });
 
-  it("rejects openai-compatible without a base URL", () => {
+  it("rejects `custom` without a base URL (no catalog default to fall back on)", () => {
     expectAIConfigError(
       () =>
         prepareConfigRow({
           workspaceId: "ws",
-          textProvider: "openai-compatible",
+          textProvider: "custom",
           textModel: "gpt-4o-mini",
           textApiKey: "k",
           imageProvider: "gemini",
@@ -148,6 +159,39 @@ describe("prepareConfigRow (encryption + validation)", () => {
           imageApiKey: "k",
         }),
       /Base URL/,
+    );
+  });
+
+  it("allows presets without a base URL (catalog default fills in at runtime)", () => {
+    const row = prepareConfigRow({
+      workspaceId: "ws",
+      textProvider: "groq",
+      textModel: "llama-3.3-70b-versatile",
+      textApiKey: "k",
+      imageProvider: "openai",
+      imageModel: "gpt-image-1",
+      imageApiKey: "k",
+    });
+    expect(row.textProvider).toBe("groq");
+    expect(row.textBaseUrl).toBeNull();
+    expect(row.imageProvider).toBe("openai");
+    expect(row.imageBaseUrl).toBeNull();
+  });
+
+  it("rejects the legacy id on save (read-side alias only)", () => {
+    expectAIConfigError(
+      () =>
+        prepareConfigRow({
+          workspaceId: "ws",
+          textProvider: "openai-compatible",
+          textModel: "m",
+          textBaseUrl: "https://api.openai.com/v1",
+          textApiKey: "k",
+          imageProvider: "gemini",
+          imageModel: "img",
+          imageApiKey: "k",
+        }),
+      /Unknown text provider/,
     );
   });
 
@@ -302,9 +346,20 @@ describe("validateAIConfigShape", () => {
       validateAIConfigShape({
         textProvider: "gemini",
         textModel: "gemini-3.6-flash",
-        imageProvider: "openai-compatible",
+        imageProvider: "custom",
         imageModel: "gpt-image-1",
         imageBaseUrl: "https://api.openai.com/v1",
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts a preset with no base URL (catalog default is filled later)", () => {
+    expect(
+      validateAIConfigShape({
+        textProvider: "openrouter",
+        textModel: "openrouter/auto",
+        imageProvider: "groq",
+        imageModel: "llama-3.3-70b-versatile",
       }),
     ).toBeNull();
   });
@@ -320,12 +375,12 @@ describe("validateAIConfigShape", () => {
     ).toMatch(/Unknown text provider/);
   });
 
-  it("requires a base URL for openai-compatible", () => {
+  it("requires a base URL for custom openai-compatible endpoints", () => {
     expect(
       validateAIConfigShape({
         textProvider: "gemini",
         textModel: "m",
-        imageProvider: "openai-compatible",
+        imageProvider: "custom",
         imageModel: "img",
       }),
     ).toMatch(/Base URL/);
@@ -400,6 +455,7 @@ describe("getWorkspaceTextModel (workspace isolation + missing config)", () => {
         workspaceId: "00000000-0000-0000-0000-0000000000b2",
         textProvider: "openai-compatible",
         textModel: "model-B",
+        textBaseUrl: "https://legacy-gateway.example/v1",
         textApiKeyEnc: encryptToken("text-key-B"),
         imageProvider: "openai-compatible",
       }),
@@ -407,7 +463,11 @@ describe("getWorkspaceTextModel (workspace isolation + missing config)", () => {
     const b = await getWorkspaceTextModel("00000000-0000-0000-0000-0000000000b2");
     expect(b.apiKey).toBe("text-key-B");
     expect(b.modelId).toBe("model-B");
+    // Phase-1 rows store the generic "openai-compatible" id — read-side
+    // resolution keeps them working via the catalog alias (→ custom), with
+    // their own stored base URL.
     expect(b.provider).toBe("openai-compatible");
+    expect(b.baseUrl).toBe("https://legacy-gateway.example/v1");
   });
 
   it("throws AIConfigError (CONFIGURATION_REQUIRED) when the workspace has no config", async () => {
@@ -467,5 +527,288 @@ describe("getWorkspaceTextModel (workspace isolation + missing config)", () => {
     expect(calls[1].url).toBe("https://b.example/v1/chat/completions");
     expect(calls[1].auth).toBe("Bearer key-BBB");
     expect(calls[1].model).toBe("model-b");
+  });
+});
+
+describe("AI provider catalog (Phase 3)", () => {
+  /** Product-spec-fixed catalog: labels, kinds, defaults and hints. */
+  const EXPECTED_CATALOG: Record<
+    string,
+    { label: string; kind: "gemini" | "openai-compatible"; defaultBaseUrl?: string; modelHint?: string }
+  > = {
+    gemini: { label: "Google Gemini", kind: "gemini" },
+    openai: { label: "OpenAI", kind: "openai-compatible", defaultBaseUrl: "https://api.openai.com/v1" },
+    openrouter: {
+      label: "OpenRouter",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://openrouter.ai/api/v1",
+      modelHint: "openrouter/auto",
+    },
+    nvidia: {
+      label: "NVIDIA NIM",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://integrate.api.nvidia.com/v1",
+      modelHint: "meta/llama-3.1-405b-instruct",
+    },
+    groq: {
+      label: "Groq",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://api.groq.com/openai/v1",
+      modelHint: "llama-3.3-70b-versatile",
+    },
+    together: { label: "Together AI", kind: "openai-compatible", defaultBaseUrl: "https://api.together.xyz/v1" },
+    fireworks: { label: "Fireworks AI", kind: "openai-compatible", defaultBaseUrl: "https://api.fireworks.ai/inference/v1" },
+    deepseek: {
+      label: "DeepSeek",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://api.deepseek.com/v1",
+      modelHint: "deepseek-chat",
+    },
+    mistral: {
+      label: "Mistral AI",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://api.mistral.ai/v1",
+      modelHint: "mistral-large-latest",
+    },
+    xai: {
+      label: "xAI (Grok)",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://api.x.ai/v1",
+      modelHint: "grok-2-latest",
+    },
+    cerebras: { label: "Cerebras", kind: "openai-compatible", defaultBaseUrl: "https://api.cerebras.ai/v1" },
+    perplexity: { label: "Perplexity", kind: "openai-compatible", defaultBaseUrl: "https://api.perplexity.ai" },
+    "github-models": {
+      label: "GitHub Models",
+      kind: "openai-compatible",
+      defaultBaseUrl: "https://models.inference.ai.azure.com",
+    },
+    omniroute: {
+      label: "Omni Route (self-hosted gateway)",
+      kind: "openai-compatible",
+      defaultBaseUrl: "http://localhost:20128/v1",
+    },
+    ollama: { label: "Ollama (local)", kind: "openai-compatible", defaultBaseUrl: "http://localhost:11434/v1" },
+    custom: { label: "Custom OpenAI-compatible", kind: "openai-compatible" },
+  };
+
+  it("matches the curated spec table exactly (labels, kinds, base URLs, hints)", () => {
+    expect(CATALOG_PROVIDER_IDS).toHaveLength(Object.keys(EXPECTED_CATALOG).length);
+    for (const [id, expected] of Object.entries(EXPECTED_CATALOG)) {
+      const entry = AI_PROVIDER_CATALOG[id as CatalogProviderId];
+      expect(entry, `catalog entry "${id}"`).toBeDefined();
+      expect(entry.label).toBe(expected.label);
+      expect(entry.kind).toBe(expected.kind);
+      expect(entry.defaultBaseUrl).toBe(expected.defaultBaseUrl);
+      expect(entry.modelHint).toBe(expected.modelHint);
+    }
+    expect(AI_PROVIDER_CATALOG.omniroute.note).toMatch(/endpoint may differ/);
+  });
+
+  it("keeps every entry well-formed and grouped for the picker", () => {
+    for (const id of CATALOG_PROVIDER_IDS) {
+      const e = AI_PROVIDER_CATALOG[id];
+      expect(e.id).toBe(id);
+      expect(e.label.trim().length).toBeGreaterThan(0);
+      expect(["gemini", "openai-compatible"]).toContain(e.kind);
+      expect(PROVIDER_GROUP_ORDER).toContain(e.group);
+    }
+  });
+
+  it("gemini has no base URL; every openai-compatible preset has one EXCEPT custom", () => {
+    expect(AI_PROVIDER_CATALOG.gemini.kind).toBe("gemini");
+    expect(AI_PROVIDER_CATALOG.gemini.defaultBaseUrl).toBeUndefined();
+    const noDefault = CATALOG_PROVIDER_IDS.filter(
+      (id) => AI_PROVIDER_CATALOG[id].kind === "openai-compatible" && !AI_PROVIDER_CATALOG[id].defaultBaseUrl,
+    );
+    expect(noDefault).toEqual(["custom"]);
+  });
+
+  it("resolves the legacy stored id 'openai-compatible' to the custom entry (read side)", () => {
+    expect(catalogEntry("openai-compatible")?.id).toBe("custom");
+    expect(catalogEntry("openai-compatible")?.label).toBe("Custom OpenAI-compatible");
+    expect(isKnownProvider("openai-compatible")).toBe(true);
+    // ...but it is NOT a savable catalog id
+    expect(isCatalogProviderId("openai-compatible")).toBe(false);
+    expect(CATALOG_PROVIDER_IDS).not.toContain("openai-compatible");
+    expect(catalogEntry("definitely-not-a-provider")).toBeUndefined();
+    expect(isKnownProvider("definitely-not-a-provider")).toBe(false);
+  });
+});
+
+describe("resolvedBaseUrl (stored ?? catalog default)", () => {
+  it("fills the catalog default when the stored URL is empty or blank for presets", () => {
+    expect(resolvedBaseUrl("groq", "")).toBe("https://api.groq.com/openai/v1");
+    expect(resolvedBaseUrl("groq", "   ")).toBe("https://api.groq.com/openai/v1");
+    expect(resolvedBaseUrl("groq", null)).toBe("https://api.groq.com/openai/v1");
+    expect(resolvedBaseUrl("groq", undefined)).toBe("https://api.groq.com/openai/v1");
+    expect(resolvedBaseUrl("openrouter", "")).toBe("https://openrouter.ai/api/v1");
+    expect(resolvedBaseUrl("openai", "")).toBe("https://api.openai.com/v1");
+  });
+
+  it("prefers the stored URL over the catalog default", () => {
+    expect(resolvedBaseUrl("groq", " https://gateway.example/v1 ")).toBe("https://gateway.example/v1");
+  });
+
+  it("returns null for gemini (no base URL concept)", () => {
+    expect(resolvedBaseUrl("gemini", "")).toBeNull();
+    expect(resolvedBaseUrl("gemini", null)).toBeNull();
+    expect(resolvedBaseUrl("gemini", "https://should-not-happen.example/v1")).toBeNull();
+  });
+
+  it("fails honestly for custom without a stored URL", () => {
+    expect(() => resolvedBaseUrl("custom", "")).toThrow(/Base URL/);
+    expect(() => resolvedBaseUrl("custom", null)).toThrow(/Base URL/);
+    expect(() => resolvedBaseUrl("custom", undefined)).toThrow(/Base URL/);
+  });
+
+  it("returns the stored URL for custom and for the legacy alias", () => {
+    expect(resolvedBaseUrl("custom", "https://my-gateway.example/v1")).toBe("https://my-gateway.example/v1");
+    expect(resolvedBaseUrl("openai-compatible", "https://legacy.example/v1")).toBe("https://legacy.example/v1");
+  });
+
+  it("throws for unknown providers", () => {
+    expect(() => resolvedBaseUrl("claude", "https://x.example/v1")).toThrow(/Unknown AI provider/);
+  });
+});
+
+describe("runtime preset/custom resolution through the workspace row", () => {
+  it("fills the catalog default for a preset row with an empty stored base URL", async () => {
+    dbMock.state.rows = [
+      makeRow({
+        textProvider: "groq",
+        textModel: "llama-3.3-70b-versatile",
+        textBaseUrl: "",
+        textApiKeyEnc: encryptToken("groq-key"),
+      }),
+    ];
+    const resolved = await getWorkspaceTextModel("00000000-0000-0000-0000-0000000000a1");
+    expect(resolved.provider).toBe("groq");
+    expect(resolved.modelId).toBe("llama-3.3-70b-versatile");
+    expect(resolved.baseUrl).toBe("https://api.groq.com/openai/v1");
+    expect(resolved.apiKey).toBe("groq-key");
+  });
+
+  it("honors a stored override for a preset row", async () => {
+    dbMock.state.rows = [
+      makeRow({
+        textProvider: "openrouter",
+        textModel: "openrouter/auto",
+        textBaseUrl: "https://proxy.example/v1",
+        textApiKeyEnc: encryptToken("or-key"),
+      }),
+    ];
+    const resolved = await getWorkspaceTextModel("00000000-0000-0000-0000-0000000000a1");
+    expect(resolved.baseUrl).toBe("https://proxy.example/v1");
+  });
+
+  it("throws an honest AIConfigError for a custom row without a stored base URL", async () => {
+    dbMock.state.rows = [
+      makeRow({
+        textProvider: "custom",
+        textModel: "some-model",
+        textBaseUrl: null,
+        textApiKeyEnc: encryptToken("custom-key"),
+      }),
+    ];
+    try {
+      await getWorkspaceTextModel("00000000-0000-0000-0000-0000000000a1");
+      throw new Error("expected AIConfigError");
+    } catch (error) {
+      if (error instanceof Error && error.message === "expected AIConfigError") throw error;
+      expect(error).toBeInstanceOf(AIConfigError);
+      expect((error as AIConfigError).message).toBe("INVALID_CONFIG");
+      expect((error as AIConfigError).detail).toMatch(/Base URL/);
+    }
+  });
+});
+
+describe("saveAIConfigInputSchema (action-level validation)", () => {
+  const base = {
+    textProvider: "gemini",
+    textModel: "gemini-3.6-flash",
+    imageProvider: "gemini",
+    imageModel: "gemini-3.1-flash-image",
+  };
+
+  /** zod v4 exposes `.error` only on the failure branch — this keeps the
+   *  failure assertions below tolerant of the union typing. */
+  function firstIssueMessage(result: {
+    success: boolean;
+    error?: { issues?: { message?: string }[] };
+  }): string | undefined {
+    return result.error?.issues?.[0]?.message;
+  }
+
+  it("accepts a gemini config and catalog presets with or without a stored base URL", () => {
+    expect(saveAIConfigInputSchema.safeParse(base).success).toBe(true);
+    const groq = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textProvider: "groq",
+      textModel: "llama-3.3-70b-versatile",
+    });
+    expect(groq.success).toBe(true);
+    const openrouterWithOverride = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textProvider: "openrouter",
+      textModel: "openrouter/auto",
+      textBaseUrl: "https://proxy.example/v1",
+    });
+    expect(openrouterWithOverride.success).toBe(true);
+  });
+
+  it("accepts custom with a base URL", () => {
+    const r = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textProvider: "custom",
+      textModel: "my-model",
+      textBaseUrl: "https://my-gateway.example/v1",
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("rejects custom without a base URL (missing or blank)", () => {
+    const missing = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textProvider: "custom",
+      textModel: "my-model",
+    });
+    expect(missing.success).toBe(false);
+    expect(firstIssueMessage(missing)).toMatch(/Base URL/);
+
+    const blank = saveAIConfigInputSchema.safeParse({
+      ...base,
+      imageProvider: "custom",
+      imageModel: "my-image-model",
+      imageBaseUrl: "   ",
+    });
+    expect(blank.success).toBe(false);
+    expect(firstIssueMessage(blank)).toMatch(/Base URL/);
+  });
+
+  it("rejects unknown and legacy provider ids on save", () => {
+    const unknown = saveAIConfigInputSchema.safeParse({ ...base, textProvider: "anthropic" });
+    expect(unknown.success).toBe(false);
+    expect(firstIssueMessage(unknown)).toMatch(/Unknown text provider/);
+
+    // Legacy rows keep working on READ (alias) but cannot be re-saved.
+    const legacy = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textProvider: "openai-compatible",
+      textModel: "model",
+      textBaseUrl: "https://api.openai.com/v1",
+    });
+    expect(legacy.success).toBe(false);
+    expect(firstIssueMessage(legacy)).toMatch(/Unknown text provider/);
+  });
+
+  it("still requires models and accepts blank-key-preserve inputs", () => {
+    expect(saveAIConfigInputSchema.safeParse({ ...base, textModel: "  " }).success).toBe(false);
+    const blankKeys = saveAIConfigInputSchema.safeParse({
+      ...base,
+      textApiKey: "",
+      imageApiKey: null,
+    });
+    expect(blankKeys.success).toBe(true);
   });
 });

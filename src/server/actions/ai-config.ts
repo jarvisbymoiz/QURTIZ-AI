@@ -1,19 +1,11 @@
 ﻿"use server";
 
-import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { workspaceAiConfig } from "@/db/schema";
+import { saveAIConfigInputSchema } from "@/lib/ai/ai-config-schema";
 import { prepareConfigRow } from "@/lib/ai/config";
-import {
-  AI_TASKS,
-  AIConfigError,
-  IMAGE_PROVIDER_IDS,
-  maskApiKey,
-  TEXT_PROVIDER_IDS,
-  validateAIConfigShape,
-  type AiTaskOverrides,
-} from "@/lib/ai/provider";
+import { AIConfigError, maskApiKey, validateAIConfigShape, type AiTaskOverrides } from "@/lib/ai/provider";
 import { decryptToken } from "@/lib/crypto/tokens";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
@@ -73,22 +65,11 @@ export async function getWorkspaceAIConfigAction(): Promise<
   };
 }
 
-const saveAIConfigSchema = z.object({
-  textProvider: z.enum(TEXT_PROVIDER_IDS),
-  textModel: z.string().trim().min(1, "A text model is required."),
-  textBaseUrl: z.string().trim().min(1).nullable().optional(),
-  textApiKey: z.string().trim().optional().nullable(),
-  imageProvider: z.enum(IMAGE_PROVIDER_IDS),
-  imageModel: z.string().trim().min(1, "An image model is required."),
-  imageBaseUrl: z.string().trim().min(1).nullable().optional(),
-  imageApiKey: z.string().trim().optional().nullable(),
-  taskOverrides: z.record(z.enum(AI_TASKS), z.string().trim().min(1)).nullable().optional(),
-});
-
 /**
  * Create or update the workspace's AI config. Permission: workspace:manage
  * (owner/admin). Keys are AES-256-GCM encrypted at rest via
  * lib/crypto/tokens before the row is written — never stored plaintext.
+ * Input shape is validated by saveAIConfigInputSchema (lib/ai/ai-config-schema).
  *
  * Blank keys preserve the currently stored key (the settings UI shows a
  * masked hint instead of a prefilled plaintext value); a blank key with no
@@ -111,7 +92,7 @@ export async function saveWorkspaceAIConfigAction(input: {
   const rl = rateLimit("aiconfig:" + ctx.workspaceId, 10, 10 * 60_000);
   if (!rl.allowed) return { ok: false, error: "Config update limit reached. Try again in a few minutes." };
 
-  const parsed = saveAIConfigSchema.safeParse(input);
+  const parsed = saveAIConfigInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   const d = parsed.data;
 

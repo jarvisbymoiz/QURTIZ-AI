@@ -1,6 +1,7 @@
 ﻿import "server-only";
 
 import type { ImageProviderId } from "@/lib/ai/provider";
+import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
 
 /**
  * Image generation via REST, driven by the workspace's own AI config
@@ -10,8 +11,11 @@ import type { ImageProviderId } from "@/lib/ai/provider";
  * - gemini: Google's generateContent REST API (direct fetch for full
  *   control over reference images / img2img, which SDK image APIs do not
  *   expose). Models are tried in order; the first with quota wins.
- * - openai-compatible: POST {baseUrl}/images/generations (OpenAI Images
- *   API shape — also served by OpenRouter and compatible gateways).
+ * - every other catalog provider is openai-compatible: POST
+ *   {baseUrl}/images/generations (OpenAI Images API shape — also served by
+ *   OpenRouter and compatible gateways). The base URL is the EFFECTIVE one
+ *   (stored ?? catalog default); a `custom` provider without an endpoint
+ *   fails honestly instead of silently targeting a default host.
  */
 export const IMAGE_MODEL_CHAIN = [
   "gemini-3.1-flash-image",
@@ -110,9 +114,9 @@ async function openaiCompatibleGenerate(args: {
   prompt: string;
   apiKey: string;
   modelId: string;
-  baseUrl: string | null;
+  baseUrl: string;
 }): Promise<ImageGenResult> {
-  const baseUrl = (args.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const baseUrl = args.baseUrl.replace(/\/+$/, "");
   const model = args.modelId;
   try {
     const res = await fetch(`${baseUrl}/images/generations`, {
@@ -158,7 +162,11 @@ async function openaiCompatibleGenerate(args: {
 /**
  * Generate an image using the workspace's configured image provider/model.
  * `target` comes from getWorkspaceImageTarget(workspaceId) — the caller
- * resolves it so this module stays free of DB access.
+ * resolves it so this module stays free of DB access. Dispatch follows the
+ * catalog: kind "gemini" → Google REST; every other entry → the OpenAI
+ * Images API shape against its (stored ?? catalog default) base URL. The
+ * legacy stored id "openai-compatible" maps to `custom` via the catalog, so
+ * old rows keep working here too.
  */
 export async function generateImage(args: {
   prompt: string;
@@ -171,11 +179,22 @@ export async function generateImage(args: {
   if (!args.apiKey) {
     return { ok: false, reason: "api_error", message: "No API key is configured for this workspace's image provider." };
   }
-  if (args.provider === "gemini") {
+  const entry = catalogEntry(args.provider);
+  if (!entry) {
+    return { ok: false, reason: "api_error", message: `Unknown image provider "${args.provider}".` };
+  }
+  if (entry.kind === "gemini") {
     return geminiGenerate({ prompt: args.prompt, references: args.references, apiKey: args.apiKey, modelId: args.modelId });
   }
-  if (args.provider === "openai-compatible") {
-    return openaiCompatibleGenerate({ prompt: args.prompt, apiKey: args.apiKey, modelId: args.modelId, baseUrl: args.baseUrl });
+  // OpenAI-compatible kind. Resolution already filled the catalog default
+  // for presets; a `custom` provider with no endpoint fails honestly here
+  // instead of silently targeting a default host.
+  try {
+    const baseUrl = resolvedBaseUrl(args.provider, args.baseUrl);
+    if (!baseUrl) throw new Error(`Provider "${args.provider}" requires a Base URL.`);
+    return openaiCompatibleGenerate({ prompt: args.prompt, apiKey: args.apiKey, modelId: args.modelId, baseUrl });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Image generation failed";
+    return { ok: false, reason: "api_error", message };
   }
-  return { ok: false, reason: "api_error", message: `Unknown image provider "${args.provider}".` };
 }

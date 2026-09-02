@@ -1,9 +1,19 @@
 ﻿import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
+import {
+  AI_PROVIDER_CATALOG,
+  CATALOG_PROVIDER_IDS,
+  catalogEntry,
+  isCatalogProviderId,
+  providerRequiresBaseUrl,
+  resolvedBaseUrl,
+  type ProviderId,
+} from "@/lib/ai/provider-catalog";
 
 /**
- * Provider registry (Phase 1: workspace-isolated BYOK).
+ * Provider registry (Phase 1: workspace-isolated BYOK, Phase 3: curated
+ * third-party catalog).
  *
  * Every workspace owns an AI configuration row (workspace_ai_config) with a
  * TEXT provider/model (Chat, Content Studio, Research, Bulk, Campaigns,
@@ -12,18 +22,23 @@ import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
  * SDK model at runtime — there is no module-level global key and no
  * production fallback to GEMINI_API_KEY (that would mix tenants).
  *
- * Only providers whose SDK packages exist in package.json are registered.
- * Today that is `gemini` (@ai-sdk/google) and `openai-compatible` (a small
- * OpenAI Chat Completions client built on @ai-sdk/provider, no extra
- * dependency). Adding `openai` / `anthropic` / etc. later is a one-line
- * addition to `createTextModel` below plus a package.json entry.
+ * Providers come from the catalog (lib/ai/provider-catalog.ts): `gemini`
+ * (@ai-sdk/google SDK) plus OpenAI-compatible gateways (OpenAI, OpenRouter,
+ * NVIDIA NIM, Groq, Together, … and a fully custom endpoint) — all served
+ * by the small native OpenAI Chat Completions client built on
+ * @ai-sdk/provider, no extra dependency. The legacy stored id
+ * "openai-compatible" (Phase 1/2 rows) resolves to the catalog's `custom`
+ * entry through catalogEntry(), so old rows keep working unchanged.
  */
 
-export const TEXT_PROVIDER_IDS = ["gemini", "openai-compatible"] as const;
-export type TextProviderId = (typeof TEXT_PROVIDER_IDS)[number];
+export type TextProviderId = ProviderId;
+export type ImageProviderId = ProviderId;
 
-export const IMAGE_PROVIDER_IDS = ["gemini", "openai-compatible"] as const;
-export type ImageProviderId = (typeof IMAGE_PROVIDER_IDS)[number];
+/** Savable catalog ids (same list for TEXT and IMAGE). */
+export const TEXT_PROVIDER_IDS = CATALOG_PROVIDER_IDS;
+export const IMAGE_PROVIDER_IDS = CATALOG_PROVIDER_IDS;
+
+export { AI_PROVIDER_CATALOG };
 
 /** Tasks that consume the workspace's TEXT model. */
 export const AI_TASKS = [
@@ -100,17 +115,25 @@ export class AIConfigError extends Error {
   }
 }
 
+/**
+ * SAVE-side provider checks: only catalog ids may be persisted. The legacy
+ * stored id "openai-compatible" is accepted on READ (catalogEntry resolves
+ * the alias) but is not a valid save target.
+ */
 export function isKnownTextProvider(id: string): id is TextProviderId {
-  return (TEXT_PROVIDER_IDS as readonly string[]).includes(id);
+  return isCatalogProviderId(id);
 }
 
 export function isKnownImageProvider(id: string): id is ImageProviderId {
-  return (IMAGE_PROVIDER_IDS as readonly string[]).includes(id);
+  return isCatalogProviderId(id);
 }
 
 /**
  * Validate the user-supplied shape of an AI config BEFORE it is persisted.
  * Returns null when valid, otherwise a human-readable reason.
+ * Base URLs are required only for openai-compatible providers without a
+ * catalog default (today: `custom`); presets may leave the field blank and
+ * runtime resolution fills their catalog default.
  */
 export function validateAIConfigShape(cfg: {
   textProvider: string;
@@ -128,13 +151,18 @@ export function validateAIConfigShape(cfg: {
   }
   if (!cfg.textModel?.trim()) return "A text model is required.";
   if (!cfg.imageModel?.trim()) return "An image model is required.";
-  if (cfg.textProvider === "openai-compatible" && !cfg.textBaseUrl?.trim()) {
-    return "OpenAI-compatible text endpoints require a Base URL (e.g. https://api.openai.com/v1).";
+  if (providerRequiresBaseUrl(cfg.textProvider) && !cfg.textBaseUrl?.trim()) {
+    return baseUrlRequiredMessage(cfg.textProvider, "text");
   }
-  if (cfg.imageProvider === "openai-compatible" && !cfg.imageBaseUrl?.trim()) {
-    return "OpenAI-compatible image endpoints require a Base URL (e.g. https://api.openai.com/v1).";
+  if (providerRequiresBaseUrl(cfg.imageProvider) && !cfg.imageBaseUrl?.trim()) {
+    return baseUrlRequiredMessage(cfg.imageProvider, "image");
   }
   return null;
+}
+
+function baseUrlRequiredMessage(providerId: string, side: "text" | "image"): string {
+  const name = catalogEntry(providerId)?.label ?? providerId;
+  return `${name} ${side} endpoints require a Base URL (e.g. https://gateway.example.com/v1).`;
 }
 
 /** Mask a key for display: first 3 chars + "…" + last 4 chars. */
@@ -205,6 +233,23 @@ export async function withRateLimitRetry<T>(
   throw lastErr;
 }
 
+/**
+ * Effective base URL for a provider, converted into this module's error
+ * contract: catalog resolution throws plain Errors for a `custom` provider
+ * without a stored URL (and for unknown ids); callers here surface the same
+ * honest reason as an AIConfigError so the existing L9 error mapping keeps
+ * working.
+ */
+function effectiveBaseUrl(providerId: string, storedBaseUrl: string | null): string | null {
+  try {
+    return resolvedBaseUrl(providerId, storedBaseUrl);
+  } catch (error) {
+    const reason =
+      error instanceof Error ? error.message : `Provider "${providerId}" requires a Base URL.`;
+    throw new AIConfigError("INVALID_CONFIG", reason);
+  }
+}
+
 /** Build the SDK text model instance for a provider/model/key triple. */
 export function createTextModel(
   provider: TextProviderId,
@@ -212,29 +257,35 @@ export function createTextModel(
   apiKey: string,
   baseUrl: string | null,
 ): LanguageModelV2 {
-  switch (provider) {
-    case "gemini": {
-      const google = createGoogleGenerativeAI({ apiKey });
-      return google(modelId);
-    }
-    case "openai-compatible": {
-      return createOpenAICompatibleModel({ modelId, apiKey, baseUrl });
-    }
+  const entry = catalogEntry(provider);
+  if (!entry) {
+    throw new AIConfigError("INVALID_CONFIG", `Unknown text provider "${provider}".`);
   }
+  if (entry.kind === "gemini") {
+    const google = createGoogleGenerativeAI({ apiKey });
+    return google(modelId);
+  }
+  // OpenAI-compatible kind: presets fall back to their catalog default when
+  // no URL is given; `custom` without a URL fails honestly here.
+  const effective = effectiveBaseUrl(provider, baseUrl);
+  return createOpenAICompatibleModel({ modelId, apiKey, baseUrl: effective });
 }
 
 /**
  * Resolve the TEXT model for a workspace config, honoring per-task
  * overrides. Pure function of the decrypted config — no globals, no env.
+ * `baseUrl` on the result is the EFFECTIVE endpoint (stored ?? catalog
+ * default) so bookkeeping matches what the client actually talks to.
  */
 export function resolveTextModel(config: WorkspaceAIConfig, task?: AiTask): ResolvedTextModel {
   const modelId = (task ? config.taskOverrides?.[task] : undefined)?.trim() || config.textModel;
-  const model = createTextModel(config.textProvider, modelId, config.textApiKey, config.textBaseUrl);
+  const baseUrl = effectiveBaseUrl(config.textProvider, config.textBaseUrl);
+  const model = createTextModel(config.textProvider, modelId, config.textApiKey, baseUrl);
   return {
     provider: config.textProvider,
     modelId,
     apiKey: config.textApiKey,
-    baseUrl: config.textBaseUrl,
+    baseUrl,
     model,
   };
 }
@@ -245,7 +296,7 @@ export function resolveImageTarget(config: WorkspaceAIConfig): ImageTarget {
     provider: config.imageProvider,
     modelId: config.imageModel,
     apiKey: config.imageApiKey,
-    baseUrl: config.imageBaseUrl,
+    baseUrl: effectiveBaseUrl(config.imageProvider, config.imageBaseUrl),
   };
 }
 

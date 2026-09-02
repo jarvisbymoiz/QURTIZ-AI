@@ -9,44 +9,158 @@ import {
   saveWorkspaceAIConfigAction,
   type AIConfigView,
 } from "@/server/actions/ai-config";
+import {
+  AI_PROVIDER_CATALOG,
+  CATALOG_PROVIDER_IDS,
+  PROVIDER_GROUP_LABELS,
+  PROVIDER_GROUP_ORDER,
+  catalogEntry,
+  providerRequiresBaseUrl,
+  type CatalogProviderId,
+} from "@/lib/ai/provider-catalog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /**
- * Workspace AI configuration (Phase 2).
+ * Workspace AI configuration (Phase 2 UI, Phase 3 catalog).
  *
  * Wired to the REAL Phase-1 server actions: getWorkspaceAIConfigAction
  * (masked view — the raw key never leaves the server), saveWorkspaceAIConfigAction
  * (blank key = keep the stored one), clearWorkspaceAIConfigAction. No mock
  * state anywhere: the card reflects the persisted row or an honest empty
- * state. Only actually-wired providers are offered (gemini,
- * openai-compatible) — registry-ready but unregistered providers are not
- * listed as selectable.
+ * state.
+ *
+ * The provider pickers render the CURATED catalog (lib/ai/provider-catalog)
+ * grouped by Google / Gateways & third-party / Local & self-hosted /
+ * Custom. Picking a preset pre-fills its base URL (still editable) and
+ * shows the catalog's model hint; `custom` demands its own base URL. The
+ * legacy stored id "openai-compatible" (Phase-1 rows) is normalized to the
+ * catalog's `custom` entry on load, so old configs keep editing fine.
  */
 
-const TEXT_PROVIDER_OPTIONS = [
-  { id: "gemini", label: "Google AI Studio / Vertex (Gemini)" },
-  { id: "openai-compatible", label: "OpenAI-compatible endpoint" },
-] as const;
-
-const TEXT_MODEL_PLACEHOLDERS: Record<string, string> = {
-  gemini: "gemini-2.0-flash",
-  "openai-compatible": "gpt-4o-mini",
+/** Placeholder model examples per section for providers whose catalog entry
+ *  has no modelHint (today: gemini — its text vs image examples differ). */
+const FALLBACK_MODEL_HINTS: Record<"text" | "image", Partial<Record<CatalogProviderId, string>>> = {
+  text: { gemini: "gemini-3.6-flash" },
+  image: { gemini: "gemini-3.1-flash-image" },
 };
 
-const IMAGE_MODEL_PLACEHOLDERS: Record<string, string> = {
-  gemini: "gemini-3.1-flash-image",
-  "openai-compatible": "gpt-image-1",
-};
-
-const BASE_URL_PLACEHOLDER = "https://api.openai.com/v1";
+const CUSTOM_BASE_URL_HELP =
+  "Required. Any OpenAI-compatible endpoint — OpenRouter, NVIDIA NIM, Omni Route, local gateways…";
 
 const USAGE_NOTE =
   "Used by: AI Chat, Content Studio, Bulk Creation, Research, Planner, Campaigns (text model) · Visual Generation (image model)";
+
+function providerLabel(id: string): string {
+  return catalogEntry(id)?.label ?? id;
+}
+
+/** Model input placeholder: catalog hint, else the section fallback. */
+function modelPlaceholder(providerId: string, section: "text" | "image"): string | undefined {
+  const entry = catalogEntry(providerId);
+  if (entry?.modelHint) return entry.modelHint;
+  if (entry?.kind === "gemini") return FALLBACK_MODEL_HINTS[section][providerId as CatalogProviderId];
+  return undefined;
+}
+
+/**
+ * Base URL to show after a provider change. Selecting a preset pre-fills
+ * its catalog default; `custom` starts empty. A user-typed override is kept
+ * unless it is exactly the previous provider's default (the field then just
+ * tracks the new preset).
+ */
+function nextBaseUrl(providerId: string, prevProviderId: string, current: string): string {
+  const entry = catalogEntry(providerId);
+  if (!entry || entry.kind === "gemini") return "";
+  const trimmed = current.trim();
+  if (trimmed === "") return entry.defaultBaseUrl ?? "";
+  const prevDefault = catalogEntry(prevProviderId)?.defaultBaseUrl;
+  if (prevDefault && trimmed === prevDefault) return entry.defaultBaseUrl ?? "";
+  return current;
+}
+
+/** Grouped provider picker rendered from the catalog (text AND image). */
+function ProviderSelect({
+  id,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  value: string;
+  onChange: (next: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Select value={value} onValueChange={(v) => onChange(String(v))} disabled={disabled}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PROVIDER_GROUP_ORDER.map((group) => {
+          const entries = CATALOG_PROVIDER_IDS.filter((pid) => AI_PROVIDER_CATALOG[pid].group === group);
+          return (
+            <SelectGroup key={group}>
+              <SelectLabel>{PROVIDER_GROUP_LABELS[group]}</SelectLabel>
+              {entries.map((pid) => (
+                <SelectItem key={pid} value={pid}>
+                  {AI_PROVIDER_CATALOG[pid].label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          );
+        })}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** Base URL row: visible for every non-Gemini provider; required (with the
+ *  honest helper text) only for providers without a catalog default. */
+function BaseUrlField({
+  id,
+  providerId,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  providerId: string;
+  value: string;
+  onChange: (next: string) => void;
+  disabled?: boolean;
+}) {
+  const entry = catalogEntry(providerId);
+  if (!entry || entry.kind === "gemini") return null;
+  const required = providerRequiresBaseUrl(providerId);
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>
+        Base URL{required ? <span className="text-destructive"> *</span> : null}
+      </Label>
+      <Input
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={entry.defaultBaseUrl}
+        required={required}
+        disabled={disabled}
+      />
+      {required ? (
+        <p className="text-xs text-muted-foreground">{CUSTOM_BASE_URL_HELP}</p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Preset endpoint (editable) — leave blank to use it, or point it at any compatible gateway.
+        </p>
+      )}
+      {entry.note ? <p className="text-xs text-muted-foreground">{entry.note}</p> : null}
+    </div>
+  );
+}
 
 export function AiConfigCard({ editable }: { editable: boolean }) {
   // null = no stored config, undefined = still loading
@@ -77,10 +191,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
     setLoadError(null);
     setConfig(r.config ?? null);
     if (r.config) {
-      setTextProvider(r.config.textProvider);
+      // Legacy rows stored the generic id "openai-compatible" — normalize to
+      // the catalog id (`custom`) so the select has a matching option.
+      setTextProvider(catalogEntry(r.config.textProvider)?.id ?? r.config.textProvider);
       setTextModel(r.config.textModel);
       setTextBaseUrl(r.config.textBaseUrl ?? "");
-      setImageProvider(r.config.imageProvider);
+      setImageProvider(catalogEntry(r.config.imageProvider)?.id ?? r.config.imageProvider);
       setImageModel(r.config.imageModel);
       setImageBaseUrl(r.config.imageBaseUrl ?? "");
     }
@@ -96,23 +212,37 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
 
   // The image provider follows the text provider unless the user already
   // diverged it (independent text vs image choice is a core requirement).
+  // The base URL follows the same prefill rules as a manual pick.
   function changeTextProvider(next: string) {
+    const prev = textProvider;
     setTextProvider(next);
-    if (imageProvider === textProvider) setImageProvider(next);
+    setTextBaseUrl(nextBaseUrl(next, prev, textBaseUrl));
+    if (imageProvider === prev) {
+      setImageProvider(next);
+      setImageBaseUrl(nextBaseUrl(next, prev, imageBaseUrl));
+    }
+  }
+
+  function changeImageProvider(next: string) {
+    const prev = imageProvider;
+    setImageProvider(next);
+    setImageBaseUrl(nextBaseUrl(next, prev, imageBaseUrl));
   }
 
   function save(e: React.FormEvent) {
     e.preventDefault();
     if (!editable) return;
+    const textIsOpenAiCompatible = catalogEntry(textProvider)?.kind === "openai-compatible";
+    const imageIsOpenAiCompatible = catalogEntry(imageProvider)?.kind === "openai-compatible";
     startSaving(async () => {
       const r = await saveWorkspaceAIConfigAction({
         textProvider,
         textModel,
-        textBaseUrl: textProvider === "openai-compatible" ? textBaseUrl : null,
+        textBaseUrl: textIsOpenAiCompatible ? textBaseUrl : null,
         textApiKey: textApiKey || null,
         imageProvider,
         imageModel,
-        imageBaseUrl: imageProvider === "openai-compatible" ? imageBaseUrl : null,
+        imageBaseUrl: imageIsOpenAiCompatible ? imageBaseUrl : null,
         imageApiKey: imageApiKey || null,
       });
       if (r.ok) {
@@ -201,14 +331,14 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-muted-foreground">Text model</span>
               <span className="font-mono text-xs">
-                {config.textProvider} · {config.textModel}
+                {providerLabel(config.textProvider)} · {config.textModel}
                 {config.textApiKeyMasked ? ` · key ${config.textApiKeyMasked}` : " · no key stored"}
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-muted-foreground">Image model</span>
               <span className="font-mono text-xs">
-                {config.imageProvider} · {config.imageModel}
+                {providerLabel(config.imageProvider)} · {config.imageModel}
                 {config.imageApiKeyMasked ? ` · key ${config.imageApiKeyMasked}` : " · no key stored"}
               </span>
             </div>
@@ -222,16 +352,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="text-provider">Provider</Label>
-                  <Select value={textProvider} onValueChange={(v) => changeTextProvider(String(v))} disabled={!editable}>
-                    <SelectTrigger id="text-provider" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {TEXT_PROVIDER_OPTIONS.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <ProviderSelect
+                    id="text-provider"
+                    value={textProvider}
+                    onChange={(v) => changeTextProvider(v)}
+                    disabled={!editable}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="text-model">Model</Label>
@@ -239,29 +365,19 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                     id="text-model"
                     value={textModel}
                     onChange={(e) => setTextModel(e.target.value)}
-                    placeholder={TEXT_MODEL_PLACEHOLDERS[textProvider]}
+                    placeholder={modelPlaceholder(textProvider, "text")}
                     required
                     disabled={!editable}
                   />
                 </div>
               </div>
-              {textProvider === "openai-compatible" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="text-base-url">Base URL</Label>
-                  <Input
-                    id="text-base-url"
-                    value={textBaseUrl}
-                    onChange={(e) => setTextBaseUrl(e.target.value)}
-                    placeholder={BASE_URL_PLACEHOLDER}
-                    required
-                    disabled={!editable}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Any OpenAI Chat Completions-compatible endpoint, e.g. OpenAI, OpenRouter, or a self-hosted
-                    gateway.
-                  </p>
-                </div>
-              ) : null}
+              <BaseUrlField
+                id="text-base-url"
+                providerId={textProvider}
+                value={textBaseUrl}
+                onChange={setTextBaseUrl}
+                disabled={!editable}
+              />
               <div className="space-y-2">
                 <Label htmlFor="text-api-key">API key</Label>
                 <Input
@@ -291,16 +407,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="image-provider">Provider</Label>
-                  <Select value={imageProvider} onValueChange={(v) => setImageProvider(String(v))} disabled={!editable}>
-                    <SelectTrigger id="image-provider" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {TEXT_PROVIDER_OPTIONS.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <ProviderSelect
+                    id="image-provider"
+                    value={imageProvider}
+                    onChange={(v) => changeImageProvider(v)}
+                    disabled={!editable}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="image-model">Model</Label>
@@ -308,25 +420,19 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                     id="image-model"
                     value={imageModel}
                     onChange={(e) => setImageModel(e.target.value)}
-                    placeholder={IMAGE_MODEL_PLACEHOLDERS[imageProvider]}
+                    placeholder={modelPlaceholder(imageProvider, "image")}
                     required
                     disabled={!editable}
                   />
                 </div>
               </div>
-              {imageProvider === "openai-compatible" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="image-base-url">Base URL</Label>
-                  <Input
-                    id="image-base-url"
-                    value={imageBaseUrl}
-                    onChange={(e) => setImageBaseUrl(e.target.value)}
-                    placeholder={BASE_URL_PLACEHOLDER}
-                    required
-                    disabled={!editable}
-                  />
-                </div>
-              ) : null}
+              <BaseUrlField
+                id="image-base-url"
+                providerId={imageProvider}
+                value={imageBaseUrl}
+                onChange={setImageBaseUrl}
+                disabled={!editable}
+              />
               <div className="space-y-2">
                 <Label htmlFor="image-api-key">API key</Label>
                 <Input

@@ -3,6 +3,7 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { workspaceAiConfig } from "@/db/schema";
+import { providerRequiresBaseUrl } from "@/lib/ai/provider-catalog";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import {
   AIConfigError,
@@ -195,11 +196,22 @@ export function prepareConfigRow(
   if (!input.textModel?.trim() || !input.imageModel?.trim()) {
     throw new AIConfigError("INVALID_CONFIG", "Both text and image models are required.");
   }
-  if (input.textProvider === "openai-compatible" && !input.textBaseUrl?.trim()) {
-    throw new AIConfigError("INVALID_CONFIG", "OpenAI-compatible text endpoints require a Base URL.");
+  // Base URL rules follow the catalog: presets ship a default (empty stored
+  // URL is fine — resolution fills it), `custom` (and any future entry
+  // without a default) must carry its own endpoint.
+  if (providerRequiresBaseUrl(input.textProvider) && !input.textBaseUrl?.trim()) {
+    const name = input.textProvider === "custom" ? "Custom OpenAI-compatible" : input.textProvider;
+    throw new AIConfigError(
+      "INVALID_CONFIG",
+      `${name} requires a Base URL (e.g. https://gateway.example.com/v1) before it can be saved.`,
+    );
   }
-  if (input.imageProvider === "openai-compatible" && !input.imageBaseUrl?.trim()) {
-    throw new AIConfigError("INVALID_CONFIG", "OpenAI-compatible image endpoints require a Base URL.");
+  if (providerRequiresBaseUrl(input.imageProvider) && !input.imageBaseUrl?.trim()) {
+    const name = input.imageProvider === "custom" ? "Custom OpenAI-compatible" : input.imageProvider;
+    throw new AIConfigError(
+      "INVALID_CONFIG",
+      `${name} requires a Base URL (e.g. https://gateway.example.com/v1) before it can be saved.`,
+    );
   }
   return {
     workspaceId: input.workspaceId,
