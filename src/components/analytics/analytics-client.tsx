@@ -3,8 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useTransition } from "react";
 import { toast } from "sonner";
-import { Loader2, Plug, RefreshCw, Sparkles } from "lucide-react";
+import { Info, Loader2, Plug, RefreshCw, Sparkles } from "lucide-react";
 import { runPerformanceAnalysisAction, syncInsightsAction } from "@/server/actions/analytics";
+import { shouldShowMetaDataNotice } from "@/lib/publish/logic";
+import type { PublishProvider } from "@/lib/publish/provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,17 +19,36 @@ export function AnalyticsClient({
   hours,
   connected,
   insight,
+  publishingProvider,
+  hasMetaConnection,
+  hasBufferConnection,
 }: {
   totals: Totals;
   byPlatform: { key: string; totals: Totals }[];
   byFormat: { key: string; totals: Totals }[];
   hours: { hour: number; avgEngagement: number; posts: number }[];
+  /** Meta-connected platforms only — Buffer connections never feed analytics. */
   connected: string[];
   insight: string | null;
+  publishingProvider: PublishProvider;
+  hasMetaConnection: boolean;
+  hasBufferConnection: boolean;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const hasData = totals.posts > 0;
+
+  // Honest data-path notices. Analytics come exclusively from Meta-connected
+  // accounts (syncInsights is Meta-only), so when publishing is routed to
+  // Buffer and no Meta connection exists, the page says why it has nothing to
+  // sync instead of implying Buffer feeds it. Existing Meta connections keep
+  // analytics working regardless of the toggle.
+  const showBufferRouteNotice = shouldShowMetaDataNotice({
+    provider: publishingProvider,
+    hasMetaConnection,
+    hasBufferConnection,
+  });
+  const showGenericNoMeta = !hasMetaConnection && !showBufferRouteNotice;
 
   function sync() {
     start(async () => {
@@ -64,13 +85,24 @@ export function AnalyticsClient({
         <span className="text-xs text-muted-foreground">Sync also runs automatically every 4 hours.</span>
       </div>
 
-      {connected.length === 0 ? (
+      {showBufferRouteNotice ? (
+        <Alert>
+          <Info className="size-4" aria-hidden />
+          <AlertTitle>Analytics need the Meta route</AlertTitle>
+          <AlertDescription>
+            Publishing is set to Buffer API, and Buffer connections don&apos;t feed analytics. Metrics come
+            exclusively from Meta-connected accounts — connect Facebook/Instagram via Meta API, or switch the
+            publishing provider to Meta API on the Connections page.
+          </AlertDescription>
+        </Alert>
+      ) : showGenericNoMeta ? (
         <Alert>
           <Plug className="size-4" aria-hidden />
-          <AlertTitle>No accounts connected</AlertTitle>
+          <AlertTitle>{hasBufferConnection ? "Analytics need a Meta connection" : "No accounts connected"}</AlertTitle>
           <AlertDescription>
-            Connect Facebook/Instagram on the Connections page. Metrics come exclusively from official platform APIs —
-            nothing is simulated here.
+            {hasBufferConnection
+              ? "Your Buffer connection doesn&apos;t feed analytics. Metrics come exclusively from official Meta APIs — connect Facebook/Instagram via Meta API on the Connections page (publishing can stay on whichever provider you choose)."
+              : "Connect Facebook/Instagram on the Connections page. Metrics come exclusively from official platform APIs — nothing is simulated here."}
           </AlertDescription>
         </Alert>
       ) : null}

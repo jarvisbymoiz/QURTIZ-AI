@@ -10,6 +10,7 @@ import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, workspaces } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
+import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
@@ -75,6 +76,9 @@ export async function POST(request: NextRequest) {
     .orderBy(desc(brandMemory.createdAt))
     .limit(60);
 
+  // Publishing-route reality for the system prompt (Meta API ⇄ Buffer API).
+  const publishProvider = await getWorkspacePublishProvider(workspaceId);
+
   // Attachment validation: images + PDF only, sane size caps. Runs BEFORE the
   // agent_run row is created so a rejected request cannot leave an orphaned
   // "running" run behind.
@@ -109,6 +113,7 @@ export async function POST(request: NextRequest) {
     memories,
     workspaceName: brandRow?.businessName ?? workspaceId,
     workspaceTimezone: workspaceRow?.timezone ?? "UTC",
+    publishProvider,
   });
 
   const recent = body.messages.slice(-MAX_RECENT_MESSAGES);

@@ -46,7 +46,7 @@ export async function getWorkspacePublishProvider(workspaceId: string): Promise<
 }
 
 /** Persist the workspace's publishing provider (used by the connections
- *  server action; the toggle UI arrives in a later batch). */
+ *  server action behind the Connections-page toggle). */
 export async function updateWorkspacePublishProvider(
   workspaceId: string,
   provider: PublishProvider,

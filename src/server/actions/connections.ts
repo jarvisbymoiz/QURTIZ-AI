@@ -23,7 +23,14 @@ const publishingProviderSchema = z
   .max(16)
   .refine((v) => isPublishProvider(v), "Invalid publishing provider.");
 
-export async function disconnectPlatformAction(platform: "facebook" | "instagram"): Promise<ActionResult> {
+/** Disconnect one platform connection row for a publishing provider
+ *  ("meta" | "buffer"). Provider-scoped: a workspace can hold one row per
+ *  provider per platform, and the Connections UI shows both. */
+export async function disconnectPlatformAction(
+  platform: "facebook" | "instagram",
+  provider: string = "meta",
+): Promise<ActionResult> {
+  if (!isPublishProvider(provider)) return { ok: false, error: "Invalid connection provider." };
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "You must be signed in." };
   const cookieStore = await cookies();
@@ -35,9 +42,6 @@ export async function disconnectPlatformAction(platform: "facebook" | "instagram
   }
 
   const db = getDb();
-  // Provider-scoped: this disconnects the Meta row the Connections UI manages
-  // today. Once the provider toggle UI ships (Batch B), disconnect becomes
-  // provider-aware per connection row.
   await db
     .update(platformConnections)
     .set({ status: "not_connected", encryptedToken: null, meta: {}, channelRef: null, updatedAt: new Date() })
@@ -45,7 +49,7 @@ export async function disconnectPlatformAction(platform: "facebook" | "instagram
       and(
         eq(platformConnections.workspaceId, workspaceId),
         eq(platformConnections.platform, platform),
-        eq(platformConnections.provider, "meta"),
+        eq(platformConnections.provider, provider),
       ),
     );
 

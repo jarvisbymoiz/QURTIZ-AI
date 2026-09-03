@@ -3,9 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { Loader2, Plus, RefreshCw, Sparkles, Trash2, Users } from "lucide-react";
+import { Info, Loader2, Plus, RefreshCw, Sparkles, Trash2, Users } from "lucide-react";
 import type { competitorSnapshots, competitors } from "@/db/schema";
 import { addCompetitorAction, refreshCompetitorAction, removeCompetitorAction } from "@/server/actions/intelligence";
+import { shouldShowMetaDataNotice } from "@/lib/publish/logic";
+import type { PublishProvider } from "@/lib/publish/provider";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,10 +80,16 @@ export function CompetitorsClient({
   competitors,
   snapshots,
   editable,
+  publishingProvider,
+  hasMetaConnection,
+  hasBufferConnection,
 }: {
   competitors: Competitor[];
   snapshots: Snapshot[];
   editable: boolean;
+  publishingProvider: PublishProvider;
+  hasMetaConnection: boolean;
+  hasBufferConnection: boolean;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -89,6 +98,14 @@ export function CompetitorsClient({
     const prev = latestByCompetitor.get(s.competitorId);
     if (!prev || s.capturedAt > prev.capturedAt) latestByCompetitor.set(s.competitorId, s);
   }
+
+  // Snapshots come from IG Business Discovery through a Meta-connected
+  // account — never from Buffer. Same honesty rule as the Analytics page.
+  const showBufferRouteNotice = shouldShowMetaDataNotice({
+    provider: publishingProvider,
+    hasMetaConnection,
+    hasBufferConnection,
+  });
 
   function refresh(compId: string) {
     start(async () => {
@@ -112,6 +129,18 @@ export function CompetitorsClient({
 
   return (
     <div className="space-y-4">
+      {showBufferRouteNotice ? (
+        <Alert>
+          <Info className="size-4" aria-hidden />
+          <AlertTitle>Competitor snapshots need the Meta route</AlertTitle>
+          <AlertDescription>
+            Publishing is set to Buffer API, and Buffer doesn&apos;t connect to Instagram Business Discovery.
+            Snapshots require a Meta-connected Instagram account — connect via Meta API, or switch the publishing
+            provider to Meta API on the Connections page.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <div className="flex justify-end">
         <AddCompetitorDialog editable={editable} />
       </div>

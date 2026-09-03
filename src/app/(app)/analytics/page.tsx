@@ -2,6 +2,7 @@
 import { getDb } from "@/db";
 import { aiInsights, contentItems, platformConnections, postMetrics } from "@/db/schema";
 import { sumTotals, groupPerformance, bestPostingHours, type MetricsRow } from "@/lib/analytics/compute";
+import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { requireWorkspace } from "@/lib/workspace";
 import { PageHeader } from "@/components/layout/page-header";
 import { AnalyticsClient } from "@/components/analytics/analytics-client";
@@ -30,6 +31,22 @@ export default async function AnalyticsPage() {
     .where(and(eq(aiInsights.workspaceId, ctx.workspace.id), eq(aiInsights.kind, "performance")))
     .orderBy(desc(aiInsights.createdAt))
     .limit(1);
+
+  const publishingProvider = await getWorkspacePublishProvider(ctx.workspace.id);
+
+  // Insights sync is Meta-provider only (lib/analytics/sync.ts) — Buffer
+  // connections never feed analytics. `connected` therefore lists Meta-
+  // connected platforms, so the sync button stays honest when publishing is
+  // routed to Buffer.
+  const connected = Array.from(
+    new Set(
+      connections
+        .filter((c) => c.provider === "meta" && c.status === "connected")
+        .map((c) => c.platform),
+    ),
+  );
+  const hasMetaConnection = connections.some((c) => c.provider === "meta" && c.status === "connected");
+  const hasBufferConnection = connections.some((c) => c.provider === "buffer" && c.status === "connected");
 
   const items = await db
     .select({ id: contentItems.id, format: contentItems.format })
@@ -64,8 +81,11 @@ export default async function AnalyticsPage() {
         byPlatform={byPlatform}
         byFormat={byFormat}
         hours={hours}
-        connected={connections.filter((c) => c.status === "connected").map((c) => c.platform)}
+        connected={connected}
         insight={latestInsight?.content ?? null}
+        publishingProvider={publishingProvider}
+        hasMetaConnection={hasMetaConnection}
+        hasBufferConnection={hasBufferConnection}
       />
     </div>
   );

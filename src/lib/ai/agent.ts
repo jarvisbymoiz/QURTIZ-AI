@@ -1,5 +1,6 @@
 ﻿import type { BrandMemoryRow } from "./tools";
 import { GLOBAL_AI_INSTRUCTION } from "./global-instruction";
+import type { PublishProvider } from "@/lib/publish/provider";
 
 /**
  * Build the agent system prompt. The agent must be honest about the current
@@ -10,6 +11,9 @@ export function buildSystemPrompt(args: {
   memories: BrandMemoryRow[];
   workspaceName: string;
   workspaceTimezone?: string;
+  /** Publishing provider active in the workspace — only the routing copy
+   *  below depends on it (defaults to "meta", the product default). */
+  publishProvider?: PublishProvider;
 }): string {
   const memoryLines = args.memories
     .map((m) => `- [${m.type}] ${m.content}`)
@@ -24,6 +28,14 @@ export function buildSystemPrompt(args: {
   const now = new Date();
   const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(now);
   const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long" }).format(now);
+
+  // Honest publishing-route copy: it must match the workspace's actual
+  // provider (the toggle on the Connections page), not a hard-coded Meta
+  // reality — the failure modes the user can hit differ per route.
+  const publishingReality =
+    args.publishProvider === "buffer"
+      ? "Publishing reality: scheduled posts queue through the workspace's Buffer API connection and post automatically IF a matching Facebook/Instagram channel is linked inside Buffer (Buffer owns channel access — the user manages it there). If no channel is linked, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience."
+      : "Publishing reality: scheduled posts publish automatically IF the platform account is connected (official Meta integration). If accounts are not connected, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience.";
 
   return `You are the QURTIZ AI agent — the assistant inside a social media management workspace called "${args.workspaceName}".
 
@@ -40,7 +52,7 @@ You can also receive image and PDF attachments from the user (analyze them when 
 
 Available NOW via your tools: live web search (web_search — sourced summaries; if the plan blocks it, say so honestly), bulk content plans (bulk_plan — 6-30 posts with an AI content strategy, queued in the background), content creation (create_content — generates a full post with platform variants, QA-checked, saved to Content Studio as Ready for Review), scheduling (schedule_content — today or any future date; default slot 18:30 workspace time; publishing fires automatically at the scheduled time), niche research (research_niche — saved to the Research Lab), Brand Brain read and memory writes.
 
-Publishing reality: scheduled posts publish automatically IF the platform account is connected (official Meta integration). If accounts are not connected, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience.
+${publishingReality}
 
 Not available: direct image editing mid-chat, deleting posts, changing published posts, or bypassing the approval gate (draft content must be reviewed before scheduling).
 

@@ -61,12 +61,15 @@ export default async function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Meta platforms</CardTitle>
-          <CardDescription>Connect Facebook &amp; Instagram via official Meta OAuth — manage connections from the Connections page.</CardDescription>
+          <CardTitle className="text-base">Publishing platforms</CardTitle>
+          <CardDescription>
+            Facebook &amp; Instagram connect via the Meta API, or via Buffer for early access — pick the publishing
+            provider and manage connections on the Connections page.
+          </CardDescription>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          Tokens are encrypted at rest and never exposed to the browser. Publishing and
-          analytics sync only run for platforms you connect.
+          Tokens are encrypted at rest and never exposed to the browser. Publishing runs through the selected
+          provider; analytics sync runs for Meta-connected accounts only.
         </CardContent>
       </Card>
 
