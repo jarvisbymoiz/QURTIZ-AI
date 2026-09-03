@@ -54,7 +54,7 @@ export default async function ConnectionsPage() {
           publishingProvider={publishingProvider}
           metaConfigured={metaConfigured()}
           bufferConfigured={bufferConfigured()}
-          canManage={can(ctx.role, "workspace:manage")}
+          canPublish={can(ctx.role, "publish:manage")}
         />
       </Suspense>
       <div className="flex items-start gap-3 rounded-lg border p-4 text-xs text-muted-foreground">

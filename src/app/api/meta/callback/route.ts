@@ -4,6 +4,7 @@ import { getDb } from "@/db";
 import { platformConnections } from "@/db/schema";
 import { encryptToken } from "@/lib/crypto/tokens";
 import { exchangeForPages } from "@/lib/meta/oauth";
+import { can } from "@/lib/permissions";
 import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 
@@ -49,6 +50,12 @@ export async function GET(request: NextRequest) {
   if (!membership) {
     return NextResponse.json(
       { error: "You are not a member of this workspace." },
+      { status: 403 },
+    );
+  }
+  if (!can(membership.role, "publish:manage")) {
+    return NextResponse.json(
+      { error: "Only editors and above can connect accounts." },
       { status: 403 },
     );
   }

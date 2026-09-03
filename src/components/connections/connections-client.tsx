@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ArrowLeftRight, CheckCircle2, CircleAlert, LogOut } from "lucide-react";
@@ -30,8 +31,6 @@ const PROVIDER_LABEL: Record<PublishProvider, string> = {
   meta: "Meta API",
   buffer: "Buffer API",
 };
-
-const OTHER_PROVIDER: Record<PublishProvider, PublishProvider> = { meta: "buffer", buffer: "meta" };
 
 const ERROR_TEXT: Record<string, string> = {
   meta_not_configured: "Meta app credentials (META_APP_ID / META_APP_SECRET) are missing in .env.local.",
@@ -78,13 +77,13 @@ export function ConnectionsClient({
   publishingProvider,
   metaConfigured,
   bufferConfigured,
-  canManage,
+  canPublish,
 }: {
   connections: Conn[];
   publishingProvider: PublishProvider;
   metaConfigured: boolean;
   bufferConfigured: boolean;
-  canManage: boolean;
+  canPublish: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -171,12 +170,15 @@ export function ConnectionsClient({
             <Switch
               checked={provider === "buffer"}
               onCheckedChange={(next) => void changeProvider(next ? "buffer" : "meta")}
-              disabled={busy || !canManage}
+              disabled={busy || !canPublish}
               aria-label="Publishing provider — on: Buffer API, off: Meta API"
             />
           </div>
-          {!canManage ? (
-            <p className="text-xs text-muted-foreground">Only workspace admins can change the publishing provider.</p>
+          {!canPublish ? (
+            <p className="text-xs text-muted-foreground">
+              Publishing connections and the provider switch need editor access — ask a workspace admin to upgrade
+              your role.
+            </p>
           ) : null}
           {provider === "buffer" ? (
             <p className="rounded-lg border border-dashed p-3 text-xs leading-relaxed text-muted-foreground">
@@ -236,86 +238,133 @@ export function ConnectionsClient({
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
-        {(["facebook", "instagram"] as const).map((platform) => {
-          const activeRow = connections.find((c) => c.platform === platform && c.provider === provider);
-          const status = activeRow?.status ?? "not_connected";
-          const inactiveProvider = OTHER_PROVIDER[provider];
-          const inactiveRow = connections.find((c) => c.platform === platform && c.provider === inactiveProvider);
-          const showInactive = inactiveRow && inactiveRow.status !== "not_connected";
-          const connectHref = provider === "meta" ? "/api/meta/connect" : "/api/buffer/connect";
-          const envReady = provider === "meta" ? metaConfigured : bufferConfigured;
-          return (
-            <Card key={platform}>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CardTitle className="text-base capitalize">{PLATFORM_LABEL[platform]}</CardTitle>
-                    <Badge variant="secondary">{PROVIDER_LABEL[provider]}</Badge>
-                  </div>
-                  <Badge
-                    variant={status === "connected" ? "default" : status === "error" ? "destructive" : "secondary"}
-                    className={cnDefault(status)}
-                  >
-                    {status === "connected" ? "Connected" : status.replaceAll("_", " ")}
-                  </Badge>
-                </div>
-                <CardDescription>
-                  {activeRow?.status === "connected"
-                    ? accountDetail(platform, activeRow)
-                    : provider === "buffer"
-                      ? "Queue posts through your Buffer account — Buffer owns the Facebook/Instagram channel links."
-                      : "Official Graph API publishing — no browser automation."}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {activeRow?.status === "connected" ? (
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-xs text-emerald-500">
-                      <CheckCircle2 className="size-3.5" aria-hidden /> Token stored encrypted
-                    </span>
-                    {canManage ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={pending}
-                        onClick={() => disconnect(platform, provider)}
-                      >
-                        <LogOut className="size-3.5" aria-hidden /> Disconnect
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <Button nativeButton={false} render={<a href={connectHref} />} disabled={!envReady || !canManage}>
-                      {provider === "meta"
-                        ? `Connect with ${platform === "facebook" ? "Facebook" : "Instagram"}`
-                        : "Connect with Buffer"}
-                    </Button>
-                    {provider === "buffer" && !bufferConfigured ? (
-                      <p className="text-xs text-muted-foreground">
-                        Requires BUFFER_CLIENT_ID and BUFFER_CLIENT_SECRET in .env.local to enable Buffer connections.
-                      </p>
-                    ) : null}
-                  </div>
-                )}
-                {showInactive ? (
-                  <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-                    <Badge variant="secondary">{PROVIDER_LABEL[inactiveProvider]}</Badge>
-                    <span className="truncate text-sm text-muted-foreground">
-                      {accountDetail(platform, inactiveRow)}
-                    </span>
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {inactiveRow.status === "error"
-                        ? `Connection error — switch to ${PROVIDER_LABEL[inactiveProvider]} to manage it`
-                        : `Inactive — switch to ${PROVIDER_LABEL[inactiveProvider]} to publish through this connection`}
-                    </span>
-                  </div>
-                ) : null}
-              </CardContent>
-            </Card>
-          );
-        })}
+        {(["facebook", "instagram"] as const).map((platform) => (
+          <Card key={platform}>
+            <CardHeader>
+              <CardTitle className="text-base">{PLATFORM_LABEL[platform]}</CardTitle>
+              <CardDescription>
+                Direct publishing via the Meta API, or queued publishing via your Buffer account — both providers
+                can be connected here.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(["meta", "buffer"] as const).map((connProvider) => (
+                <ProviderSection
+                  key={connProvider}
+                  platform={platform}
+                  provider={connProvider}
+                  conn={connections.find((c) => c.platform === platform && c.provider === connProvider)}
+                  metaConfigured={metaConfigured}
+                  bufferConfigured={bufferConfigured}
+                  canPublish={canPublish}
+                  pending={pending}
+                  onDisconnect={disconnect}
+                />
+              ))}
+            </CardContent>
+          </Card>
+        ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * One provider (Meta API | Buffer API) block inside a platform card. Both
+ * blocks are always rendered so members can connect either provider per
+ * platform without flipping the publishing toggle first.
+ */
+function ProviderSection({
+  platform,
+  provider,
+  conn,
+  metaConfigured,
+  bufferConfigured,
+  canPublish,
+  pending,
+  onDisconnect,
+}: {
+  platform: Platform;
+  provider: PublishProvider;
+  conn: Conn | undefined;
+  metaConfigured: boolean;
+  bufferConfigured: boolean;
+  canPublish: boolean;
+  pending: boolean;
+  onDisconnect: (platform: Platform, provider: PublishProvider) => void;
+}) {
+  const status = conn?.status ?? "not_connected";
+  const connected = status === "connected";
+  const platformName = platform === "facebook" ? "Facebook" : "Instagram";
+  const envReady = provider === "meta" ? metaConfigured : bufferConfigured;
+  const connectDisabled = !canPublish || !envReady;
+
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="secondary">{PROVIDER_LABEL[provider]}</Badge>
+        <Badge
+          variant={connected ? "default" : status === "error" ? "destructive" : "secondary"}
+          className={cnDefault(status)}
+        >
+          {connected ? "Connected" : status.replaceAll("_", " ")}
+        </Badge>
+      </div>
+
+      {conn?.status === "connected" ? (
+        <div className="mt-2.5 space-y-1.5">
+          <p className="truncate text-sm">{accountDetail(platform, conn)}</p>
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-xs text-emerald-500">
+              <CheckCircle2 className="size-3.5" aria-hidden /> Token stored encrypted
+            </span>
+            {canPublish ? (
+              <Button size="sm" variant="ghost" disabled={pending} onClick={() => onDisconnect(platform, provider)}>
+                <LogOut className="size-3.5" aria-hidden /> Disconnect
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2.5 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            {provider === "meta"
+              ? "Official Graph API publishing — no browser automation."
+              : "Queue posts through your Buffer account."}
+          </p>
+          <Button
+            nativeButton={false}
+            variant={provider === "meta" ? "default" : "outline"}
+            render={<Link href={provider === "meta" ? "/api/meta/connect" : "/api/buffer/connect"} />}
+            disabled={connectDisabled}
+          >
+            {provider === "meta"
+              ? `Connect with ${platformName}`
+              : `Connect with ${platformName} (Buffer)`}
+          </Button>
+          {!canPublish ? (
+            <p className="text-xs text-muted-foreground">
+              Connecting needs editor access or above — ask a workspace admin to upgrade your role.
+            </p>
+          ) : null}
+          {provider === "meta" && !metaConfigured ? (
+            <p className="text-xs text-muted-foreground">
+              Requires META_APP_ID and META_APP_SECRET in .env.local to enable Meta connections.
+            </p>
+          ) : null}
+          {provider === "buffer" && !bufferConfigured ? (
+            <p className="text-xs text-muted-foreground">
+              Requires BUFFER_CLIENT_ID and BUFFER_CLIENT_SECRET in .env.local to enable Buffer connections.
+            </p>
+          ) : null}
+          {provider === "buffer" && canPublish && bufferConfigured ? (
+            <p className="text-xs text-muted-foreground">
+              Buffer owns channel auth — after authorizing here, link channels inside Buffer and reconnect so they
+              appear.
+            </p>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

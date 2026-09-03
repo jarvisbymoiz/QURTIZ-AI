@@ -37,8 +37,8 @@ export async function disconnectPlatformAction(
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return { ok: false, error: "No active workspace." };
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership || !can(membership.role, "workspace:manage")) {
-    return { ok: false, error: "Only admins can disconnect accounts." };
+  if (!membership || !can(membership.role, "publish:manage")) {
+    return { ok: false, error: "Only editors and above can disconnect accounts." };
   }
 
   const db = getDb();
@@ -71,8 +71,8 @@ export async function updatePublishingProviderAction(provider: string): Promise<
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return { ok: false, error: "No active workspace." };
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership || !can(membership.role, "workspace:manage")) {
-    return { ok: false, error: "Only admins can change the publishing provider." };
+  if (!membership || !can(membership.role, "publish:manage")) {
+    return { ok: false, error: "Only editors and above can change the publishing provider." };
   }
 
   const rl = rateLimit("publishing-provider:" + workspaceId, 10, 10 * 60_000);

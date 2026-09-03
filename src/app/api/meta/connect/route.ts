@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { buildOAuthUrl, metaConfigured } from "@/lib/meta/oauth";
+import { can } from "@/lib/permissions";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +20,9 @@ export async function GET(request: NextRequest) {
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return NextResponse.redirect(`${origin}/connections?error=no_workspace`);
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return NextResponse.redirect(`${origin}/connections?error=forbidden`);
+  if (!membership || !can(membership.role, "publish:manage")) {
+    return NextResponse.redirect(`${origin}/connections?error=forbidden`);
+  }
 
   // CSRF state: random nonce + workspace binding, stored in a short-lived cookie.
   const state = crypto.randomBytes(16).toString("hex");

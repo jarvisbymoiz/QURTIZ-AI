@@ -6,6 +6,7 @@ import {
   bufferRedirectUri,
   signBufferOAuthState,
 } from "@/lib/buffer/client";
+import { can } from "@/lib/permissions";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +30,9 @@ export async function GET(request: NextRequest) {
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return NextResponse.redirect(`${origin}/connections?buffer=error&reason=no_workspace`);
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return NextResponse.redirect(`${origin}/connections?buffer=error&reason=forbidden`);
+  if (!membership || !can(membership.role, "publish:manage")) {
+    return NextResponse.redirect(`${origin}/connections?buffer=error&reason=forbidden`);
+  }
 
   const state = signBufferOAuthState({ workspaceId, userId: user.id });
   return NextResponse.redirect(
