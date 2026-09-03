@@ -54,6 +54,73 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The endpoint constants resolve from process.env at module load, so override
+// tests reload a fresh module instance with a controlled env state (never the
+// ambient shell env) and restore whatever was there afterwards.
+const BUFFER_ENDPOINT_ENV_VARS = ["BUFFER_AUTHORIZE_URL", "BUFFER_TOKEN_URL", "BUFFER_API_BASE"] as const;
+
+function applyEndpointEnv(values: Partial<Record<(typeof BUFFER_ENDPOINT_ENV_VARS)[number], string>>): () => void {
+  const saved = new Map<string, string | undefined>();
+  for (const key of BUFFER_ENDPOINT_ENV_VARS) {
+    saved.set(key, process.env[key]);
+    const value = values[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
+describe("buffer endpoint constants", () => {
+  it("default to Buffer's live hosts", async () => {
+    const restore = applyEndpointEnv({});
+    try {
+      vi.resetModules();
+      const mod = await import("@/lib/buffer/client");
+      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://buffer.com/oauth2/authorize");
+      expect(mod.BUFFER_TOKEN_URL).toBe("https://api.bufferapp.com/1/oauth2/token.json");
+      expect(mod.BUFFER_API_BASE).toBe("https://api.bufferapp.com/1/");
+    } finally {
+      restore();
+      vi.resetModules();
+    }
+  });
+
+  it("prefer the BUFFER_* endpoint env overrides when set", async () => {
+    const restore = applyEndpointEnv({
+      BUFFER_AUTHORIZE_URL: "https://override.example/oauth2/authorize",
+      BUFFER_TOKEN_URL: "https://override.example/oauth2/token.json",
+      BUFFER_API_BASE: "https://override.example/",
+    });
+    try {
+      vi.resetModules();
+      const mod = await import("@/lib/buffer/client");
+      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://override.example/oauth2/authorize");
+      expect(mod.BUFFER_TOKEN_URL).toBe("https://override.example/oauth2/token.json");
+      expect(mod.BUFFER_API_BASE).toBe("https://override.example/");
+    } finally {
+      restore();
+      vi.resetModules();
+    }
+  });
+
+  it("treats an empty-string override as unset", async () => {
+    const restore = applyEndpointEnv({ BUFFER_AUTHORIZE_URL: "" });
+    try {
+      vi.resetModules();
+      const mod = await import("@/lib/buffer/client");
+      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://buffer.com/oauth2/authorize");
+    } finally {
+      restore();
+      vi.resetModules();
+    }
+  });
+});
+
 describe("pkce helpers", () => {
   it("generates a 43-char base64url verifier", () => {
     const verifier = pkceVerifier();

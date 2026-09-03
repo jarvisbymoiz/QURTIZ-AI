@@ -28,9 +28,24 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  *   lib/workspace-delete.ts) — no server-side store or cookie required.
  */
 
-export const BUFFER_AUTHORIZE_URL = "https://bufferapp.com/oauth2/authorize";
-export const BUFFER_TOKEN_URL = "https://api.bufferapp.com/1/oauth2/token.json";
-export const BUFFER_API_BASE = "https://api.bufferapp.com/1/";
+/**
+ * Buffer endpoint roots. Defaults track Buffer's live hosts: the OAuth
+ * authorize dialog lives on buffer.com — bufferapp.com permanently redirects
+ * there (an earlier build of this file pointed at the redirecting host, so the
+ * browser silently landed on buffer.com); the token exchange and v1 API still
+ * resolve on api.bufferapp.com. Each value is env-overridable via
+ * BUFFER_AUTHORIZE_URL / BUFFER_TOKEN_URL / BUFFER_API_BASE so a live endpoint
+ * migration can be validated from .env.local without a code deploy. Empty
+ * strings count as unset.
+ */
+function bufferEndpoint(name: string, fallback: string): string {
+  const value = process.env[name];
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+export const BUFFER_AUTHORIZE_URL = bufferEndpoint("BUFFER_AUTHORIZE_URL", "https://buffer.com/oauth2/authorize");
+export const BUFFER_TOKEN_URL = bufferEndpoint("BUFFER_TOKEN_URL", "https://api.bufferapp.com/1/oauth2/token.json");
+export const BUFFER_API_BASE = bufferEndpoint("BUFFER_API_BASE", "https://api.bufferapp.com/1/");
 
 /** Buffer OAuth state markers die after 10 minutes (same maxAge as the Meta
  *  OAuth cookie — the user must finish the flow in time). */

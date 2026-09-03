@@ -1,13 +1,15 @@
 ﻿import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-// /api/meta/callback must be reachable without a session: Meta redirects the
-// browser here after OAuth, and the route itself re-verifies the session and
-// workspace membership before persisting anything.
+// /api/meta/callback and /api/buffer/callback must be reachable without a
+// session: Meta/Buffer redirect the browser here after OAuth (the session can
+// expire mid-flow while the user grants access on the provider site), and the
+// route itself re-verifies the session and workspace membership before
+// persisting anything.
 // /auth/workspace-delete must be reachable without a session: the emailed
 // delete-confirmation link lands here before the code exchange creates one;
-// the route re-verifies the session and workspace ownership itself.
-const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback", "/auth/signout", "/api/meta/callback", "/auth/workspace-delete"];
+// the route re-verifies the session and workspace membership itself.
+const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback", "/auth/signout", "/api/meta/callback", "/api/buffer/callback", "/auth/workspace-delete"];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
