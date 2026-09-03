@@ -46,11 +46,14 @@ async function getWorkspaceRow(workspaceId: string) {
 }
 
 /**
- * Step 0 of the delete flow: server-side gate before the client sends the
- * owner the Supabase email OTP. No email is sent from here — the client calls
- * supabase.auth.signInWithOtp with the returned (authoritative) address,
- * mirroring the login magic-link flow. Only the workspace owner's address is
- * ever usable, so non-owners get an honest error instead of an email.
+ * Step 0 of the email-confirmation branch: server-side gate before the client
+ * asks Supabase to email the owner the confirmation. No email is sent from
+ * here — the client calls supabase.auth.signInWithOtp with the returned
+ * (authoritative) address. Supabase's signInWithOtp reuses the sign-in
+ * (magic-link) template, so the email arrives as a standard sign-in link: the
+ * LINK is the confirmation, no numeric code is sent. Only the workspace
+ * owner's address is ever usable, so non-owners get an honest error instead of
+ * an email.
  */
 export async function sendWorkspaceDeleteOtpAction(): Promise<ActionResult & { email?: string }> {
   const ctx = await getActiveContext("workspace:manage");
@@ -74,10 +77,12 @@ export async function sendWorkspaceDeleteOtpAction(): Promise<ActionResult & { e
 }
 
 /**
- * Step 1 of the delete flow: called by the client AFTER the owner's email
- * OTP verified (typed code path), or the token is minted directly by the
- * /auth/workspace-delete callback (email-link path). Signs the short-lived
- * marker into an httpOnly cookie the final delete action requires.
+ * Step 1 of the delete flow: called by the client AFTER ownership is proven —
+ * the account password verified via supabase.auth.signInWithPassword (primary
+ * path), or the emailed sign-in link opened in this browser (secondary path;
+ * there the token is minted directly by the /auth/workspace-delete callback).
+ * Signs the short-lived marker into an httpOnly cookie the final delete action
+ * requires.
  */
 export async function authorizeWorkspaceDeleteAction(): Promise<ActionResult> {
   const ctx = await getActiveContext("workspace:manage");
@@ -113,7 +118,7 @@ export async function authorizeWorkspaceDeleteAction(): Promise<ActionResult> {
  * the /auth/workspace-delete route mints the httpOnly marker cookie in this
  * browser. This action answers "is the marker here and still valid for the
  * active workspace + signed-in user right now?" so the original tab can
- * advance to the type-the-name step without a second email or code.
+ * advance to the type-the-name step without a second email.
  *
  * It never mints or clears anything, so repeated probing is harmless. A valid
  * token is only ever minted for the verified owner of this exact workspace,
@@ -149,7 +154,8 @@ export async function workspaceDeleteAuthorizedAction(): Promise<ActionResult> {
 /**
  * Step 2 (final): permanently deletes the workspace. Requires every gate:
  * session membership + workspace:manage, typed name matching the workspace
- * row, the owner's OTP-confirmed marker cookie (signed, unexpired, bound to
+ * row, the owner's confirmed marker cookie — password or email-link
+ * confirmation both mint the same token — (signed, unexpired, bound to
  * this workspace + user) and the shared rate limit.
  *
  * All child tables reference workspaces.id with ON DELETE CASCADE and there
@@ -192,7 +198,7 @@ export async function deleteWorkspaceAction(input: { workspaceName: string }): P
   ) {
     return {
       ok: false,
-      error: "Email confirmation missing or expired. Restart the deletion flow.",
+      error: "Confirmation missing or expired. Restart the deletion flow.",
     };
   }
 

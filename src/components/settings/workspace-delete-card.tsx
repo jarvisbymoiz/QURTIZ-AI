@@ -35,8 +35,9 @@ const CONFIRMATION_NOT_DETECTED_ERROR = "Email confirmation not detected yet.";
 const CONFIRMATION_POLL_MS = 2500;
 
 // Fixed id keeps the success toast from stacking when the ?wsdelete=authorized
-// param handler, the typed-code path and the poll confirm around the same time.
-const CONFIRMATION_SUCCESS_TOAST_ID = "ws-delete-email-confirmed";
+// param handler, the password-confirmation path, the email-link path and the
+// poll confirm around the same time.
+const CONFIRMATION_SUCCESS_TOAST_ID = "ws-delete-confirmed";
 
 type AuthorizedCheckResult =
   | { status: "authorized" }
@@ -47,12 +48,18 @@ type AuthorizedCheckResult =
  * "Delete workspace" danger zone (owner only).
  *
  * Two-step confirmation dialog, never a single click:
- *  1. Ownership is proven with a Supabase email OTP sent to the owner's
- *     address — either the emailed link (lands back on /settings?
- *     wsdelete=authorized after /auth/workspace-delete) or the 6-digit code
- *     typed inline (client verifyOtp, then the authorize action). While
- *     waiting, this dialog polls the marker cookie, so confirming the link
- *     in any tab of this same browser advances it automatically.
+ *  1. Ownership is proven before the destructive action is enabled.
+ *     PRIMARY: the owner's account password (supabase.auth.signInWithPassword).
+ *     Every account has one — signup requires it — and no email is involved.
+ *     SECONDARY: a Supabase confirmation email. Supabase's signInWithOtp
+ *     reuses the sign-in (magic-link) template, so the email arrives as a
+ *     standard sign-in link — the LINK is the confirmation, no numeric code is
+ *     sent. Opening it lands back on /settings?wsdelete=authorized via
+ *     /auth/workspace-delete; this dialog polls the marker cookie meanwhile,
+ *     so confirming in any tab of this same browser advances automatically.
+ *     Either path ends in the same server-side gate
+ *     (authorizeWorkspaceDeleteAction) that mints a short-lived httpOnly
+ *     marker cookie before step 2 unlocks.
  *  2. The workspace name must be typed exactly before the destructive action
  *     runs. On success the session is signed out and the user lands on
  *     /login — the workspace and every cascade of its data is gone.
@@ -73,13 +80,15 @@ export function WorkspaceDeleteCard({
   const searchParams = useSearchParams();
 
   const [open, setOpen] = useState(false);
-  // false = step 1 (email OTP), true = step 2 (type name + delete)
+  // false = step 1 (ownership confirmation), true = step 2 (type name + delete)
   const [confirmed, setConfirmed] = useState(false);
+  // false = password confirmation (default), true = email confirmation
+  const [emailMode, setEmailMode] = useState(false);
   const [emailBusy, setEmailBusy] = useState(false);
-  const [codeBusy, setCodeBusy] = useState(false);
+  const [pwBusy, setPwBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [checkingAuthorized, setCheckingAuthorized] = useState(false);
-  const [otpCode, setOtpCode] = useState("");
+  const [password, setPassword] = useState("");
   const [typedName, setTypedName] = useState("");
 
   // Poll timer must be cleared when step 2 is reached, the dialog closes, a
@@ -95,15 +104,18 @@ export function WorkspaceDeleteCard({
   }, []);
 
   // Shared "ownership confirmed" transition to step 2 (type the name). The
-  // ?wsdelete=authorized param handler, the typed-code path and the poll all
-  // funnel through it, so a race between them stays idempotent: state updates
-  // are no-ops once confirmed and the fixed toast id dedupes the toast.
-  const markConfirmed = useCallback(() => {
+  // ?wsdelete=authorized param handler, the password-confirmation path, the
+  // email-link path and the poll all funnel through it, so a race between them
+  // stays idempotent: state updates are no-ops once confirmed and the fixed
+  // toast id dedupes the toast. `message` lets the caller name the
+  // confirmation method that succeeded; the email paths use the default.
+  const markConfirmed = useCallback((message?: string) => {
     setConfirmed(true);
     setOpen(true);
-    toast.success("Email confirmed — type the workspace name to finish deleting.", {
-      id: CONFIRMATION_SUCCESS_TOAST_ID,
-    });
+    toast.success(
+      message ?? "Email confirmed — type the workspace name to finish deleting.",
+      { id: CONFIRMATION_SUCCESS_TOAST_ID },
+    );
   }, []);
 
   // One cheap read-only probe of the marker cookie. Returns an outcome; the
@@ -126,11 +138,11 @@ export function WorkspaceDeleteCard({
   // While the dialog is on step 1, poll the marker cookie: when the emailed
   // link is confirmed in ANOTHER tab of this same browser, the
   // /auth/workspace-delete route sets the cookie here and this dialog
-  // advances on its own. Never polls while a send/verify/delete request is in
-  // flight, and each tick drops its result if its timer was cleared or
+  // advances on its own. Never polls while a send/password/delete request is
+  // in flight, and each tick drops its result if its timer was cleared or
   // replaced while the probe was running (dialog closed, confirmed, unmount).
   useEffect(() => {
-    if (!open || confirmed || !isOwner || emailBusy || codeBusy || deleting) return;
+    if (!open || confirmed || !isOwner || emailBusy || pwBusy || deleting) return;
 
     const timerId = setInterval(() => {
       void (async () => {
@@ -159,7 +171,7 @@ export function WorkspaceDeleteCard({
     confirmed,
     isOwner,
     emailBusy,
-    codeBusy,
+    pwBusy,
     deleting,
     markConfirmed,
     runAuthorizedCheck,
@@ -183,7 +195,8 @@ export function WorkspaceDeleteCard({
 
   function openFlow() {
     setConfirmed(false);
-    setOtpCode("");
+    setEmailMode(false);
+    setPassword("");
     setTypedName("");
     setOpen(true);
   }
@@ -192,11 +205,15 @@ export function WorkspaceDeleteCard({
     setOpen(next);
     if (!next) {
       setConfirmed(false);
-      setOtpCode("");
+      setEmailMode(false);
+      setPassword("");
       setTypedName("");
     }
   }
 
+  // Secondary path: email confirmation. Supabase reuses the sign-in
+  // (magic-link) template for signInWithOtp, so the email contains a link,
+  // not a numeric code — the link IS the confirmation.
   async function sendEmail() {
     if (emailBusy) return;
     const email = userEmail.trim();
@@ -234,39 +251,39 @@ export function WorkspaceDeleteCard({
     }
   }
 
-  async function verifyCode(e: React.FormEvent) {
+  // Primary ownership proof: the account password. signInWithPassword doubles
+  // as a re-auth check — the session belongs to the same account, and the
+  // authorize action that follows still runs the full server gate (owner +
+  // workspace + rate limit) before minting the short-lived marker cookie.
+  async function confirmPassword(e: React.FormEvent) {
     e.preventDefault();
-    if (codeBusy) return;
+    if (pwBusy) return;
     const email = userEmail.trim();
     if (!email) {
       toast.error("Your account has no email address to verify against.");
       return;
     }
-    const token = otpCode.trim();
-    if (!token) return;
-    setCodeBusy(true);
+    if (!password) return;
+    setPwBusy(true);
     try {
       const supabase = createClient();
-      const { error } = await supabase.auth.verifyOtp({
-        email,
-        token,
-        type: "email",
-      });
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
         toast.error(error.message);
         return;
       }
-      // OTP verified → mint the short-lived marker cookie server-side.
+      // Password verified → mint the short-lived marker cookie server-side.
       const auth = await authorizeWorkspaceDeleteAction();
       if (!auth.ok) {
         toast.error(auth.error);
         return;
       }
-      markConfirmed();
+      setPassword("");
+      markConfirmed("Password confirmed — type the workspace name to finish deleting.");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not verify the code.");
+      toast.error(err instanceof Error ? err.message : "Could not confirm your password.");
     } finally {
-      setCodeBusy(false);
+      setPwBusy(false);
     }
   }
 
@@ -285,7 +302,7 @@ export function WorkspaceDeleteCard({
       }
       if (r.status === "pending") {
         toast.info(
-          "Confirmation not detected yet — the link must be opened in this same browser. Still stuck? Use the code from the email.",
+          "Confirmation not detected yet — the link must be opened in this same browser. Check your inbox and click the confirmation link there.",
         );
         return;
       }
@@ -302,7 +319,7 @@ export function WorkspaceDeleteCard({
       const r = await deleteWorkspaceAction({ workspaceName: typedName });
       if (!r.ok) {
         toast.error(r.error);
-        // Marker expired (or never set) — back to the email step.
+        // Marker expired (or never set) — back to the confirmation step.
         if (r.error.includes("missing or expired")) {
           setConfirmed(false);
           setTypedName("");
@@ -361,77 +378,138 @@ export function WorkspaceDeleteCard({
       <Dialog open={open} onOpenChange={closeDialog}>
         <DialogContent>
           {!confirmed ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>Confirm you own this workspace</DialogTitle>
-                <DialogDescription>
-                  We&apos;ll email a one-time confirmation to the address on your account. The
-                  workspace <span className="font-medium text-foreground">{workspaceName}</span>{" "}
-                  can then be permanently deleted — this cannot be undone.
-                </DialogDescription>
-              </DialogHeader>
+            emailMode ? (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Confirm via email link</DialogTitle>
+                  <DialogDescription>
+                    We&apos;ll email a confirmation link to the address on your account.
+                    Opening it in this same browser confirms you own this workspace. The
+                    workspace{" "}
+                    <span className="font-medium text-foreground">{workspaceName}</span>{" "}
+                    can then be permanently deleted — this cannot be undone.
+                  </DialogDescription>
+                </DialogHeader>
 
-              <div className="space-y-2">
-                <Label htmlFor="ws-delete-email">Confirmation email</Label>
-                <Input
-                  id="ws-delete-email"
-                  type="email"
-                  value={userEmail}
-                  readOnly
-                  autoComplete="off"
-                />
-                <p className="text-xs text-muted-foreground">
-                  The link must be opened in this same browser where you sent the email —
-                  this dialog advances automatically once it&apos;s confirmed, even when
-                  the link opens in another tab. Prefer a code? Enter the 6-digit code
-                  from the email below instead.
-                </p>
-              </div>
-
-              <Button type="button" onClick={() => void sendEmail()} disabled={emailBusy}>
-                {emailBusy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Mail className="size-4" aria-hidden />}
-                {emailBusy ? "Sending…" : "Send confirmation email"}
-              </Button>
-
-              <div className="flex items-center gap-3">
-                <Separator className="flex-1" />
-                <span className="text-xs text-muted-foreground">or</span>
-                <Separator className="flex-1" />
-              </div>
-
-              <form onSubmit={(e) => void verifyCode(e)} className="space-y-2">
-                <Label htmlFor="ws-delete-code">Enter the code from the email</Label>
-                <div className="flex gap-2">
+                <div className="space-y-2">
+                  <Label htmlFor="ws-delete-email">Confirmation email</Label>
                   <Input
-                    id="ws-delete-code"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    placeholder="000000"
-                    className="font-mono"
-                    value={otpCode}
-                    onChange={(e) => setOtpCode(e.target.value)}
+                    id="ws-delete-email"
+                    type="email"
+                    value={userEmail}
+                    readOnly
+                    autoComplete="off"
                   />
-                  <Button type="submit" variant="secondary" disabled={codeBusy || otpCode.trim().length === 0}>
-                    {codeBusy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-                    {codeBusy ? "Verifying…" : "Verify code"}
-                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    No numeric code is emailed — the link itself is the confirmation. It
+                    must be opened in this same browser where you requested it; this dialog
+                    advances automatically once it&apos;s confirmed, even when the link
+                    opens in another tab.
+                  </p>
                 </div>
-              </form>
 
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full text-muted-foreground"
-                onClick={() => void continueAfterLink()}
-                disabled={checkingAuthorized || emailBusy || codeBusy}
-              >
-                {checkingAuthorized ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                ) : null}
-                {checkingAuthorized ? "Checking…" : "I clicked the confirmation link — continue"}
-              </Button>
-            </>
+                <Button type="button" onClick={() => void sendEmail()} disabled={emailBusy}>
+                  {emailBusy ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : (
+                    <Mail className="size-4" aria-hidden />
+                  )}
+                  {emailBusy ? "Sending…" : "Send confirmation email"}
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full text-muted-foreground"
+                  onClick={() => void continueAfterLink()}
+                  disabled={checkingAuthorized || emailBusy}
+                >
+                  {checkingAuthorized ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : null}
+                  {checkingAuthorized
+                    ? "Checking…"
+                    : "I clicked the confirmation link — continue"}
+                </Button>
+
+                <div className="flex items-center gap-3">
+                  <Separator className="flex-1" />
+                  <span className="text-xs text-muted-foreground">or</span>
+                  <Separator className="flex-1" />
+                </div>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => setEmailMode(false)}
+                  disabled={emailBusy}
+                >
+                  Back to password
+                </Button>
+              </>
+            ) : (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Confirm your password</DialogTitle>
+                  <DialogDescription>
+                    Enter your account password to confirm you own this workspace. The
+                    workspace{" "}
+                    <span className="font-medium text-foreground">{workspaceName}</span>{" "}
+                    can then be permanently deleted — this cannot be undone.
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="space-y-2">
+                  <Label htmlFor="ws-delete-email">Account email</Label>
+                  <Input
+                    id="ws-delete-email"
+                    type="email"
+                    value={userEmail}
+                    readOnly
+                    autoComplete="off"
+                  />
+                </div>
+
+                <form onSubmit={(e) => void confirmPassword(e)} className="space-y-2">
+                  <Label htmlFor="ws-delete-password">Password</Label>
+                  <Input
+                    id="ws-delete-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoFocus
+                  />
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    disabled={pwBusy || password.length === 0}
+                  >
+                    {pwBusy ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden />
+                    ) : null}
+                    {pwBusy ? "Confirming…" : "Confirm & continue"}
+                  </Button>
+                </form>
+
+                <div className="flex items-center gap-3">
+                  <Separator className="flex-1" />
+                  <span className="text-xs text-muted-foreground">or</span>
+                  <Separator className="flex-1" />
+                </div>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => setEmailMode(true)}
+                  disabled={pwBusy}
+                >
+                  Use email confirmation instead
+                </Button>
+              </>
+            )
           ) : (
             <>
               <DialogHeader>
