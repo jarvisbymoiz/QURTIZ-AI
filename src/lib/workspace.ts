@@ -78,6 +78,24 @@ export async function requireWorkspace(): Promise<WorkspaceContext> {
 }
 
 /**
+ * Resolve the workspace id a server action should act on, mirroring
+ * requireWorkspace's resolution exactly: the cookie workspace when the user
+ * is a member of it, otherwise the user's first workspace; null when the
+ * user has no workspaces. Server actions must use this instead of reading
+ * the cookie directly — a stale/foreign cookie (left behind by another
+ * account in the same browser, or a workspace the user was removed from)
+ * must never deny an action on the user's own workspace, or the page
+ * (requireWorkspace) and the action would disagree about what is active.
+ */
+export async function resolveActionWorkspace(userId: string): Promise<string | null> {
+  const all = await getUserWorkspaces(userId);
+  if (all.length === 0) return null;
+  const cookieStore = await cookies();
+  const activeId = cookieStore.get(WORKSPACE_COOKIE)?.value;
+  return all.find((w) => w.id === activeId)?.id ?? all[0].id;
+}
+
+/**
  * Membership for one specific (user, workspace) pair. Server actions must
  * call this before any write to confirm tenancy. Returns null when the user
  * is not a member of the workspace.

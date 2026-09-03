@@ -1,5 +1,4 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { cookies } from "next/headers";
 import {
   buildAuthorizeUrl,
   bufferConfigured,
@@ -7,7 +6,7 @@ import {
   generatePkcePair,
   signBufferOAuthState,
 } from "@/lib/buffer/client";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -28,13 +27,8 @@ export async function GET(request: NextRequest) {
 
   const user = await getSessionUser();
   if (!user) return NextResponse.redirect(`${origin}/login`);
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return NextResponse.redirect(`${origin}/connections?buffer=error&reason=no_workspace`);
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) {
-    return NextResponse.redirect(`${origin}/connections?buffer=error&reason=forbidden`);
-  }
 
   const { codeVerifier, codeChallenge } = generatePkcePair();
   const state = signBufferOAuthState({ workspaceId, userId: user.id, codeVerifier });

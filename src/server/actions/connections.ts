@@ -1,13 +1,12 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { platformConnections } from "@/db/schema";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import {
   isPublishProvider,
   updateWorkspacePublishProvider,
@@ -32,13 +31,8 @@ export async function disconnectPlatformAction(
   if (!isPublishProvider(provider)) return { ok: false, error: "Invalid connection provider." };
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { ok: false, error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) {
-    return { ok: false, error: "You are not a member of this workspace." };
-  }
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
 
   const db = getDb();
   await db
@@ -66,13 +60,8 @@ export async function disconnectPlatformAction(
 export async function updatePublishingProviderAction(provider: string): Promise<ActionResult> {
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { ok: false, error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) {
-    return { ok: false, error: "You are not a member of this workspace." };
-  }
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
 
   const rl = rateLimit("publishing-provider:" + workspaceId, 10, 10 * 60_000);
   if (!rl.allowed) {
