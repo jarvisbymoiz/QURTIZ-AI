@@ -3,6 +3,7 @@
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
+import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
 
 export type ScheduleOutcome =
@@ -86,6 +87,12 @@ export async function scheduleItem(args: {
     };
   }
 
+  // Provider snapshot: jobs are stamped with the workspace's publishing
+  // provider AT CREATION TIME (getWorkspacePublishProvider defaults to
+  // "meta" when the settings key is absent). A later provider toggle never
+  // reroutes already-queued jobs.
+  const provider = await getWorkspacePublishProvider(args.workspaceId);
+
   for (const v of schedulable) {
     await db
       .delete(publishingJobs)
@@ -95,6 +102,7 @@ export async function scheduleItem(args: {
       contentItemId: item.id,
       contentVariantId: v.id,
       platform: v.platform,
+      provider,
       scheduledAt,
       status: "pending",
     });

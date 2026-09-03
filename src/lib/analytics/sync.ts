@@ -77,10 +77,19 @@ export async function syncInsightsForWorkspace(workspaceId: string): Promise<Syn
   const db = getDb();
   const result: SyncResult = { synced: 0, errors: [] };
 
+  // Meta-provider connections only: this sync decrypts tokens and calls the
+  // Meta Graph API, so a "buffer" connection row for the same platform must
+  // never be picked up here (its token belongs to Buffer, not Meta).
   const connections = await db
     .select()
     .from(platformConnections)
-    .where(and(eq(platformConnections.workspaceId, workspaceId), eq(platformConnections.status, "connected")));
+    .where(
+      and(
+        eq(platformConnections.workspaceId, workspaceId),
+        eq(platformConnections.status, "connected"),
+        eq(platformConnections.provider, "meta"),
+      ),
+    );
 
   for (const conn of connections) {
     if (!conn.encryptedToken) continue;

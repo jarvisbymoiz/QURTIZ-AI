@@ -210,13 +210,26 @@ export const platformConnections = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     platform: platformEnum("platform").notNull(),
+    // Publishing provider that owns this row: "meta" (direct Meta Graph
+    // publishing, the original behavior) or "buffer" (Buffer OAuth queue).
+    // A workspace may hold both rows for one platform — one per provider —
+    // and publishing jobs snapshot the provider they were created under.
+    provider: text("provider").notNull().default("meta"),
     status: platformConnectionStatusEnum("status").notNull().default("not_connected"),
+    // External channel id on the provider ("buffer" → Buffer profile id).
+    channelRef: text("channel_ref"),
     meta: jsonb("meta").notNull().default({}),
     encryptedToken: text("encrypted_token"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("platform_connections_ws_platform_uq").on(t.workspaceId, t.platform)],
+  (t) => [
+    uniqueIndex("platform_connections_ws_platform_provider_uq").on(
+      t.workspaceId,
+      t.platform,
+      t.provider,
+    ),
+  ],
 );
 
 /* ── AI chat & agent runs ──────────────────────────────────────────── */
@@ -501,6 +514,10 @@ export const publishingJobs = pgTable(
       .notNull()
       .references(() => contentVariants.id, { onDelete: "cascade" }),
     platform: platformEnum("platform").notNull(),
+    // Publishing provider snapshotted at job creation ("meta" | "buffer").
+    // Jobs keep the provider they were scheduled under — a later workspace
+    // provider toggle never reroutes already-queued jobs.
+    provider: text("provider").notNull().default("meta"),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
     status: publishingJobStatusEnum("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),

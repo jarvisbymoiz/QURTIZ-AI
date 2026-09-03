@@ -23,6 +23,7 @@ import {
 import { QUEUES } from "./boss";
 import { decryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
+import { publishViaBuffer } from "@/lib/publish/buffer-provider";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { hasWorkspaceAIConfig } from "@/lib/ai/config";
@@ -78,6 +79,11 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     .where(eq(workspaces.id, job.workspaceId));
   const recipientId = ws?.createdBy ?? job.workspaceId;
 
+  // Connection lookup is provider-scoped: a workspace may hold both a "meta"
+  // and a "buffer" row for the same platform, and each job must route to the
+  // connection matching its snapshotted provider. For provider="meta" (the
+  // default, and every pre-existing row) this resolves to the same row the
+  // pre-provider code selected.
   const [conn] = await db
     .select()
     .from(platformConnections)
@@ -85,6 +91,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       and(
         eq(platformConnections.workspaceId, job.workspaceId),
         eq(platformConnections.platform, job.platform),
+        eq(platformConnections.provider, job.provider),
       ),
     );
 
@@ -262,6 +269,235 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
   }
 }
 
+/** Buffer-side retryable failures are transport/rate-limit/server-class
+ *  (network, 429, 5xx / unparseable 2xx). Auth (401/403) and content
+ *  rejections (other 4xx) are permanent. */
+function isTransientBufferFailure(reason: string): boolean {
+  return reason === "network" || reason === "rate_limited" || reason === "invalid_response";
+}
+
+/**
+ * Attempt to publish one due publishing job through the Buffer queue
+ * (provider="buffer", snapshotted at job creation). Mirrors attemptPublish:
+ * atomic claim, honest statuses/attempts/lastError/result + notifications,
+ * and the same H2 guards (never post content that is no longer scheduled).
+ *
+ * Publish model: the update is created NOW with scheduled_at ≈ now + 60s
+ * (publish-at-due-time), so Buffer's free-plan queue cap (10 scheduled
+ * updates/channel) never accumulates.
+ */
+async function attemptBufferPublish(publishingJobId: string): Promise<void> {
+  const db = getDb();
+
+  // Atomic claim — identical to attemptPublish: the conditional UPDATE
+  // (status='pending') means only one worker can win per job.
+  const [job] = await db
+    .update(publishingJobs)
+    .set({
+      status: "processing",
+      attempts: sql`${publishingJobs.attempts} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(publishingJobs.id, publishingJobId), eq(publishingJobs.status, "pending")))
+    .returning();
+  if (!job) return;
+
+  const [ws] = await db
+    .select({ createdBy: workspaces.createdBy })
+    .from(workspaces)
+    .where(eq(workspaces.id, job.workspaceId));
+  const recipientId = ws?.createdBy ?? job.workspaceId;
+
+  // Buffer connection for this platform (provider-scoped).
+  const [conn] = await db
+    .select()
+    .from(platformConnections)
+    .where(
+      and(
+        eq(platformConnections.workspaceId, job.workspaceId),
+        eq(platformConnections.platform, job.platform),
+        eq(platformConnections.provider, "buffer"),
+      ),
+    );
+
+  if (!conn || conn.status !== "connected" || !conn.encryptedToken) {
+    const reason = `Buffer is not connected for ${job.platform === "facebook" ? "Facebook" : "Instagram"}. Connect the Buffer account on the Connections page${process.env.BUFFER_CLIENT_ID ? "" : " (Buffer app credentials missing in .env.local)"}.`;
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "publishing_failed",
+      title: "Publishing failed",
+      body: reason,
+      link: "/connections",
+    });
+    return;
+  }
+
+  const channelId = conn.channelRef;
+  if (!channelId) {
+    const reason = "Buffer connection is missing its channel reference — reconnect the Buffer account.";
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "publishing_failed",
+      title: "Publishing failed",
+      body: reason,
+      link: "/connections",
+    });
+    return;
+  }
+
+  const token = decryptToken(conn.encryptedToken);
+  if (!token) {
+    const reason = "Stored Buffer token could not be decrypted — reconnect the account.";
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "auth_expired",
+      title: "Reconnection required",
+      body: reason,
+      link: "/connections",
+    });
+    return;
+  }
+
+  // Load variant + item + latest visual — same data assembly as the Meta
+  // path (attemptPublish) so both providers publish the same content.
+  const [variant] = await db.select().from(contentVariants).where(eq(contentVariants.id, job.contentVariantId));
+  if (!variant) {
+    await db.update(publishingJobs).set({ status: "failed", lastError: "Variant not found.", updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+    return;
+  }
+  const [item] = await db.select().from(contentItems).where(eq(contentItems.id, variant.contentItemId));
+
+  const variantPublishable = variant.status === "scheduled" || variant.status === "approved";
+  const itemPublishable = item?.status === "scheduled" || item?.status === "approved";
+  if (!item || !variantPublishable || !itemPublishable) {
+    const reason = `Publish skipped: item "${item?.status ?? "deleted"}" / variant "${variant.status}" — content is no longer scheduled.`;
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "publishing_failed",
+      title: "Publishing skipped",
+      body: reason,
+      link: "/content-studio",
+    });
+    return;
+  }
+
+  const [visual] = await db
+    .select({ storagePath: visualAssets.storagePath })
+    .from(visualAssets)
+    .where(eq(visualAssets.contentItemId, variant.contentItemId))
+    .orderBy(desc(visualAssets.createdAt))
+    .limit(1);
+
+  const message = [item?.caption ?? variant.caption, (variant.hashtags ?? []).map((h) => `#${h}`).join(" ")]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const result = await publishViaBuffer({
+    workspaceId: job.workspaceId,
+    channelId,
+    accessToken: token,
+    text: message,
+    visualStoragePath: visual?.storagePath ?? null,
+  });
+
+  if (result.ok) {
+    // Buffer accepted the update — it is queued and will fire ~now + 60s.
+    await db
+      .update(publishingJobs)
+      .set({
+        status: "published",
+        result: { updateId: result.updateId, status: result.status, scheduledAt: result.scheduledAt.toISOString() },
+        updatedAt: new Date(),
+      })
+      .where(eq(publishingJobs.id, job.id));
+    await db
+      .update(contentVariants)
+      .set({ status: "published", updatedAt: new Date() })
+      .where(eq(contentVariants.id, variant.id));
+    const allPublished = (await db
+      .select({ status: contentVariants.status })
+      .from(contentVariants)
+      .where(eq(contentVariants.contentItemId, variant.contentItemId))).every((v) => v.status === "published");
+    if (allPublished) {
+      await db
+        .update(contentItems)
+        .set({ status: "published", publishedAt: new Date(), updatedAt: new Date() })
+        .where(eq(contentItems.id, variant.contentItemId));
+    }
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "publishing_completed",
+      title: "Published via Buffer",
+      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} post queued in Buffer — it goes live within a minute.`,
+      link: "/content-studio",
+    });
+  } else if (result.reason === "auth") {
+    // Buffer rejected our token (expired/revoked) — permanent, like the Meta
+    // path's auth handling: fail the job and ask for a reconnect.
+    const reason = `Buffer authorization failed — ${result.message} Reconnect the Buffer account on the Connections page.`;
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: reason, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "auth_expired",
+      title: "Reconnection required",
+      body: reason,
+      link: "/connections",
+    });
+  } else if (isTransientBufferFailure(result.reason) && job.attempts < MAX_PUBLISH_ATTEMPTS) {
+    // Transient failures (rate limit / network / server-class) are requeued
+    // with a backoff up to MAX_PUBLISH_ATTEMPTS — same policy as the Meta path.
+    await db
+      .update(publishingJobs)
+      .set({
+        status: "pending",
+        scheduledAt: new Date(Date.now() + PUBLISH_RETRY_BACKOFF_MS),
+        lastError: result.message,
+        updatedAt: new Date(),
+      })
+      .where(eq(publishingJobs.id, job.id));
+  } else {
+    // Permanent failure (content rejected by Buffer, or retries exhausted) —
+    // surface the real reason, never pretend success.
+    await db
+      .update(publishingJobs)
+      .set({ status: "failed", lastError: result.message, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: "publishing_failed",
+      title: "Publishing failed",
+      body: result.message,
+      link: "/content-studio",
+    });
+  }
+}
+
 /** Recover publish jobs stuck in "processing" (a worker died mid-publish):
  *  requeue them while attempts remain, otherwise fail them permanently. */
 async function recoverStuckPublishJobs(): Promise<void> {
@@ -316,12 +552,18 @@ async function publishDueScan(): Promise<void> {
   const db = getDb();
   await recoverStuckPublishJobs();
   const due = await db
-    .select({ id: publishingJobs.id })
+    .select({ id: publishingJobs.id, provider: publishingJobs.provider })
     .from(publishingJobs)
     .where(and(eq(publishingJobs.status, "pending"), lte(publishingJobs.scheduledAt, new Date())))
     .limit(10);
   for (const j of due) {
-    await attemptPublish(j.id);
+    // Dispatch on the provider snapshotted at job creation: "meta" keeps the
+    // EXACT legacy path (attemptPublish); "buffer" routes through Buffer.
+    if (j.provider === "buffer") {
+      await attemptBufferPublish(j.id);
+    } else {
+      await attemptPublish(j.id);
+    }
   }
 }
 

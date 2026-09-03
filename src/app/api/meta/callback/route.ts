@@ -61,7 +61,9 @@ export async function GET(request: NextRequest) {
 
     const db = getDb();
     for (const page of pages) {
-      // Facebook Page connection
+      // Facebook Page connection — provider-scoped: only the "meta" row is
+      // upserted here; a "buffer" row for the same platform (if any) is
+      // owned by the Buffer connect flow and must not be clobbered.
       const [fb] = await db
         .select()
         .from(platformConnections)
@@ -69,6 +71,7 @@ export async function GET(request: NextRequest) {
           and(
             eq(platformConnections.workspaceId, stored.workspaceId),
             eq(platformConnections.platform, "facebook"),
+            eq(platformConnections.provider, "meta"),
           ),
         );
       const fbMeta = { pageId: page.pageId, pageName: page.pageName };
@@ -81,6 +84,7 @@ export async function GET(request: NextRequest) {
         await db.insert(platformConnections).values({
           workspaceId: stored.workspaceId,
           platform: "facebook",
+          provider: "meta",
           status: "connected",
           meta: fbMeta,
           encryptedToken: encryptToken(page.pageToken),
@@ -96,6 +100,7 @@ export async function GET(request: NextRequest) {
             and(
               eq(platformConnections.workspaceId, stored.workspaceId),
               eq(platformConnections.platform, "instagram"),
+              eq(platformConnections.provider, "meta"),
             ),
           );
         const igMeta = { igUserId: page.igUserId, igUsername: page.igUsername, pageId: page.pageId };
@@ -108,6 +113,7 @@ export async function GET(request: NextRequest) {
           await db.insert(platformConnections).values({
             workspaceId: stored.workspaceId,
             platform: "instagram",
+            provider: "meta",
             status: "connected",
             meta: igMeta,
             encryptedToken: encryptToken(page.pageToken),

@@ -30,7 +30,9 @@ export async function refreshCompetitor(ctx: {
     .where(and(eq(competitors.id, ctx.competitorId), eq(competitors.workspaceId, ctx.workspaceId)));
   if (!competitor) return { ok: false, reason: "not_found", message: "Competitor not found." };
 
-  // Business Discovery requires OUR connected IG account.
+  // Business Discovery requires OUR connected IG account — the Meta-provider
+  // connection specifically (a Buffer IG row's token cannot call the Graph
+  // API).
   const [igConn] = await db
     .select()
     .from(platformConnections)
@@ -39,6 +41,7 @@ export async function refreshCompetitor(ctx: {
         eq(platformConnections.workspaceId, ctx.workspaceId),
         eq(platformConnections.platform, "instagram"),
         eq(platformConnections.status, "connected"),
+        eq(platformConnections.provider, "meta"),
       ),
     );
   if (!igConn || !igConn.encryptedToken) {

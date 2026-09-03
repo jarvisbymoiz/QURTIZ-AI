@@ -72,6 +72,30 @@ workspace → fill the Brand Brain → chat with your agent.
    Your Page + linked Instagram account link automatically; tokens are
    stored AES-256-GCM encrypted.
 
+## 7. Buffer integration (Buffer publishing provider)
+
+Buffer is the interim publishing route while the Meta App Review is pending.
+The provider toggle UI ships later; this batch adds the schema, OAuth
+connect flow and provider routing only.
+
+1. Create an app at buffer.com/developers; copy the OAuth client id + secret
+   into `.env.local` as `BUFFER_CLIENT_ID` / `BUFFER_CLIENT_SECRET`
+   (optional until the provider is enabled — OAuth for the Buffer publishing
+   provider).
+2. Buffer app settings → **Redirect URI**:
+   `http://localhost:3000/api/buffer/callback` (your real domain in
+   production).
+3. Restart the dev server → visit `/api/buffer/connect` while signed in and
+   inside a workspace to start the flow. Facebook/Instagram channels link as
+   `provider = "buffer"` connections; tokens are stored AES-256-GCM
+   encrypted.
+4. Publishing jobs snapshot the workspace publishing provider at schedule
+   time (`settings` key `publishing` → `{ provider }`; default `meta`). Jobs
+   created while a provider is active keep that provider even if it is
+   toggled later. Buffer updates are created at fire time with
+   `scheduled_at` ≈ now + 60s so the free-plan queue cap (10 scheduled
+   updates/channel) never accumulates; visuals attach as fresh signed URLs.
+
 ## Troubleshooting
 
 | Symptom | Fix |
