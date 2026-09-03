@@ -78,12 +78,21 @@ Buffer is the interim publishing route while the Meta App Review is pending.
 Any workspace member can switch the publishing provider and
 connect/disconnect Buffer channels from Connections.
 
-Buffer's current developer program **requires the OAuth2 Authorization Code
-+ PKCE** flow. This app implements it: the authorize step sends
-`code_challenge` + `code_challenge_method=S256`, the token exchange sends the
-matching `code_verifier` (carried inside the signed OAuth state marker), and
-legacy authorization servers ignore those extra parameters — so the flow
-works against both old and new Buffer endpoints.
+Buffer's developer program uses **OAuth2 Authorization Code + PKCE** on
+`auth.buffer.com`: the authorize dialog lives at
+`https://auth.buffer.com/auth` and the token endpoint at
+`https://auth.buffer.com/token`. The app requests the scopes
+`posts:read posts:write account:read offline_access` (`offline_access` yields
+a refresh token; overridable via `BUFFER_OAUTH_SCOPES`). The authorize step
+sends `code_challenge` + `code_challenge_method=S256`, and the token exchange
+sends the matching `code_verifier` (carried inside the signed OAuth state
+marker).
+
+Buffer refresh tokens are **single-use**: every refresh returns a new refresh
+token and invalidates the old one. When a Buffer publish hits an auth error,
+the publishing worker refreshes the token once, persists the newest encrypted
+envelope, and retries the publish; if the refresh fails, the job fails
+permanently with a reconnection prompt.
 
 1. Create an app at buffer.com/developers; copy the OAuth client id + secret
    into `.env.local` as `BUFFER_CLIENT_ID` / `BUFFER_CLIENT_SECRET`.
@@ -100,6 +109,10 @@ works against both old and new Buffer endpoints.
    toggled later. Buffer updates are created at fire time with
    `scheduled_at` ≈ now + 60s so the free-plan queue cap (10 scheduled
    updates/channel) never accumulates; visuals attach as fresh signed URLs.
+5. Channel listing still uses Buffer's REST `profiles.json` endpoint; the
+   migration to the GraphQL API on `api.buffer.com` is planned next (until
+   then, a failing channel fetch surfaces a `channels_fetch` detail in the
+   Connections toast and a `[buffer-oauth]` server log line).
 
 ## Troubleshooting
 

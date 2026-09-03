@@ -21,9 +21,10 @@ import {
   settings,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
-import { decryptToken } from "@/lib/crypto/tokens";
+import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
 import { publishViaBuffer } from "@/lib/publish/buffer-provider";
+import { applyRefreshedToken, decodeBufferTokenEnvelope, refreshAccessToken } from "@/lib/buffer/client";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { hasWorkspaceAIConfig } from "@/lib/ai/config";
@@ -412,13 +413,40 @@ async function attemptBufferPublish(publishingJobId: string): Promise<void> {
     .filter(Boolean)
     .join("\n\n");
 
-  const result = await publishViaBuffer({
+  let result = await publishViaBuffer({
     workspaceId: job.workspaceId,
     channelId,
     accessToken: token,
     text: message,
     visualStoragePath: visual?.storagePath ?? null,
   });
+
+  // Single refresh-retry on an auth rejection: Buffer refresh tokens are
+  // SINGLE-USE, so a successful refresh hands back a fresh access token AND
+  // rotates the refresh token — the newest envelope is persisted (same
+  // encryptToken envelope as the OAuth callback) before retrying once. If the
+  // refresh fails or the envelope carries no refresh token, `result` stays
+  // untouched and falls through to the permanent auth-failure handling below.
+  if (!result.ok && result.reason === "auth") {
+    const envelope = decodeBufferTokenEnvelope(token);
+    if (envelope?.refreshToken) {
+      const refreshed = await refreshAccessToken({ refreshToken: envelope.refreshToken });
+      if (refreshed.ok) {
+        const nextEnvelope = applyRefreshedToken(envelope, refreshed.data);
+        await db
+          .update(platformConnections)
+          .set({ encryptedToken: encryptToken(JSON.stringify(nextEnvelope)), updatedAt: new Date() })
+          .where(eq(platformConnections.id, conn.id));
+        result = await publishViaBuffer({
+          workspaceId: job.workspaceId,
+          channelId,
+          accessToken: nextEnvelope.accessToken,
+          text: message,
+          visualStoragePath: visual?.storagePath ?? null,
+        });
+      }
+    }
+  }
 
   if (result.ok) {
     // Buffer accepted the update — it is queued and will fire ~now + 60s.

@@ -1,9 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
+  BUFFER_AUTHORIZE_URL,
+  BUFFER_OAUTH_SCOPES,
   buildAuthorizeUrl,
   bufferConfigured,
   bufferRedirectUri,
   generatePkcePair,
+  logBufferOAuthDiagnostic,
   signBufferOAuthState,
 } from "@/lib/buffer/client";
 import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
@@ -32,7 +35,19 @@ export async function GET(request: NextRequest) {
 
   const { codeVerifier, codeChallenge } = generatePkcePair();
   const state = signBufferOAuthState({ workspaceId, userId: user.id, codeVerifier });
-  return NextResponse.redirect(
-    buildAuthorizeUrl({ redirectUri: bufferRedirectUri(origin), state, codeChallenge }),
-  );
+  const redirectUri = bufferRedirectUri(origin);
+  // Safe diagnostic before redirecting to Buffer: lengths + id prefixes only —
+  // never the client secret, tokens, or the PKCE code_verifier.
+  const clientId = process.env.BUFFER_CLIENT_ID ?? "";
+  logBufferOAuthDiagnostic("authorize", {
+    clientIdLength: clientId.length,
+    clientIdPrefix: clientId.slice(0, 4),
+    clientIdSuffix: clientId.slice(-4),
+    authorizeEndpoint: BUFFER_AUTHORIZE_URL,
+    redirectUri,
+    scopes: BUFFER_OAUTH_SCOPES,
+    pkce: true,
+    stateSigned: true,
+  });
+  return NextResponse.redirect(buildAuthorizeUrl({ redirectUri, state, codeChallenge }));
 }

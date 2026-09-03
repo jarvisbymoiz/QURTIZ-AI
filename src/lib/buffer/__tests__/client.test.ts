@@ -2,8 +2,10 @@ import crypto from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   BUFFER_AUTHORIZE_URL,
+  BUFFER_OAUTH_SCOPES,
   BUFFER_OAUTH_STATE_TTL_SECONDS,
   BUFFER_TOKEN_URL,
+  applyRefreshedToken,
   buildAuthorizeUrl,
   buildBufferTokenEnvelope,
   decodeBufferTokenEnvelope,
@@ -13,9 +15,11 @@ import {
   listChannels,
   pkceChallenge,
   pkceVerifier,
+  refreshAccessToken,
   signBufferOAuthState,
   verifyBufferOAuthState,
   type BufferChannel,
+  type BufferTokenEnvelope,
 } from "@/lib/buffer/client";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 
@@ -57,7 +61,12 @@ afterEach(() => {
 // The endpoint constants resolve from process.env at module load, so override
 // tests reload a fresh module instance with a controlled env state (never the
 // ambient shell env) and restore whatever was there afterwards.
-const BUFFER_ENDPOINT_ENV_VARS = ["BUFFER_AUTHORIZE_URL", "BUFFER_TOKEN_URL", "BUFFER_API_BASE"] as const;
+const BUFFER_ENDPOINT_ENV_VARS = [
+  "BUFFER_AUTHORIZE_URL",
+  "BUFFER_TOKEN_URL",
+  "BUFFER_API_BASE",
+  "BUFFER_OAUTH_SCOPES",
+] as const;
 
 function applyEndpointEnv(values: Partial<Record<(typeof BUFFER_ENDPOINT_ENV_VARS)[number], string>>): () => void {
   const saved = new Map<string, string | undefined>();
@@ -81,9 +90,10 @@ describe("buffer endpoint constants", () => {
     try {
       vi.resetModules();
       const mod = await import("@/lib/buffer/client");
-      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://buffer.com/oauth2/authorize");
-      expect(mod.BUFFER_TOKEN_URL).toBe("https://api.bufferapp.com/1/oauth2/token.json");
-      expect(mod.BUFFER_API_BASE).toBe("https://api.bufferapp.com/1/");
+      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://auth.buffer.com/auth");
+      expect(mod.BUFFER_TOKEN_URL).toBe("https://auth.buffer.com/token");
+      expect(mod.BUFFER_API_BASE).toBe("https://api.buffer.com/");
+      expect(mod.BUFFER_OAUTH_SCOPES).toBe("posts:read posts:write account:read offline_access");
     } finally {
       restore();
       vi.resetModules();
@@ -95,6 +105,7 @@ describe("buffer endpoint constants", () => {
       BUFFER_AUTHORIZE_URL: "https://override.example/oauth2/authorize",
       BUFFER_TOKEN_URL: "https://override.example/oauth2/token.json",
       BUFFER_API_BASE: "https://override.example/",
+      BUFFER_OAUTH_SCOPES: "custom:scope offline_access",
     });
     try {
       vi.resetModules();
@@ -102,6 +113,7 @@ describe("buffer endpoint constants", () => {
       expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://override.example/oauth2/authorize");
       expect(mod.BUFFER_TOKEN_URL).toBe("https://override.example/oauth2/token.json");
       expect(mod.BUFFER_API_BASE).toBe("https://override.example/");
+      expect(mod.BUFFER_OAUTH_SCOPES).toBe("custom:scope offline_access");
     } finally {
       restore();
       vi.resetModules();
@@ -113,7 +125,7 @@ describe("buffer endpoint constants", () => {
     try {
       vi.resetModules();
       const mod = await import("@/lib/buffer/client");
-      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://buffer.com/oauth2/authorize");
+      expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://auth.buffer.com/auth");
     } finally {
       restore();
       vi.resetModules();
@@ -157,6 +169,7 @@ describe("buildAuthorizeUrl", () => {
     expect(params.get("client_id")).toBe(BUFFER_CLIENT_ID);
     expect(params.get("redirect_uri")).toBe(REDIRECT_URI);
     expect(params.get("response_type")).toBe("code");
+    expect(params.get("scope")).toBe(BUFFER_OAUTH_SCOPES);
     expect(params.get("state")).toBe("state-abc");
     expect(params.get("code_challenge")).toBe(CODE_CHALLENGE);
     expect(params.get("code_challenge_method")).toBe("S256");
@@ -205,6 +218,77 @@ describe("exchangeCode", () => {
     );
     const res = await exchangeCode({ code: "bad", redirectUri: REDIRECT_URI, codeVerifier: CODE_VERIFIER });
     expect(res).toEqual({ ok: false, reason: "rejected", message: "invalid_grant" });
+  });
+});
+
+describe("refreshAccessToken", () => {
+  it("posts grant_type=refresh_token with the client credentials to the token URL", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ access_token: "tok-2", refresh_token: "ref-2", expires_in: 3600 }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await refreshAccessToken({ refreshToken: "ref-1" });
+    expect(res.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(BUFFER_TOKEN_URL);
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    const body = new URLSearchParams(init.body as URLSearchParams);
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("refresh_token")).toBe("ref-1");
+    expect(body.get("client_id")).toBe(BUFFER_CLIENT_ID);
+    expect(body.get("client_secret")).toBe(BUFFER_CLIENT_SECRET);
+  });
+
+  it("maps a rejected refresh to a typed failure without leaking the body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })),
+    );
+    const res = await refreshAccessToken({ refreshToken: "rotated-away" });
+    expect(res).toEqual({ ok: false, reason: "rejected", message: "invalid_grant" });
+  });
+
+  it("returns invalid_response when the refresh response carries no access token", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
+    const res = await refreshAccessToken({ refreshToken: "ref-1" });
+    expect(res).toEqual({
+      ok: false,
+      reason: "invalid_response",
+      message: "Buffer token refresh returned no access token.",
+    });
+  });
+});
+
+describe("applyRefreshedToken", () => {
+  const current: BufferTokenEnvelope = { accessToken: "tok-1", refreshToken: "ref-1", expiresAt: 1000 };
+
+  it("rotates to the new refresh token (single-use) and recomputes expiresAt from expires_in", () => {
+    const before = Date.now();
+    const env = applyRefreshedToken(current, { access_token: "tok-2", refresh_token: "ref-2", expires_in: 3600 });
+    const after = Date.now();
+    expect(env.accessToken).toBe("tok-2");
+    expect(env.refreshToken).toBe("ref-2");
+    // expiresAt = captured now + 3600s (allow ±1ms clock boundary between reads)
+    expect((env.expiresAt as number) - before).toBeGreaterThan(3600_000 - 2000);
+    expect((env.expiresAt as number) - after).toBeLessThanOrEqual(3600_000 + 1);
+  });
+
+  it("keeps the previous refresh token when the response omits one (defensive)", () => {
+    const omitted = applyRefreshedToken(current, { access_token: "tok-2", expires_in: 3600 });
+    expect(omitted.refreshToken).toBe("ref-1");
+    const nulled = applyRefreshedToken(current, { access_token: "tok-2", refresh_token: null, expires_in: 3600 });
+    expect(nulled.refreshToken).toBe("ref-1");
+  });
+
+  it("sets expiresAt to null when the response has no expires_in", () => {
+    const env = applyRefreshedToken(current, { access_token: "tok-2", refresh_token: "ref-2" });
+    expect(env.accessToken).toBe("tok-2");
+    expect(env.expiresAt).toBeNull();
   });
 });
 
@@ -384,10 +468,11 @@ describe("listChannels", () => {
 });
 
 describe("token envelope", () => {
-  it("encrypts and decrypts an envelope round-trip via tokens.ts", () => {
-    const envelope = { accessToken: "buf-access-token-1", refreshToken: null, expiresAt: null };
+  it("encrypts and decrypts an envelope round-trip via tokens.ts (refresh_token survives)", () => {
+    const envelope = { accessToken: "buf-access-token-1", refreshToken: "buf-refresh-token-1", expiresAt: 4102444800000 };
     const enc = encryptToken(JSON.stringify(envelope));
     expect(enc).not.toContain("buf-access-token-1");
+    expect(enc).not.toContain("buf-refresh-token-1");
     const dec = decryptToken(enc);
     expect(dec).not.toBeNull();
     expect(decodeBufferTokenEnvelope(dec as string)).toEqual(envelope);

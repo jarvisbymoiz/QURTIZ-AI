@@ -2,20 +2,21 @@ import crypto from "node:crypto";
 import { getEncryptionKey } from "@/lib/crypto/tokens";
 
 /**
- * Buffer OAuth + publish client (Buffer API v1, legacy endpoints).
+ * Buffer OAuth + publish client (auth.buffer.com OAuth2 + Buffer publishing).
  *
  * Buffer is the interim publishing route until the Meta App Review passes.
- * All URLs are module constants so a future migration to Buffer's v2 API
- * (api.buffer.com) stays a one-file change.
+ * All URLs are module constants so an endpoint migration stays a one-file change.
  *
  * Design notes:
- * - Buffer's current developer program requires OAuth2 Authorization Code
- *   WITH PKCE. This client therefore sends code_challenge/code_challenge_method
- *   on the authorize step and code_verifier on the token exchange. Legacy
- *   authorization servers ignore unknown parameters, so the PKCE addition is
- *   dual-compatible (authorize + exchange work against both old and new
- *   endpoints); the code_verifier travels inside the signed state marker, so
- *   no server-side store is required.
+ * - Buffer's authorization server (auth.buffer.com) requires OAuth2
+ *   Authorization Code WITH PKCE. This client therefore sends
+ *   code_challenge/code_challenge_method on the authorize step and
+ *   code_verifier on the token exchange; the code_verifier travels inside the
+ *   signed state marker, so no server-side store is required.
+ * - auth.buffer.com refresh tokens are SINGLE-USE: every refresh returns a
+ *   new refresh_token and invalidates the one sent. refreshAccessToken +
+ *   applyRefreshedToken implement that rotation — callers must persist the
+ *   newest envelope or the next refresh will fail.
  * - Publishing is "publish-at-due-time": when a due publishing job fires, the
  *   update is created with `scheduled_at` ≈ now + 60s, so Buffer's free-plan
  *   queue cap (10 scheduled updates/channel) never accumulates.
@@ -29,23 +30,42 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  */
 
 /**
- * Buffer endpoint roots. Defaults track Buffer's live hosts: the OAuth
- * authorize dialog lives on buffer.com — bufferapp.com permanently redirects
- * there (an earlier build of this file pointed at the redirecting host, so the
- * browser silently landed on buffer.com); the token exchange and v1 API still
- * resolve on api.bufferapp.com. Each value is env-overridable via
+ * Buffer endpoint roots. Defaults track Buffer's current hosts: the OAuth
+ * authorize dialog and token exchange live on auth.buffer.com, the (still
+ * REST-style) v1 API on api.buffer.com. Each value is env-overridable via
  * BUFFER_AUTHORIZE_URL / BUFFER_TOKEN_URL / BUFFER_API_BASE so a live endpoint
  * migration can be validated from .env.local without a code deploy. Empty
- * strings count as unset.
+ * strings count as unset. NOTE: channel listing still uses profiles.json —
+ * the GraphQL migration on api.buffer.com is a later batch.
  */
 function bufferEndpoint(name: string, fallback: string): string {
   const value = process.env[name];
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
-export const BUFFER_AUTHORIZE_URL = bufferEndpoint("BUFFER_AUTHORIZE_URL", "https://buffer.com/oauth2/authorize");
-export const BUFFER_TOKEN_URL = bufferEndpoint("BUFFER_TOKEN_URL", "https://api.bufferapp.com/1/oauth2/token.json");
-export const BUFFER_API_BASE = bufferEndpoint("BUFFER_API_BASE", "https://api.bufferapp.com/1/");
+export const BUFFER_AUTHORIZE_URL = bufferEndpoint("BUFFER_AUTHORIZE_URL", "https://auth.buffer.com/auth");
+export const BUFFER_TOKEN_URL = bufferEndpoint("BUFFER_TOKEN_URL", "https://auth.buffer.com/token");
+export const BUFFER_API_BASE = bufferEndpoint("BUFFER_API_BASE", "https://api.buffer.com/");
+
+/** OAuth scopes requested on the authorize step. `offline_access` makes
+ *  auth.buffer.com return a refresh token; refresh tokens are single-use (see
+ *  applyRefreshedToken). Env-overridable via BUFFER_OAUTH_SCOPES. */
+export const BUFFER_OAUTH_SCOPES = bufferEndpoint(
+  "BUFFER_OAUTH_SCOPES",
+  "posts:read posts:write account:read offline_access",
+);
+
+/* ── Safe server-side diagnostics (no secrets) ────────────────────── */
+
+/** One-line server log for OAuth debugging. Callers pass only non-secret
+ *  metadata (lengths, id prefixes, resolved endpoints, sanitized failure
+ *  messages) — never the client secret, tokens, or the PKCE code_verifier. */
+export function logBufferOAuthDiagnostic(
+  stage: string,
+  fields: Record<string, string | number | boolean | null>,
+): void {
+  console.warn("[buffer-oauth]", stage, JSON.stringify(fields));
+}
 
 /** Buffer OAuth state markers die after 10 minutes (same maxAge as the Meta
  *  OAuth cookie — the user must finish the flow in time). */
@@ -129,6 +149,25 @@ export function decodeBufferTokenEnvelope(plain: string): BufferTokenEnvelope | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Merge a refresh-token response into the current envelope (pure). The NEW
+ * access token replaces the old one; Buffer refresh tokens are single-use, so
+ * a fresh refresh_token in the response always wins — but when the provider
+ * omits one the previous refresh token is kept (defensive: only some
+ * providers omit it on refresh). expiresAt is recomputed from expires_in;
+ * when absent it becomes null (the old expiry described the replaced token).
+ */
+export function applyRefreshedToken(current: BufferTokenEnvelope, next: BufferTokenResponse): BufferTokenEnvelope {
+  return {
+    accessToken: next.access_token,
+    refreshToken:
+      typeof next.refresh_token === "string" && next.refresh_token.length > 0
+        ? next.refresh_token
+        : (current.refreshToken ?? null),
+    expiresAt: next.expires_in != null ? Date.now() + next.expires_in * 1000 : null,
+  };
 }
 
 /* ── Typed API results ────────────────────────────────────────────── */
@@ -232,14 +271,15 @@ export function buildAuthorizeUrl(args: {
     redirect_uri: args.redirectUri,
     state: args.state,
     response_type: "code",
+    scope: BUFFER_OAUTH_SCOPES,
     code_challenge: args.codeChallenge,
     code_challenge_method: "S256",
   });
   return `${BUFFER_AUTHORIZE_URL}?${params.toString()}`;
 }
 
-/** Exchange the OAuth code for an access token (POST token.json). PKCE
- *  verifies the authorize step: the code_verifier must match the
+/** Exchange the OAuth code for an access token (POST to BUFFER_TOKEN_URL).
+ *  PKCE verifies the authorize step: the code_verifier must match the
  *  code_challenge sent in buildAuthorizeUrl. */
 export async function exchangeCode(args: {
   code: string;
@@ -262,6 +302,34 @@ export async function exchangeCode(args: {
   if (!res.ok) return res;
   if (typeof res.data.access_token !== "string" || res.data.access_token.length === 0) {
     return { ok: false, reason: "invalid_response", message: "Buffer token exchange returned no access token." };
+  }
+  return res;
+}
+
+/**
+ * Refresh an expired access token (POST to BUFFER_TOKEN_URL). auth.buffer.com
+ * refresh tokens are SINGLE-USE: a successful refresh returns a NEW
+ * refresh_token and invalidates the one sent — callers must persist the
+ * newest envelope (applyRefreshedToken → encryptToken → platformConnections)
+ * or the next refresh will fail.
+ */
+export async function refreshAccessToken(args: {
+  refreshToken: string;
+}): Promise<BufferApiResult<BufferTokenResponse>> {
+  const body = new URLSearchParams({
+    client_id: bufferClientId(),
+    client_secret: bufferClientSecret(),
+    grant_type: "refresh_token",
+    refresh_token: args.refreshToken,
+  });
+  const res = await requestJson<BufferTokenResponse>(BUFFER_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) return res;
+  if (typeof res.data.access_token !== "string" || res.data.access_token.length === 0) {
+    return { ok: false, reason: "invalid_response", message: "Buffer token refresh returned no access token." };
   }
   return res;
 }
@@ -310,7 +378,10 @@ function toChannel(raw: unknown): BufferChannel | null {
 
 /** List the Buffer account's connected channels (GET profiles.json). The
  *  payload shape has drifted across Buffer API generations, so it is parsed
- *  defensively: a top-level array, { profiles: [...] } or { data: [...] }. */
+ *  defensively: a top-level array, { profiles: [...] } or { data: [...] }.
+ *  NOTE: intentionally still REST — the GraphQL migration on api.buffer.com
+ *  is a later batch (the callback's channels_fetch failure detail is the
+ *  live diagnostic until then). */
 export async function listChannels(accessToken: string): Promise<BufferApiResult<BufferChannel[]>> {
   const url = `${BUFFER_API_BASE}profiles.json?access_token=${encodeURIComponent(accessToken)}`;
   const res = await requestJson<unknown>(url);

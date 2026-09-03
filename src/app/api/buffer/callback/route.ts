@@ -3,10 +3,12 @@ import { getDb } from "@/db";
 import { platformConnections } from "@/db/schema";
 import { encryptToken } from "@/lib/crypto/tokens";
 import {
+  BUFFER_TOKEN_URL,
   buildBufferTokenEnvelope,
   exchangeCode,
   filterSupportedBufferChannels,
   listChannels,
+  logBufferOAuthDiagnostic,
   verifyBufferOAuthState,
 } from "@/lib/buffer/client";
 import { getMembership, getSessionUser } from "@/lib/workspace";
@@ -32,7 +34,27 @@ function sanitizeDetail(message: string): string {
   return message.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
-function failureRedirect(origin: string, reason: string, message: string): NextResponse {
+/** Safe diagnostic on every failure redirect: stage + sanitized failure only —
+ *  never the client secret, tokens, or the PKCE code_verifier. */
+function logCallbackFailure(
+  origin: string,
+  stage: string,
+  reason: string,
+  message: string | null,
+  opts: { hasRefreshTokenInEnvelope?: boolean } = {},
+): void {
+  const detail = message ? sanitizeDetail(message) : "";
+  logBufferOAuthDiagnostic(stage, {
+    failureReason: reason,
+    failureMessage: detail.length > 0 ? detail : null,
+    tokenEndpoint: BUFFER_TOKEN_URL,
+    redirectUri: `${origin}/api/buffer/callback`,
+    hasRefreshTokenInEnvelope: opts.hasRefreshTokenInEnvelope ?? null,
+  });
+}
+
+function failureRedirect(origin: string, reason: string, message: string, opts: { hasRefreshTokenInEnvelope?: boolean } = {}): NextResponse {
+  logCallbackFailure(origin, reason, reason, message, opts);
   const detail = sanitizeDetail(message);
   const base = `${origin}/connections?buffer=error&reason=${reason}`;
   return NextResponse.redirect(detail ? `${base}&detail=${encodeURIComponent(detail)}` : base);
@@ -45,6 +67,7 @@ export async function GET(request: NextRequest) {
   const denied = searchParams.get("error"); // Buffer denial (e.g. access_denied)
 
   if (!code || !oauthState) {
+    logCallbackFailure(origin, "callback", denied ? "denied" : "oauth_invalid", null);
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=${denied ? "denied" : "oauth_invalid"}`);
   }
 
@@ -52,6 +75,7 @@ export async function GET(request: NextRequest) {
   // (10 min). Rejects tampered/expired markers.
   const scope = verifyBufferOAuthState(oauthState);
   if (!scope) {
+    logCallbackFailure(origin, "callback", "oauth_invalid", null);
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=oauth_invalid`);
   }
 
@@ -89,13 +113,18 @@ export async function GET(request: NextRequest) {
 
     const listed = await listChannels(envelope.accessToken);
     if (!listed.ok) {
-      return failureRedirect(origin, "channels_fetch", listed.message);
+      return failureRedirect(origin, "channels_fetch", listed.message, {
+        hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
+      });
     }
 
     // Buffer holds other services too (twitter/linkedin/pinterest) — this
     // product only routes facebook/instagram channels into connections.
     const channels = filterSupportedBufferChannels(listed.data);
     if (channels.length === 0) {
+      logCallbackFailure(origin, "channels_fetch", "no_supported_channels", null, {
+        hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
+      });
       return NextResponse.redirect(`${origin}/connections?buffer=error&reason=no_supported_channels`);
     }
 
@@ -145,6 +174,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.redirect(`${origin}/connections?buffer=connected`);
   } catch {
+    // No error detail is surfaced here (the throw could originate anywhere,
+    // incl. provider-echoing code paths) — log the safe markers only.
+    logCallbackFailure(origin, "callback", "oauth_failed", null);
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=oauth_failed`);
   }
 }
