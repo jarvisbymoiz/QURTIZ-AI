@@ -9,21 +9,34 @@ import {
   listChannels,
   verifyBufferOAuthState,
 } from "@/lib/buffer/client";
-import { can } from "@/lib/permissions";
 import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Buffer OAuth callback (provider="buffer"). Verifies the signed state marker
- * (workspace + user + expiry), exchanges the code, then upserts one
- * platform_connections row per supported Buffer channel (facebook/instagram),
- * provider="buffer", with channelRef = Buffer profile id and the access token
- * stored encrypted inside a JSON envelope. Mirrors the Meta callback's
- * conventions: session + membership are re-verified before anything is
- * persisted, and the browser is redirected to /connections with a status flag.
- */
+/** Buffer OAuth callback (provider="buffer"). Verifies the signed state marker
+ *  (workspace + user + PKCE codeVerifier + expiry), exchanges the code, then
+ *  upserts one platform_connections row per supported Buffer channel
+ *  (facebook/instagram), provider="buffer", with channelRef = Buffer profile id
+ *  and the access token stored encrypted inside a JSON envelope. Mirrors the
+ *  Meta callback's conventions: session + membership are re-verified before
+ *  anything is persisted, and the browser is redirected to /connections with a
+ *  status flag. Exchange/channel failures redirect with a sanitized `detail`
+ *  param so the Connections toast can pinpoint the failing step. */
+
+/** Failure detail for the /connections toast: supplementary and sanitized —
+ *  control chars stripped, collapsed, 120 chars max. Buffer API failure
+ *  messages never contain tokens (see messageOf in lib/buffer/client), so the
+ *  original message is safe to surface. */
+function sanitizeDetail(message: string): string {
+  return message.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function failureRedirect(origin: string, reason: string, message: string): NextResponse {
+  const detail = sanitizeDetail(message);
+  const base = `${origin}/connections?buffer=error&reason=${reason}`;
+  return NextResponse.redirect(detail ? `${base}&detail=${encodeURIComponent(detail)}` : base);
+}
 export async function GET(request: NextRequest) {
   const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
   const { searchParams } = new URL(request.url);
@@ -35,8 +48,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=${denied ? "denied" : "oauth_invalid"}`);
   }
 
-  // Stateless signed state: workspaceId + userId + expiry (10 min). Rejects
-  // tampered/expired markers.
+  // Stateless signed state: workspaceId + userId + PKCE codeVerifier + expiry
+  // (10 min). Rejects tampered/expired markers.
   const scope = verifyBufferOAuthState(oauthState);
   if (!scope) {
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=oauth_invalid`);
@@ -61,24 +74,22 @@ export async function GET(request: NextRequest) {
       { status: 403 },
     );
   }
-  if (!can(membership.role, "publish:manage")) {
-    return NextResponse.json(
-      { error: "Only editors and above can connect accounts." },
-      { status: 403 },
-    );
-  }
 
   try {
-    const exchanged = await exchangeCode({ code, redirectUri: `${origin}/api/buffer/callback` });
+    const exchanged = await exchangeCode({
+      code,
+      redirectUri: `${origin}/api/buffer/callback`,
+      codeVerifier: scope.codeVerifier,
+    });
     if (!exchanged.ok) {
-      return NextResponse.redirect(`${origin}/connections?buffer=error&reason=token_exchange`);
+      return failureRedirect(origin, "token_exchange", exchanged.message);
     }
     const envelope = buildBufferTokenEnvelope(exchanged.data);
     const encrypted = encryptToken(JSON.stringify(envelope));
 
     const listed = await listChannels(envelope.accessToken);
     if (!listed.ok) {
-      return NextResponse.redirect(`${origin}/connections?buffer=error&reason=channels_fetch`);
+      return failureRedirect(origin, "channels_fetch", listed.message);
     }
 
     // Buffer holds other services too (twitter/linkedin/pinterest) — this

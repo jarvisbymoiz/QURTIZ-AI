@@ -9,6 +9,13 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  * (api.buffer.com) stays a one-file change.
  *
  * Design notes:
+ * - Buffer's current developer program requires OAuth2 Authorization Code
+ *   WITH PKCE. This client therefore sends code_challenge/code_challenge_method
+ *   on the authorize step and code_verifier on the token exchange. Legacy
+ *   authorization servers ignore unknown parameters, so the PKCE addition is
+ *   dual-compatible (authorize + exchange work against both old and new
+ *   endpoints); the code_verifier travels inside the signed state marker, so
+ *   no server-side store is required.
  * - Publishing is "publish-at-due-time": when a due publishing job fires, the
  *   update is created with `scheduled_at` ≈ now + 60s, so Buffer's free-plan
  *   queue cap (10 scheduled updates/channel) never accumulates.
@@ -17,7 +24,7 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  * - HTTP failures map to typed results ({ ok: false, reason, message }).
  *   Raw tokens never appear in errors or logs.
  * - The OAuth `state` marker is a stateless HMAC-signed
- *   workspaceId.userId.exp token (same key derivation as
+ *   workspaceId.userId.codeVerifier.exp token (same key derivation as
  *   lib/workspace-delete.ts) — no server-side store or cookie required.
  */
 
@@ -174,30 +181,62 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<BufferAp
   return { ok: true, data: body as T };
 }
 
+/* ── PKCE (OAuth2 Authorization Code + PKCE) ─────────────────────── */
+
+/**
+ * 43-char base64url verifier from 32 random bytes: base64url of 32 bytes is
+ * ceil(32/3)*4 = 44 chars minus one "=" padding = 43 chars (Node's base64url
+ * encoder already omits padding). Alphabet: A-Za-z0-9-_ (no "=", no "." — the
+ * verifier is also embedded in the dot-joined OAuth state marker below).
+ */
+export function pkceVerifier(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+/** S256 challenge: sha256(verifier) as unpadded base64url (RFC 7636 §4.2). */
+export function pkceChallenge(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier, "utf8").digest("base64url");
+}
+
+export function generatePkcePair(): { codeVerifier: string; codeChallenge: string } {
+  const codeVerifier = pkceVerifier();
+  return { codeVerifier, codeChallenge: pkceChallenge(codeVerifier) };
+}
+
 /* ── OAuth ────────────────────────────────────────────────────────── */
 
 /** Buffer OAuth dialog URL (pure — unit-testable). Throws when the client id
  *  env var is missing so misconfiguration fails loudly, not silently. */
-export function buildAuthorizeUrl(args: { redirectUri: string; state: string }): string {
+export function buildAuthorizeUrl(args: {
+  redirectUri: string;
+  state: string;
+  codeChallenge: string;
+}): string {
   const params = new URLSearchParams({
     client_id: bufferClientId(),
     redirect_uri: args.redirectUri,
     state: args.state,
     response_type: "code",
+    code_challenge: args.codeChallenge,
+    code_challenge_method: "S256",
   });
   return `${BUFFER_AUTHORIZE_URL}?${params.toString()}`;
 }
 
-/** Exchange the OAuth code for an access token (POST token.json). */
+/** Exchange the OAuth code for an access token (POST token.json). PKCE
+ *  verifies the authorize step: the code_verifier must match the
+ *  code_challenge sent in buildAuthorizeUrl. */
 export async function exchangeCode(args: {
   code: string;
   redirectUri: string;
+  codeVerifier: string;
 }): Promise<BufferApiResult<BufferTokenResponse>> {
   const body = new URLSearchParams({
     client_id: bufferClientId(),
     client_secret: bufferClientSecret(),
     redirect_uri: args.redirectUri,
     code: args.code,
+    code_verifier: args.codeVerifier,
     grant_type: "authorization_code",
   });
   const res = await requestJson<BufferTokenResponse>(BUFFER_TOKEN_URL, {
@@ -231,35 +270,47 @@ export function filterSupportedBufferChannels(
   return channels.filter(isSupportedBufferChannel);
 }
 
+function pickString(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return "";
+}
+
+/** Map one raw channel payload to the product shape. Field fallbacks absorb
+ *  v1/v2 naming drift (service ← service|type|service_type, username ←
+ *  formatted_username|username|name, avatar ← avatar|profile_image). */
 function toChannel(raw: unknown): BufferChannel | null {
   if (!isRecord(raw)) return null;
-  const service = typeof raw.service === "string" ? raw.service : "";
-  const username =
-    (typeof raw.formatted_username === "string" && raw.formatted_username.length > 0
-      ? raw.formatted_username
-      : typeof raw.service_username === "string"
-        ? raw.service_username
-        : "") || "";
   const id = raw.id != null ? String(raw.id) : "";
+  const service = pickString(raw, ["service", "type", "service_type"]);
   if (!id || !service) return null;
-  const channel: BufferChannel = { id, service, username };
-  if (raw.avatar != null) channel.avatar = typeof raw.avatar === "string" ? raw.avatar : null;
+  const channel: BufferChannel = { id, service, username: pickString(raw, ["formatted_username", "username", "name"]) };
+  const avatar = pickString(raw, ["avatar", "profile_image"]);
+  if (avatar) channel.avatar = avatar;
   if (typeof raw.default === "boolean") channel.default = raw.default;
   return channel;
 }
 
-/** List the Buffer account's connected channels (GET profiles.json). */
+/** List the Buffer account's connected channels (GET profiles.json). The
+ *  payload shape has drifted across Buffer API generations, so it is parsed
+ *  defensively: a top-level array, { profiles: [...] } or { data: [...] }. */
 export async function listChannels(accessToken: string): Promise<BufferApiResult<BufferChannel[]>> {
   const url = `${BUFFER_API_BASE}profiles.json?access_token=${encodeURIComponent(accessToken)}`;
   const res = await requestJson<unknown>(url);
   if (!res.ok) return res;
-  const raw = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.data) ? res.data.data : null;
+  const raw = Array.isArray(res.data)
+    ? res.data
+    : isRecord(res.data) && Array.isArray(res.data.profiles)
+      ? res.data.profiles
+      : isRecord(res.data) && Array.isArray(res.data.data)
+        ? res.data.data
+        : null;
   if (!raw) {
     return { ok: false, reason: "invalid_response", message: "Buffer profiles.json returned an unexpected payload." };
   }
-  const channels = raw
-    .map(toChannel)
-    .filter((c): c is BufferChannel => c !== null && c.service !== "");
+  const channels = raw.map(toChannel).filter((c): c is BufferChannel => c !== null);
   return { ok: true, data: channels };
 }
 
@@ -326,36 +377,39 @@ export async function getUpdate(args: {
 
 /* ── OAuth state marker (stateless, HMAC-signed) ──────────────────── */
 
-export type BufferOAuthScope = { workspaceId: string; userId: string };
+export type BufferOAuthScope = { workspaceId: string; userId: string; codeVerifier: string };
 
-/** Builds `workspaceId.userId.exp.hmac` for the connect flow. The HMAC key is
+/** Builds `workspaceId.userId.codeVerifier.exp.hmac` for the connect flow. The
+ *  PKCE code_verifier rides inside the signed scope so the callback can
+ *  complete the token exchange without any server-side store. The HMAC key is
  *  derived from the same ENCRYPTION_KEY used for token encryption (shared
  *  accessor in lib/crypto/tokens — no new env var). */
-export function signBufferOAuthState({ workspaceId, userId }: BufferOAuthScope): string {
+export function signBufferOAuthState({ workspaceId, userId, codeVerifier }: BufferOAuthScope): string {
   const exp = Math.floor(Date.now() / 1000) + BUFFER_OAUTH_STATE_TTL_SECONDS;
-  const payload = `${workspaceId}.${userId}.${exp}`;
+  const payload = `${workspaceId}.${userId}.${codeVerifier}.${exp}`;
   const hmac = crypto.createHmac("sha256", getEncryptionKey()).update(payload, "utf8").digest("hex");
   return `${payload}.${hmac}`;
 }
 
 /**
  * Validates shape, expiry and signature of a Buffer OAuth state marker and
- * returns its scope. Comparison is timing-safe; anything malformed, expired
- * or tampered with returns null. Never throws.
+ * returns its scope (incl. the PKCE code_verifier). Comparison is
+ * timing-safe; anything malformed, expired or tampered with returns null.
+ * Never throws.
  */
 export function verifyBufferOAuthState(token: string): BufferOAuthScope | null {
   try {
-    const [ws, uid, expStr, sig, ...extra] = token.split(".");
-    if (extra.length > 0 || !ws || !uid || !expStr || !sig) return null;
+    const [ws, uid, verifier, expStr, sig, ...extra] = token.split(".");
+    if (extra.length > 0 || !ws || !uid || !verifier || !expStr || !sig) return null;
     const exp = Number(expStr);
     if (!Number.isSafeInteger(exp) || exp <= Math.floor(Date.now() / 1000)) return null;
     const expected = crypto
       .createHmac("sha256", getEncryptionKey())
-      .update(`${ws}.${uid}.${expStr}`, "utf8")
+      .update(`${ws}.${uid}.${verifier}.${expStr}`, "utf8")
       .digest("hex");
     if (sig.length !== expected.length) return null;
     return crypto.timingSafeEqual(Buffer.from(sig, "utf8"), Buffer.from(expected, "utf8"))
-      ? { workspaceId: ws, userId: uid }
+      ? { workspaceId: ws, userId: uid, codeVerifier: verifier }
       : null;
   } catch {
     return null;

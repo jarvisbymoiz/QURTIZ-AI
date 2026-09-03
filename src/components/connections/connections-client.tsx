@@ -77,13 +77,11 @@ export function ConnectionsClient({
   publishingProvider,
   metaConfigured,
   bufferConfigured,
-  canPublish,
 }: {
   connections: Conn[];
   publishingProvider: PublishProvider;
   metaConfigured: boolean;
   bufferConfigured: boolean;
-  canPublish: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -109,7 +107,16 @@ export function ConnectionsClient({
       toast.success("Buffer connected — your linked Facebook/Instagram channels are ready to publish.");
     } else if (status === "error") {
       const reason = searchParams.get("reason") ?? "oauth_failed";
-      toast.error(BUFFER_ERROR_TEXT[reason] ?? BUFFER_ERROR_TEXT.oauth_failed);
+      // `detail` is a sanitized server-side failure snippet (see the callback
+      // route) that pinpoints the failing step — supplementary to the reason
+      // mapping, so it renders as a dim/small suffix.
+      const detail = searchParams.get("detail");
+      toast.error(
+        <div className="flex flex-col gap-1">
+          <span>{BUFFER_ERROR_TEXT[reason] ?? BUFFER_ERROR_TEXT.oauth_failed}</span>
+          {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
+        </div>,
+      );
     }
     router.replace("/connections");
   }, [router, searchParams]);
@@ -170,16 +177,10 @@ export function ConnectionsClient({
             <Switch
               checked={provider === "buffer"}
               onCheckedChange={(next) => void changeProvider(next ? "buffer" : "meta")}
-              disabled={busy || !canPublish}
+              disabled={busy}
               aria-label="Publishing provider — on: Buffer API, off: Meta API"
             />
           </div>
-          {!canPublish ? (
-            <p className="text-xs text-muted-foreground">
-              Publishing connections and the provider switch need editor access — ask a workspace admin to upgrade
-              your role.
-            </p>
-          ) : null}
           {provider === "buffer" ? (
             <p className="rounded-lg border border-dashed p-3 text-xs leading-relaxed text-muted-foreground">
               The Buffer route is for early access until Meta App Review — posts queue through your Buffer account.
@@ -256,7 +257,6 @@ export function ConnectionsClient({
                   conn={connections.find((c) => c.platform === platform && c.provider === connProvider)}
                   metaConfigured={metaConfigured}
                   bufferConfigured={bufferConfigured}
-                  canPublish={canPublish}
                   pending={pending}
                   onDisconnect={disconnect}
                 />
@@ -280,7 +280,6 @@ function ProviderSection({
   conn,
   metaConfigured,
   bufferConfigured,
-  canPublish,
   pending,
   onDisconnect,
 }: {
@@ -289,7 +288,6 @@ function ProviderSection({
   conn: Conn | undefined;
   metaConfigured: boolean;
   bufferConfigured: boolean;
-  canPublish: boolean;
   pending: boolean;
   onDisconnect: (platform: Platform, provider: PublishProvider) => void;
 }) {
@@ -297,7 +295,7 @@ function ProviderSection({
   const connected = status === "connected";
   const platformName = platform === "facebook" ? "Facebook" : "Instagram";
   const envReady = provider === "meta" ? metaConfigured : bufferConfigured;
-  const connectDisabled = !canPublish || !envReady;
+  const connectDisabled = !envReady;
 
   return (
     <div className="rounded-lg border p-3">
@@ -318,11 +316,9 @@ function ProviderSection({
             <span className="flex items-center gap-1.5 text-xs text-emerald-500">
               <CheckCircle2 className="size-3.5" aria-hidden /> Token stored encrypted
             </span>
-            {canPublish ? (
-              <Button size="sm" variant="ghost" disabled={pending} onClick={() => onDisconnect(platform, provider)}>
-                <LogOut className="size-3.5" aria-hidden /> Disconnect
-              </Button>
-            ) : null}
+            <Button size="sm" variant="ghost" disabled={pending} onClick={() => onDisconnect(platform, provider)}>
+              <LogOut className="size-3.5" aria-hidden /> Disconnect
+            </Button>
           </div>
         </div>
       ) : (
@@ -342,11 +338,6 @@ function ProviderSection({
               ? `Connect with ${platformName}`
               : `Connect with ${platformName} (Buffer)`}
           </Button>
-          {!canPublish ? (
-            <p className="text-xs text-muted-foreground">
-              Connecting needs editor access or above — ask a workspace admin to upgrade your role.
-            </p>
-          ) : null}
           {provider === "meta" && !metaConfigured ? (
             <p className="text-xs text-muted-foreground">
               Requires META_APP_ID and META_APP_SECRET in .env.local to enable Meta connections.
@@ -357,7 +348,7 @@ function ProviderSection({
               Requires BUFFER_CLIENT_ID and BUFFER_CLIENT_SECRET in .env.local to enable Buffer connections.
             </p>
           ) : null}
-          {provider === "buffer" && canPublish && bufferConfigured ? (
+          {provider === "buffer" && bufferConfigured ? (
             <p className="text-xs text-muted-foreground">
               Buffer owns channel auth — after authorizing here, link channels inside Buffer and reconnect so they
               appear.

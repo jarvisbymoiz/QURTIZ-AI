@@ -75,20 +75,25 @@ workspace → fill the Brand Brain → chat with your agent.
 ## 7. Buffer integration (Buffer publishing provider)
 
 Buffer is the interim publishing route while the Meta App Review is pending.
-The provider toggle UI ships later; this batch adds the schema, OAuth
-connect flow and provider routing only.
+Any workspace member can switch the publishing provider and
+connect/disconnect Buffer channels from Connections.
+
+Buffer's current developer program **requires the OAuth2 Authorization Code
++ PKCE** flow. This app implements it: the authorize step sends
+`code_challenge` + `code_challenge_method=S256`, the token exchange sends the
+matching `code_verifier` (carried inside the signed OAuth state marker), and
+legacy authorization servers ignore those extra parameters — so the flow
+works against both old and new Buffer endpoints.
 
 1. Create an app at buffer.com/developers; copy the OAuth client id + secret
-   into `.env.local` as `BUFFER_CLIENT_ID` / `BUFFER_CLIENT_SECRET`
-   (optional until the provider is enabled — OAuth for the Buffer publishing
-   provider).
+   into `.env.local` as `BUFFER_CLIENT_ID` / `BUFFER_CLIENT_SECRET`.
 2. Buffer app settings → **Redirect URI**:
    `http://localhost:3000/api/buffer/callback` (your real domain in
    production).
-3. Restart the dev server → visit `/api/buffer/connect` while signed in and
-   inside a workspace to start the flow. Facebook/Instagram channels link as
-   `provider = "buffer"` connections; tokens are stored AES-256-GCM
-   encrypted.
+3. Restart the dev server → Connections → **Connect with Facebook/Instagram
+   (Buffer)** while signed in and inside a workspace to start the flow.
+   Facebook/Instagram channels link as `provider = "buffer"` connections;
+   tokens are stored AES-256-GCM encrypted.
 4. Publishing jobs snapshot the workspace publishing provider at schedule
    time (`settings` key `publishing` → `{ provider }`; default `meta`). Jobs
    created while a provider is active keep that provider even if it is

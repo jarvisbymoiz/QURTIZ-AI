@@ -30,11 +30,4 @@ describe("can", () => {
     expect(can("admin", "workspace:manage")).toBe(true);
     expect(can("owner", "workspace:manage")).toBe(true);
   });
-
-  it("lets editors and above manage publishing connections", () => {
-    expect(can("viewer", "publish:manage")).toBe(false);
-    expect(can("editor", "publish:manage")).toBe(true);
-    expect(can("admin", "publish:manage")).toBe(true);
-    expect(can("owner", "publish:manage")).toBe(true);
-  });
 });

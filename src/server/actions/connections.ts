@@ -6,7 +6,6 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { platformConnections } from "@/db/schema";
-import { can } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getSessionUser, getMembership } from "@/lib/workspace";
 import {
@@ -37,8 +36,8 @@ export async function disconnectPlatformAction(
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return { ok: false, error: "No active workspace." };
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership || !can(membership.role, "publish:manage")) {
-    return { ok: false, error: "Only editors and above can disconnect accounts." };
+  if (!membership) {
+    return { ok: false, error: "You are not a member of this workspace." };
   }
 
   const db = getDb();
@@ -71,8 +70,8 @@ export async function updatePublishingProviderAction(provider: string): Promise<
   const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
   if (!workspaceId) return { ok: false, error: "No active workspace." };
   const membership = await getMembership(user.id, workspaceId);
-  if (!membership || !can(membership.role, "publish:manage")) {
-    return { ok: false, error: "Only editors and above can change the publishing provider." };
+  if (!membership) {
+    return { ok: false, error: "You are not a member of this workspace." };
   }
 
   const rl = rateLimit("publishing-provider:" + workspaceId, 10, 10 * 60_000);

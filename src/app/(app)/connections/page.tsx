@@ -7,7 +7,6 @@ import { bufferConfigured } from "@/lib/buffer/client";
 import { metaConfigured } from "@/lib/meta/oauth";
 import { getWorkspacePublishProvider, isPublishProvider } from "@/lib/publish/provider";
 import { requireWorkspace } from "@/lib/workspace";
-import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
 import { ConnectionsClient } from "@/components/connections/connections-client";
 
@@ -54,7 +53,6 @@ export default async function ConnectionsPage() {
           publishingProvider={publishingProvider}
           metaConfigured={metaConfigured()}
           bufferConfigured={bufferConfigured()}
-          canPublish={can(ctx.role, "publish:manage")}
         />
       </Suspense>
       <div className="flex items-start gap-3 rounded-lg border p-4 text-xs text-muted-foreground">
