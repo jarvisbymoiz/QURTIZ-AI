@@ -29,6 +29,15 @@ const deleteWorkspaceSchema = z.object({
   workspaceName: z.string().trim().min(1, "Type the workspace name to confirm.").max(200),
 });
 
+/**
+ * Stable outcome message for "the email link has not been opened in this
+ * browser yet". The settings card mirrors this exact literal
+ * (CONFIRMATION_NOT_DETECTED_ERROR) to tell a still-pending probe — stay
+ * silent, keep polling — from a real failure — stop and surface the error.
+ * "use server" files cannot export values, hence the mirrored constant.
+ */
+const CONFIRMATION_NOT_DETECTED_ERROR = "Email confirmation not detected yet.";
+
 /** Full workspace row of the active workspace, or an honest error. */
 async function getWorkspaceRow(workspaceId: string) {
   const db = getDb();
@@ -95,6 +104,45 @@ export async function authorizeWorkspaceDeleteAction(): Promise<ActionResult> {
     signWorkspaceDeleteToken({ workspaceId: ctx.workspaceId, userId: user.id }),
     { ...COOKIE_OPTIONS, maxAge: WORKSPACE_DELETE_TOKEN_TTL_SECONDS },
   );
+  return { ok: true };
+}
+
+/**
+ * Read-only probe for the moment the delete dialog is sitting on step 1.
+ * When the owner opens the emailed confirmation link — even in another tab —
+ * the /auth/workspace-delete route mints the httpOnly marker cookie in this
+ * browser. This action answers "is the marker here and still valid for the
+ * active workspace + signed-in user right now?" so the original tab can
+ * advance to the type-the-name step without a second email or code.
+ *
+ * It never mints or clears anything, so repeated probing is harmless. A valid
+ * token is only ever minted for the verified owner of this exact workspace,
+ * so the scope + signature check is the whole gate — no extra owner query per
+ * poll tick. It uses its own rate-limit bucket ("ws-delete-check:") so the
+ * dialog polling can never drain the shared 5/15 min budget used by the
+ * send/authorize/delete actions.
+ */
+export async function workspaceDeleteAuthorizedAction(): Promise<ActionResult> {
+  const ctx = await getActiveContext("workspace:manage");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("ws-delete-check:" + ctx.workspaceId, 30, 60_000);
+  if (!rl.allowed) return { ok: false, error: "Too many attempts. Try again in a few minutes." };
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "You must be signed in." };
+
+  const cookieStore = await cookies();
+  const marker = cookieStore.get(WORKSPACE_DELETE_COOKIE)?.value;
+  if (
+    !marker ||
+    !verifyWorkspaceDeleteToken(marker, { workspaceId: ctx.workspaceId, userId: user.id })
+  ) {
+    return { ok: false, error: CONFIRMATION_NOT_DETECTED_ERROR };
+  }
   return { ok: true };
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { Loader2, Mail, ShieldAlert, Trash2 } from "lucide-react";
@@ -9,6 +9,7 @@ import {
   authorizeWorkspaceDeleteAction,
   deleteWorkspaceAction,
   sendWorkspaceDeleteOtpAction,
+  workspaceDeleteAuthorizedAction,
 } from "@/server/actions/workspace-delete";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +25,24 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 
+// Mirrors CONFIRMATION_NOT_DETECTED_ERROR in src/server/actions/workspace-delete.ts
+// ("use server" files may only export async functions, so the literal is mirrored
+// here instead of imported). The action returns it while the emailed link has not
+// been opened in this browser yet — treat it as "still pending": stay silent and
+// keep polling. Every other error is real and stops the poll.
+const CONFIRMATION_NOT_DETECTED_ERROR = "Email confirmation not detected yet.";
+
+const CONFIRMATION_POLL_MS = 2500;
+
+// Fixed id keeps the success toast from stacking when the ?wsdelete=authorized
+// param handler, the typed-code path and the poll confirm around the same time.
+const CONFIRMATION_SUCCESS_TOAST_ID = "ws-delete-email-confirmed";
+
+type AuthorizedCheckResult =
+  | { status: "authorized" }
+  | { status: "pending" }
+  | { status: "failed"; message: string };
+
 /**
  * "Delete workspace" danger zone (owner only).
  *
@@ -31,7 +50,9 @@ import { Separator } from "@/components/ui/separator";
  *  1. Ownership is proven with a Supabase email OTP sent to the owner's
  *     address — either the emailed link (lands back on /settings?
  *     wsdelete=authorized after /auth/workspace-delete) or the 6-digit code
- *     typed inline (client verifyOtp, then the authorize action).
+ *     typed inline (client verifyOtp, then the authorize action). While
+ *     waiting, this dialog polls the marker cookie, so confirming the link
+ *     in any tab of this same browser advances it automatically.
  *  2. The workspace name must be typed exactly before the destructive action
  *     runs. On success the session is signed out and the user lands on
  *     /login — the workspace and every cascade of its data is gone.
@@ -57,8 +78,93 @@ export function WorkspaceDeleteCard({
   const [emailBusy, setEmailBusy] = useState(false);
   const [codeBusy, setCodeBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [checkingAuthorized, setCheckingAuthorized] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [typedName, setTypedName] = useState("");
+
+  // Poll timer must be cleared when step 2 is reached, the dialog closes, a
+  // probe hits a real error, or the component unmounts — otherwise the
+  // interval leaks and keeps calling the action.
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimer.current) {
+      clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }, []);
+
+  // Shared "ownership confirmed" transition to step 2 (type the name). The
+  // ?wsdelete=authorized param handler, the typed-code path and the poll all
+  // funnel through it, so a race between them stays idempotent: state updates
+  // are no-ops once confirmed and the fixed toast id dedupes the toast.
+  const markConfirmed = useCallback(() => {
+    setConfirmed(true);
+    setOpen(true);
+    toast.success("Email confirmed — type the workspace name to finish deleting.", {
+      id: CONFIRMATION_SUCCESS_TOAST_ID,
+    });
+  }, []);
+
+  // One cheap read-only probe of the marker cookie. Returns an outcome; the
+  // callers decide what to surface ("pending" is normal while the owner has
+  // not opened the emailed link in this browser yet — it is not a failure).
+  const runAuthorizedCheck = useCallback(async (): Promise<AuthorizedCheckResult> => {
+    try {
+      const r = await workspaceDeleteAuthorizedAction();
+      if (r.ok) return { status: "authorized" };
+      if (r.error === CONFIRMATION_NOT_DETECTED_ERROR) return { status: "pending" };
+      return { status: "failed", message: r.error };
+    } catch (err) {
+      return {
+        status: "failed",
+        message: err instanceof Error ? err.message : "Could not check the email confirmation.",
+      };
+    }
+  }, []);
+
+  // While the dialog is on step 1, poll the marker cookie: when the emailed
+  // link is confirmed in ANOTHER tab of this same browser, the
+  // /auth/workspace-delete route sets the cookie here and this dialog
+  // advances on its own. Never polls while a send/verify/delete request is in
+  // flight, and each tick drops its result if its timer was cleared or
+  // replaced while the probe was running (dialog closed, confirmed, unmount).
+  useEffect(() => {
+    if (!open || confirmed || !isOwner || emailBusy || codeBusy || deleting) return;
+
+    const timerId = setInterval(() => {
+      void (async () => {
+        const r = await runAuthorizedCheck();
+        if (pollTimer.current !== timerId) return; // stale tick
+        if (r.status === "authorized") {
+          stopPolling();
+          markConfirmed();
+        } else if (r.status === "failed") {
+          // Real failure — surface it once and stop hammering the action.
+          stopPolling();
+          toast.error(r.message);
+        }
+        // "pending": the link just has not been opened in this browser yet —
+        // stay silent and keep polling.
+      })();
+    }, CONFIRMATION_POLL_MS);
+    pollTimer.current = timerId;
+
+    return () => {
+      if (pollTimer.current === timerId) pollTimer.current = null;
+      clearInterval(timerId);
+    };
+  }, [
+    open,
+    confirmed,
+    isOwner,
+    emailBusy,
+    codeBusy,
+    deleting,
+    markConfirmed,
+    runAuthorizedCheck,
+    stopPolling,
+  ]);
 
   // Handles the return trip from the emailed confirmation link. The param is
   // cleared from the URL so a refresh/back never re-triggers the toast.
@@ -68,14 +174,12 @@ export function WorkspaceDeleteCard({
     if (!status || handledParam.current) return;
     handledParam.current = true;
     if (status === "authorized") {
-      setConfirmed(true);
-      setOpen(true);
-      toast.success("Email confirmed — type the workspace name to finish deleting.");
+      markConfirmed();
     } else if (status === "denied") {
       toast.error("Confirmation failed. Please start the deletion flow again.");
     }
     router.replace("/settings");
-  }, [router, searchParams]);
+  }, [router, searchParams, markConfirmed]);
 
   function openFlow() {
     setConfirmed(false);
@@ -158,12 +262,36 @@ export function WorkspaceDeleteCard({
         toast.error(auth.error);
         return;
       }
-      setConfirmed(true);
-      toast.success("Email confirmed — type the workspace name to finish deleting.");
+      markConfirmed();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not verify the code.");
     } finally {
       setCodeBusy(false);
+    }
+  }
+
+  // Manual fallback for "I opened the link, but this dialog has not advanced":
+  // run the same probe once, right now, instead of waiting for the next poll
+  // tick. Still pending (link not opened in THIS browser) gets a gentle hint —
+  // the poll itself stays silent for that outcome.
+  async function continueAfterLink() {
+    if (checkingAuthorized) return;
+    setCheckingAuthorized(true);
+    try {
+      const r = await runAuthorizedCheck();
+      if (r.status === "authorized") {
+        markConfirmed();
+        return;
+      }
+      if (r.status === "pending") {
+        toast.info(
+          "Confirmation not detected yet — the link must be opened in this same browser. Still stuck? Use the code from the email.",
+        );
+        return;
+      }
+      toast.error(r.message);
+    } finally {
+      setCheckingAuthorized(false);
     }
   }
 
@@ -252,6 +380,12 @@ export function WorkspaceDeleteCard({
                   readOnly
                   autoComplete="off"
                 />
+                <p className="text-xs text-muted-foreground">
+                  The link must be opened in this same browser where you sent the email —
+                  this dialog advances automatically once it&apos;s confirmed, even when
+                  the link opens in another tab. Prefer a code? Enter the 6-digit code
+                  from the email below instead.
+                </p>
               </div>
 
               <Button type="button" onClick={() => void sendEmail()} disabled={emailBusy}>
@@ -284,6 +418,19 @@ export function WorkspaceDeleteCard({
                   </Button>
                 </div>
               </form>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full text-muted-foreground"
+                onClick={() => void continueAfterLink()}
+                disabled={checkingAuthorized || emailBusy || codeBusy}
+              >
+                {checkingAuthorized ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : null}
+                {checkingAuthorized ? "Checking…" : "I clicked the confirmation link — continue"}
+              </Button>
             </>
           ) : (
             <>
