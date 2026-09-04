@@ -1,11 +1,10 @@
 ﻿import { NextResponse, type NextRequest } from "next/server";
 import type { UIMessage } from "ai";
 import { and, eq } from "drizzle-orm";
-import { cookies } from "next/headers";
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
 import { can } from "@/lib/permissions";
-import { getMembership, getSessionUser } from "@/lib/workspace";
+import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -37,8 +36,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
-  const cookieStore = await cookies();
-  const workspaceId = body.workspaceId ?? cookieStore.get("qurtiz_workspace")?.value;
+  const workspaceId = body.workspaceId ?? (await resolveActionWorkspace(user.id));
   if (!workspaceId) {
     return NextResponse.json({ error: "NO_ACTIVE_WORKSPACE" }, { status: 400 });
   }

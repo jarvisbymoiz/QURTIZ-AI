@@ -1,19 +1,20 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandMemory } from "@/db/schema";
 import { addMemorySchema, updateMemorySchema } from "@/lib/validation";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getSessionUser, getMembership, resolveActionWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
+/** Resolved active workspace for the signed-in user (null when they have none). */
 async function activeWorkspaceId(): Promise<string | null> {
-  const cookieStore = await cookies();
-  return cookieStore.get("qurtiz_workspace")?.value ?? null;
+  const user = await getSessionUser();
+  if (!user) return null;
+  return resolveActionWorkspace(user.id);
 }
 
 export async function addMemoryAction(formData: FormData): Promise<ActionResult> {

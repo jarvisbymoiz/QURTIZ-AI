@@ -1,22 +1,18 @@
 ﻿"use server";
 
-import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
-import { getSessionUser, getMembership } from "@/lib/workspace";
+import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
 async function requireThreadIdAccess(threadId: string): Promise<{ ok: true; workspaceId: string } | { ok: false; error: string }> {
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
-  if (!workspaceId) return { ok: false, error: "No active workspace." };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { ok: false, error: "Not a member." };
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
 
   const db = getDb();
   const [thread] = await db
@@ -98,11 +94,8 @@ export type ThreadSearchResult = {
 export async function searchChatsAction(query: string): Promise<{ ok: boolean; results: ThreadSearchResult[] }> {
   const user = await getSessionUser();
   if (!user) return { ok: false, results: [] };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, results: [] };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { ok: false, results: [] };
 
   const clean = query.trim();
   if (clean.length < 2) return { ok: true, results: [] };
@@ -182,11 +175,8 @@ export async function loadThreadsAction(): Promise<{
 }> {
   const user = await getSessionUser();
   if (!user) return { ok: false, threads: [] };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("qurtiz_workspace")?.value;
+  const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, threads: [] };
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { ok: false, threads: [] };
 
   const db = getDb();
   const rows = await db

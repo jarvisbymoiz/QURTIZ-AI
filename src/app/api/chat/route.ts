@@ -14,9 +14,8 @@ import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
-import { cookies } from "next/headers";
 import { and, desc } from "drizzle-orm";
-import { getMembership, getSessionUser } from "@/lib/workspace";
+import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -42,8 +41,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
-  const cookieStore = await cookies();
-  const workspaceId = body.workspaceId ?? cookieStore.get("qurtiz_workspace")?.value;
+  const workspaceId = body.workspaceId ?? (await resolveActionWorkspace(user.id));
   if (!workspaceId) {
     return NextResponse.json({ error: "NO_ACTIVE_WORKSPACE" }, { status: 400 });
   }

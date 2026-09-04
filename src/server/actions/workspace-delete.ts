@@ -8,7 +8,11 @@ import { getDb } from "@/db";
 import { workspaces } from "@/db/schema";
 import { createClient } from "@/lib/supabase/server";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getActiveContext } from "@/lib/workspace";
+import {
+  getActiveContext,
+  getUserWorkspaces,
+  WORKSPACE_COOKIE,
+} from "@/lib/workspace";
 import {
   signWorkspaceDeleteToken,
   verifyWorkspaceDeleteToken,
@@ -204,6 +208,25 @@ export async function deleteWorkspaceAction(input: { workspaceName: string }): P
 
   const db = getDb();
   await db.delete(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+
+  // Stale-cookie healing: when the deleted workspace was this browser's
+  // active workspace, the cookie now points at a workspace that no longer
+  // exists. Re-point it at the user's first remaining workspace —
+  // getUserWorkspaces reflects the post-delete membership list (this
+  // workspace's membership row is gone) — using switchWorkspaceAction's
+  // cookie options. When nothing remains, clear the cookie so onboarding
+  // starts clean.
+  if (cookieStore.get(WORKSPACE_COOKIE)?.value === ctx.workspaceId) {
+    const remaining = await getUserWorkspaces(user.id);
+    if (remaining.length > 0) {
+      cookieStore.set(WORKSPACE_COOKIE, remaining[0].id, {
+        ...COOKIE_OPTIONS,
+        maxAge: 60 * 60 * 24 * 365,
+      });
+    } else {
+      cookieStore.delete(WORKSPACE_COOKIE);
+    }
+  }
 
   cookieStore.set(WORKSPACE_DELETE_COOKIE, "", { ...COOKIE_OPTIONS, maxAge: 0 });
   revalidatePath("/", "layout");

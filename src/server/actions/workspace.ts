@@ -9,7 +9,7 @@ import { brands, platformConnections, workspaceMembers, workspaces } from "@/db/
 import { can, type WorkspaceRole } from "@/lib/permissions";
 import { uniqueSlug } from "@/lib/slug";
 import { createWorkspaceSchema, updateWorkspaceSchema } from "@/lib/validation";
-import { getSessionUser, getMembership, WORKSPACE_COOKIE } from "@/lib/workspace";
+import { getSessionUser, getMembership, resolveActionWorkspace, WORKSPACE_COOKIE } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -96,9 +96,8 @@ export async function updateWorkspaceAction(formData: FormData): Promise<ActionR
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "You must be signed in." };
 
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get(WORKSPACE_COOKIE)?.value;
-  if (!workspaceId) return { ok: false, error: "No active workspace." };
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
 
   const membership = await getMembership(user.id, workspaceId);
   if (!membership || !can(membership.role, "workspace:manage")) {
@@ -140,10 +139,11 @@ export async function requireRoleForActiveWorkspace(
   const user = await getSessionUser();
   if (!user) return { error: "You must be signed in." };
 
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get(WORKSPACE_COOKIE)?.value;
-  if (!workspaceId) return { error: "No active workspace." };
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { error: "Create or join a workspace first." };
 
+  // resolveActionWorkspace only returns workspaces the user belongs to, so
+  // membership is guaranteed; kept as a defensive guard, not a deny path.
   const membership = await getMembership(user.id, workspaceId);
   if (!membership) return { error: "You are not a member of this workspace." };
   if (!can(membership.role, capability)) {

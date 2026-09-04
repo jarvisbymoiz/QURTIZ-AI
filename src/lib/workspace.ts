@@ -119,20 +119,23 @@ export async function getMembership(
 
 /**
  * Shared authorization helper for server actions: resolves the session user
- * and the active workspace (from the workspace cookie), checks membership
- * and the required capability, and returns the workspace timezone (with the
- * app-default Asia/Karachi fallback) for date formatting. On any failure an
- * `{ error }` object is returned — callers must check `"error" in ctx`
- * before using `userId`/`workspaceId`.
+ * and the active workspace via resolveActionWorkspace (cookie workspace when
+ * the user is a member of it, else the user's first workspace — a stale or
+ * foreign cookie can never deny an action on the user's own workspace),
+ * checks membership and the required capability, and returns the workspace
+ * timezone (with the app-default Asia/Karachi fallback) for date formatting.
+ * On any failure an `{ error }` object is returned — callers must check
+ * `"error" in ctx` before using `userId`/`workspaceId`.
  */
 export type ActiveContext = { error: string } | { userId: string; workspaceId: string; timezone: string };
 
 export async function getActiveContext(capability: Capability): Promise<ActiveContext> {
   const user = await getSessionUser();
   if (!user) return { error: "You must be signed in." };
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get(WORKSPACE_COOKIE)?.value;
-  if (!workspaceId) return { error: "No active workspace." };
+  const workspaceId = await resolveActionWorkspace(user.id);
+  if (!workspaceId) return { error: "Create or join a workspace first." };
+  // resolveActionWorkspace only returns workspaces the user belongs to, so
+  // membership is guaranteed; kept as a defensive guard, not a deny path.
   const membership = await getMembership(user.id, workspaceId);
   if (!membership) return { error: "You are not a member of this workspace." };
   if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };

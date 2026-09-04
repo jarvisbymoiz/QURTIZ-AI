@@ -7,6 +7,7 @@ import {
   Camera,
   MessageSquare,
   PenSquare,
+  Share2,
   Sparkles,
   TrendingUp,
 } from "lucide-react";
@@ -43,6 +44,9 @@ export default async function DashboardPage() {
     .select()
     .from(platformConnections)
     .where(eq(platformConnections.workspaceId, ctx.workspace.id));
+  // Buffer-owned rows (provider "buffer") render in their own section below —
+  // the Meta loop must not pick them up as direct Meta connections.
+  const bufferConnections = connections.filter((c) => c.provider === "buffer");
 
   const recentThreads = await db
     .select({ id: chatThreads.id, title: chatThreads.title, updatedAt: chatThreads.updatedAt })
@@ -107,14 +111,16 @@ export default async function DashboardPage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Platform status */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Platform status</CardTitle>
-            <CardDescription>Facebook and Instagram publishing via the official Meta APIs.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {(["facebook", "instagram"] as const).map((platform) => {
-              const conn = connections.find((c) => c.platform === platform);
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Platform status</CardTitle>
+              <CardDescription>
+                Direct Meta API and Buffer connections for Facebook and Instagram publishing.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(["facebook", "instagram"] as const).map((platform) => {
+                const conn = connections.find((c) => c.platform === platform && c.provider !== "buffer");
               const status = conn?.status ?? "not_connected";
               return (
                 <div key={platform} className="flex items-center justify-between rounded-lg border p-3">
@@ -138,6 +144,30 @@ export default async function DashboardPage() {
                   <Badge variant={status === "connected" ? "default" : "secondary"}>
                     {status === "not_connected" ? "Not connected" : status}
                   </Badge>
+                </div>
+              );
+            })}
+            {bufferConnections.map((conn) => {
+              const meta = conn.meta as Record<string, string | undefined>;
+              const channel = meta.bufferUsername || conn.channelRef || "Buffer channel";
+              const connected = conn.status === "connected";
+              return (
+                <div key={conn.id} className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="flex items-center gap-3">
+                    <Share2 className="size-5 text-muted-foreground" aria-hidden />
+                    <div>
+                      <div className="text-sm font-medium">{channel}</div>
+                      <div className="text-xs text-muted-foreground">
+                        Buffer channel — {conn.platform === "facebook" ? "Facebook" : "Instagram"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">Buffer API</Badge>
+                    <Badge variant={connected ? "default" : "secondary"}>
+                      {conn.status === "not_connected" ? "Not connected" : conn.status}
+                    </Badge>
+                  </div>
                 </div>
               );
             })}
