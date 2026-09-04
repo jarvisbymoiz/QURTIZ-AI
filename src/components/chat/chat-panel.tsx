@@ -12,6 +12,7 @@ import {
   CalendarClock,
   CheckCheck,
   ChevronDown,
+  CircleAlert,
   Copy,
   FileText,
   Image as ImageIcon,
@@ -47,9 +48,29 @@ function toolDisplayName(type: string): string {
   return labels[name] ?? name.replaceAll("_", " ");
 }
 
-function ToolActivity({ type, state }: { type: string; state?: string }) {
+function ToolActivity({
+  type,
+  state,
+  streamEnded,
+}: {
+  type: string;
+  state?: string;
+  streamEnded?: boolean;
+}) {
   const name = type.replace(/^tool-/, "");
   const done = state === "output-available";
+  // The stream is over (ready/error) but this tool never reached a terminal
+  // state — e.g. the server restarted mid-stream or the model stalled after
+  // the tool call. Render an honest interrupted state instead of pulsing
+  // forever.
+  if (!done && streamEnded) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <CircleAlert className="size-3.5" aria-hidden />
+        <span>{toolDisplayName(type)} — interrupted (try again)</span>
+      </div>
+    );
+  }
   const icon =
     name === "web_search" ? <Search className="size-3.5" aria-hidden /> :
     name === "schedule_content" ? <CalendarClock className="size-3.5" aria-hidden /> :
@@ -65,8 +86,16 @@ function ToolActivity({ type, state }: { type: string; state?: string }) {
   );
 }
 
-function ToolActivitySummary({ types }: { types: string[] }) {
+function ToolActivitySummary({
+  parts,
+  streamEnded,
+}: {
+  parts: { type: string; state?: string }[];
+  streamEnded: boolean;
+}) {
   const [open, setOpen] = useState(false);
+  const doneCount = parts.filter((p) => p.state === "output-available").length;
+  const allDone = doneCount === parts.length;
   return (
     <div className="rounded-md border bg-muted/30 px-3 py-2">
       <button
@@ -74,14 +103,26 @@ function ToolActivitySummary({ types }: { types: string[] }) {
         className="flex w-full items-center gap-2 text-left text-xs text-muted-foreground"
         onClick={() => setOpen((v) => !v)}
       >
-        <CheckCheck className="size-3.5 text-emerald-500" aria-hidden />
-        Completed {types.length} step{types.length === 1 ? "" : "s"}
+        {allDone ? (
+          <CheckCheck className="size-3.5 text-emerald-500" aria-hidden />
+        ) : (
+          <CircleAlert className="size-3.5" aria-hidden />
+        )}
+        {allDone ? (
+          <span>
+            Completed {parts.length} step{parts.length === 1 ? "" : "s"}
+          </span>
+        ) : (
+          <span>
+            Completed {doneCount} of {parts.length} steps
+          </span>
+        )}
         <ChevronDown className={cn("ml-auto size-3.5 transition-transform", open && "rotate-180")} aria-hidden />
       </button>
       {open ? (
         <div className="mt-2 space-y-1 border-t pt-2">
-          {types.map((t, i) => (
-            <ToolActivity key={i} type={t} state="output-available" />
+          {parts.map((p, i) => (
+            <ToolActivity key={i} type={p.type} state={p.state} streamEnded={streamEnded} />
           ))}
         </div>
       ) : null}
@@ -114,14 +155,17 @@ function FileChip({ part }: { part: { mediaType?: string; url?: string; filename
 
 function MessageBody({
   message,
+  streamEnded,
   onEdit,
 }: {
   message: UIMessage;
+  streamEnded: boolean;
   onEdit?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const toolTypes: string[] = [];
-  for (const p of message.parts ?? []) if (p.type.startsWith("tool-")) toolTypes.push(p.type);
+  const toolParts: { type: string; state?: string }[] = [];
+  for (const p of message.parts ?? [])
+    if (p.type.startsWith("tool-")) toolParts.push({ type: p.type, state: (p as unknown as { state?: string }).state });
 
   async function copyText() {
     const text = (message.parts ?? [])
@@ -135,8 +179,8 @@ function MessageBody({
 
   return (
     <div className="space-y-2">
-      {toolTypes.length > 1 ? (
-        <ToolActivitySummary types={toolTypes} />
+      {toolParts.length > 1 ? (
+        <ToolActivitySummary parts={toolParts} streamEnded={streamEnded} />
       ) : null}
       {(message.parts ?? []).map((part, i) => {
         if (part.type === "text") {
@@ -170,9 +214,9 @@ function MessageBody({
           return <FileChip key={i} part={fp} />;
         }
         if (part.type.startsWith("tool-")) {
-          if (toolTypes.length > 1) return null; // already collapsed
+          if (toolParts.length > 1) return null; // already collapsed
           const tp = part as unknown as { state?: string };
-          return <ToolActivity key={i} type={part.type} state={tp.state} />;
+          return <ToolActivity key={i} type={part.type} state={tp.state} streamEnded={streamEnded} />;
         }
         return null;
       })}
@@ -436,7 +480,11 @@ export function ChatPanel({
                   {!isUser ? (
                     <div className="mb-1.5 text-xs font-semibold text-primary">AI Agent</div>
                   ) : null}
-                  <MessageBody message={m} onEdit={isUser && !busy ? () => startEdit(m) : undefined} />
+                  <MessageBody
+                    message={m}
+                    streamEnded={status === "ready" || status === "error"}
+                    onEdit={isUser && !busy ? () => startEdit(m) : undefined}
+                  />
                 </div>
               </div>
             );

@@ -7,7 +7,7 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
 import { AIConfigError } from "@/lib/ai/provider";
-import { scheduleItem, type ScheduleOutcome } from "@/lib/scheduling/engine";
+import { scheduleItem } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
 import { startBulkPlanCore } from "@/lib/jobs/bulk";
 import { makeWebSearchTool } from "@/lib/ai/search-tool";
@@ -83,10 +83,18 @@ export function buildAgentTools(ctx: AgentToolContext) {
       "Read the Brand Brain for the current workspace: business info, audience, brand voice, visual identity, and content rules.",
     inputSchema: z.object({}),
     execute: async () => {
-      const rows = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
-      const summary = summarizeBrandBrain(rows[0] ?? null);
-      await logStep("get_brand_brain", {}, { summary });
-      return { brandBrain: summary };
+      // A DB failure must surface as a tool result the agent can explain —
+      // never as a throw that breaks the agent stream.
+      try {
+        const rows = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
+        const summary = summarizeBrandBrain(rows[0] ?? null);
+        await logStep("get_brand_brain", {}, { summary });
+        return { brandBrain: summary };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("get_brand_brain", {}, { brandBrain: null, error: message });
+        return { brandBrain: null, error: message };
+      }
     },
   });
 
@@ -95,15 +103,21 @@ export function buildAgentTools(ctx: AgentToolContext) {
       "List the active brand memory entries (preferences, facts, rules) for this workspace.",
     inputSchema: z.object({}),
     execute: async () => {
-      const rows = await db
-        .select()
-        .from(brandMemory)
-        .where(and(eq(brandMemory.workspaceId, ctx.workspaceId), eq(brandMemory.active, true)))
-        .orderBy(desc(brandMemory.createdAt))
-        .limit(50);
-      const memories = rows.map((r) => ({ type: r.type, content: r.content }));
-      await logStep("list_workspace_facts", {}, { memories });
-      return { memories };
+      try {
+        const rows = await db
+          .select()
+          .from(brandMemory)
+          .where(and(eq(brandMemory.workspaceId, ctx.workspaceId), eq(brandMemory.active, true)))
+          .orderBy(desc(brandMemory.createdAt))
+          .limit(50);
+        const memories = rows.map((r) => ({ type: r.type, content: r.content }));
+        await logStep("list_workspace_facts", {}, { memories });
+        return { memories };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("list_workspace_facts", {}, { memories: [], error: message });
+        return { memories: [], error: message };
+      }
     },
   });
 
@@ -115,22 +129,28 @@ export function buildAgentTools(ctx: AgentToolContext) {
       content: z.string().min(3).max(1000).describe("The memory, written as a single clear sentence."),
     }),
     execute: async (input) => {
-      const [row] = await db
-        .insert(brandMemory)
-        .values({
-          workspaceId: ctx.workspaceId,
-          type: input.type,
-          content: input.content,
-          source: "chat",
-          createdBy: ctx.userId,
-        })
-        .returning();
-      await logStep("update_brand_memory", input, { id: row.id });
-      return {
-        saved: true,
-        id: row.id,
-        message: `Saved ${input.type}: "${input.content}". You can view or remove it in Brand Brain → Memory.`,
-      };
+      try {
+        const [row] = await db
+          .insert(brandMemory)
+          .values({
+            workspaceId: ctx.workspaceId,
+            type: input.type,
+            content: input.content,
+            source: "chat",
+            createdBy: ctx.userId,
+          })
+          .returning();
+        await logStep("update_brand_memory", input, { id: row.id });
+        return {
+          saved: true,
+          id: row.id,
+          message: `Saved ${input.type}: "${input.content}". You can view or remove it in Brand Brain → Memory.`,
+        };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("update_brand_memory", input, { saved: false, error: message });
+        return { saved: false, error: message };
+      }
     },
   });
 
@@ -215,62 +235,62 @@ export function buildAgentTools(ctx: AgentToolContext) {
       timezone: z.string().optional().describe("IANA timezone, e.g. Asia/Karachi. Defaults to the workspace timezone."),
     }),
     execute: async (input) => {
-      const db = getDb();
-      const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
-      const tz = input.timezone ?? ws?.timezone ?? "Asia/Karachi";
-      if (!isValidTimezone(tz)) {
-        return { scheduled: false, message: `Unknown timezone "${tz}". Use an IANA timezone such as Asia/Karachi or America/New_York.` };
-      }
-      const dateIso = input.date.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "";
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
-        return { scheduled: false, message: `Invalid date "${input.date}". Use YYYY-MM-DD.` };
-      }
-
-      // Workspace-scoped lookup: items outside this workspace simply don't exist.
-      const [item] = await db
-        .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status })
-        .from(contentItems)
-        .where(and(eq(contentItems.id, input.contentItemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-      if (!item) {
-        await logStep("schedule_content", input, { ok: false });
-        return { scheduled: false, message: "Content item not found in this workspace." };
-      }
-      // H2 guard: only approved or scheduled items can be booked. Drafts and
-      // review items must be approved first; published items are already live.
-      if (!["approved", "scheduled"].includes(item.status)) {
-        await logStep("schedule_content", input, { ok: false });
-        return {
-          scheduled: false,
-          message:
-            item.status === "published"
-              ? "This item is already published and cannot be scheduled again."
-              : "This content is not approved yet — approve it first.",
-        };
-      }
-
-      let result: ScheduleOutcome;
       try {
-        result = await scheduleItem({
+        const db = getDb();
+        const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+        const tz = input.timezone ?? ws?.timezone ?? "Asia/Karachi";
+        if (!isValidTimezone(tz)) {
+          return { scheduled: false, message: `Unknown timezone "${tz}". Use an IANA timezone such as Asia/Karachi or America/New_York.` };
+        }
+        const dateIso = input.date.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
+          return { scheduled: false, message: `Invalid date "${input.date}". Use YYYY-MM-DD.` };
+        }
+
+        // Workspace-scoped lookup: items outside this workspace simply don't exist.
+        const [item] = await db
+          .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status })
+          .from(contentItems)
+          .where(and(eq(contentItems.id, input.contentItemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+        if (!item) {
+          await logStep("schedule_content", input, { ok: false });
+          return { scheduled: false, message: "Content item not found in this workspace." };
+        }
+        // H2 guard: only approved or scheduled items can be booked. Drafts and
+        // review items must be approved first; published items are already live.
+        if (!["approved", "scheduled"].includes(item.status)) {
+          await logStep("schedule_content", input, { ok: false });
+          return {
+            scheduled: false,
+            message:
+              item.status === "published"
+                ? "This item is already published and cannot be scheduled again."
+                : "This content is not approved yet — approve it first.",
+          };
+        }
+
+        const result = await scheduleItem({
           workspaceId: ctx.workspaceId,
           itemId: item.id,
           dateIso,
           timeStr: input.time,
           timezone: tz,
         });
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : "Scheduling failed";
-        return { scheduled: false, message: msg };
-      }
-      await logStep("schedule_content", input, { ok: result.ok, scheduledAt: result.ok ? result.scheduledAt.toISOString() : undefined });
-      if (!result.ok) return { scheduled: false, message: result.message };
+        await logStep("schedule_content", input, { ok: result.ok, scheduledAt: result.ok ? result.scheduledAt.toISOString() : undefined });
+        if (!result.ok) return { scheduled: false, message: result.message };
 
-      const wallClock = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(result.scheduledAt);
-      return {
-        scheduled: true,
-        scheduledAt: result.scheduledAt.toISOString(),
-        variants: result.variants,
-        message: `Scheduled "${item.topic}" for ${dateIso} ${wallClock} (${tz}) across ${result.variants} platform variant${result.variants === 1 ? "" : "s"}.`,
-      };
+        const wallClock = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(result.scheduledAt);
+        return {
+          scheduled: true,
+          scheduledAt: result.scheduledAt.toISOString(),
+          variants: result.variants,
+          message: `Scheduled "${item.topic}" for ${dateIso} ${wallClock} (${tz}) across ${result.variants} platform variant${result.variants === 1 ? "" : "s"}.`,
+        };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("schedule_content", input, { scheduled: false, error: message });
+        return { scheduled: false, message };
+      }
     },
   });
 
@@ -282,19 +302,25 @@ export function buildAgentTools(ctx: AgentToolContext) {
       niche: z.string().max(300).optional().describe("Optional focus for the plan"),
     }),
     execute: async (input) => {
-      const result = await startBulkPlanCore({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        count: input.count,
-        niche: input.niche,
-      });
-      await logStep("bulk_plan", input, { ok: result.ok, jobId: result.ok ? result.jobId : undefined });
-      if (!result.ok) return { queued: false, message: result.error };
-      return {
-        queued: true,
-        jobId: result.jobId,
-        message: "Bulk plan queued. Posts generate in the background and appear in Content Studio as Ready for Review.",
-      };
+      try {
+        const result = await startBulkPlanCore({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          count: input.count,
+          niche: input.niche,
+        });
+        await logStep("bulk_plan", input, { ok: result.ok, jobId: result.ok ? result.jobId : undefined });
+        if (!result.ok) return { queued: false, message: result.error };
+        return {
+          queued: true,
+          jobId: result.jobId,
+          message: "Bulk plan queued. Posts generate in the background and appear in Content Studio as Ready for Review.",
+        };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("bulk_plan", input, { queued: false, error: message });
+        return { queued: false, message };
+      }
     },
   });
 
@@ -302,13 +328,19 @@ export function buildAgentTools(ctx: AgentToolContext) {
     description: "Search the workspace's content library (topics and captions) for existing posts. Use before generating new content to avoid repetition.",
     inputSchema: z.object({ query: z.string().min(2).max(200) }),
     execute: async (input) => {
-      const rows = await db
-        .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status, createdAt: contentItems.createdAt })
-        .from(contentItems)
-        .where(and(eq(contentItems.workspaceId, ctx.workspaceId), ilike(contentItems.topic, "%" + input.query + "%")))
-        .limit(10);
-      await logStep("search_content_library", input, { count: rows.length });
-      return { results: rows.map((r) => ({ id: r.id, topic: r.topic, status: r.status })) };
+      try {
+        const rows = await db
+          .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status, createdAt: contentItems.createdAt })
+          .from(contentItems)
+          .where(and(eq(contentItems.workspaceId, ctx.workspaceId), ilike(contentItems.topic, "%" + input.query + "%")))
+          .limit(10);
+        await logStep("search_content_library", input, { count: rows.length });
+        return { results: rows.map((r) => ({ id: r.id, topic: r.topic, status: r.status })) };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("search_content_library", input, { results: [], error: message });
+        return { results: [], error: message };
+      }
     },
   });
 
@@ -316,17 +348,23 @@ export function buildAgentTools(ctx: AgentToolContext) {
     description: "Get the workspace's measured analytics summary (from synced platform data). Returns totals; zero data when nothing is synced yet.",
     inputSchema: z.object({}),
     execute: async () => {
-      const rows = await db.select().from(postMetrics).where(eq(postMetrics.workspaceId, ctx.workspaceId)).limit(100);
-      const totals = sumTotals(
-        rows.map((r) => ({
-          platform: r.platform,
-          contentItemId: r.contentItemId,
-          metrics: (r.metrics ?? {}) as Record<string, number>,
-          postedAt: r.postedAt,
-        })),
-      );
-      await logStep("get_analytics", {}, { totals });
-      return { totals };
+      try {
+        const rows = await db.select().from(postMetrics).where(eq(postMetrics.workspaceId, ctx.workspaceId)).limit(100);
+        const totals = sumTotals(
+          rows.map((r) => ({
+            platform: r.platform,
+            contentItemId: r.contentItemId,
+            metrics: (r.metrics ?? {}) as Record<string, number>,
+            postedAt: r.postedAt,
+          })),
+        );
+        await logStep("get_analytics", {}, { totals });
+        return { totals };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("get_analytics", {}, { totals: null, error: message });
+        return { totals: null, error: message };
+      }
     },
   });
 
@@ -334,15 +372,21 @@ export function buildAgentTools(ctx: AgentToolContext) {
     description: "Generate a template brand visual for a content item (uses brand colors, logo and the post's copy). Free and instant.",
     inputSchema: z.object({ itemId: z.string().uuid() }),
     execute: async (input) => {
-      const result = await generateVisual({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        contentItemId: input.itemId,
-        mode: "template",
-      });
-      await logStep("generate_visual", input, { ok: result.ok });
-      if (!result.ok) return { generated: false, message: result.message };
-      return { generated: true, message: "Visual generated and attached to the content item." };
+      try {
+        const result = await generateVisual({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          contentItemId: input.itemId,
+          mode: "template",
+        });
+        await logStep("generate_visual", input, { ok: result.ok });
+        if (!result.ok) return { generated: false, message: result.message };
+        return { generated: true, message: "Visual generated and attached to the content item." };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("generate_visual", input, { generated: false, error: message });
+        return { generated: false, message };
+      }
     },
   });
 
@@ -350,14 +394,20 @@ export function buildAgentTools(ctx: AgentToolContext) {
     description: "Approve a content item that is waiting for review. Approved items can then be scheduled.",
     inputSchema: z.object({ itemId: z.string().uuid() }),
     execute: async (input) => {
-      const item = await getItem(ctx.workspaceId, input.itemId);
-      if (!item) return { ok: false, message: "Content item not found." };
-      if (!["ready_for_review", "rejected"].includes(item.status)) {
-        return { ok: false, message: "Only content waiting for review can be approved." };
+      try {
+        const item = await getItem(ctx.workspaceId, input.itemId);
+        if (!item) return { ok: false, message: "Content item not found." };
+        if (!["ready_for_review", "rejected"].includes(item.status)) {
+          return { ok: false, message: "Only content waiting for review can be approved." };
+        }
+        await approveItem(ctx.workspaceId, input.itemId);
+        await logStep("approve_content", input, { ok: true });
+        return { ok: true, message: "Approved. You can schedule it from the Calendar." };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("approve_content", input, { ok: false, error: message });
+        return { ok: false, message };
       }
-      await approveItem(ctx.workspaceId, input.itemId);
-      await logStep("approve_content", input, { ok: true });
-      return { ok: true, message: "Approved. You can schedule it from the Calendar." };
     },
   });
 
@@ -365,14 +415,20 @@ export function buildAgentTools(ctx: AgentToolContext) {
     description: "Reject a content item waiting for review, optionally with a reason. Rejected items can be regenerated.",
     inputSchema: z.object({ itemId: z.string().uuid(), reason: z.string().max(300).optional() }),
     execute: async (input) => {
-      const item = await getItem(ctx.workspaceId, input.itemId);
-      if (!item) return { ok: false, message: "Content item not found." };
-      if (item.status === "published" || item.status === "scheduled") {
-        return { ok: false, message: "Published or scheduled content cannot be rejected." };
+      try {
+        const item = await getItem(ctx.workspaceId, input.itemId);
+        if (!item) return { ok: false, message: "Content item not found." };
+        if (item.status === "published" || item.status === "scheduled") {
+          return { ok: false, message: "Published or scheduled content cannot be rejected." };
+        }
+        await rejectItem(ctx.workspaceId, input.itemId, input.reason ?? null);
+        await logStep("reject_content", input, { ok: true });
+        return { ok: true, message: input.reason ? "Rejected with reason: " + input.reason : "Rejected." };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("reject_content", input, { ok: false, error: message });
+        return { ok: false, message };
       }
-      await rejectItem(ctx.workspaceId, input.itemId, input.reason ?? null);
-      await logStep("reject_content", input, { ok: true });
-      return { ok: true, message: input.reason ? "Rejected with reason: " + input.reason : "Rejected." };
     },
   });
 

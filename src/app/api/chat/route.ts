@@ -130,6 +130,13 @@ export async function POST(request: NextRequest) {
       messages: convertToModelMessages(recent),
       tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
       stopWhen: stepCountIs(6),
+      // Overall safety net for the entire streamed response. A dead SSE
+      // connection (server restart) or a stalled provider step used to leave
+      // the stream open forever — the client pulsed on a non-terminal tool
+      // part indefinitely. 10 minutes is generous beyond any legitimate
+      // tool-heavy chat (bounded content generation is ~≤9 min pathological),
+      // but guarantees the stream can never hang forever.
+      abortSignal: AbortSignal.timeout(600_000),
       // Gemini-only option; other providers (openai-compatible) ignore it.
       ...(textModel.provider === "gemini"
         ? { providerOptions: { google: { thinkingConfig: { includeThoughts: true } } } }
