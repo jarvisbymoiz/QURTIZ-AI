@@ -7,9 +7,11 @@ import {
   buildBufferTokenEnvelope,
   exchangeCode,
   filterSupportedBufferChannels,
+  getOrganizations,
   listChannels,
   logBufferOAuthDiagnostic,
   verifyBufferOAuthState,
+  type BufferChannel,
 } from "@/lib/buffer/client";
 import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
@@ -18,13 +20,15 @@ export const dynamic = "force-dynamic";
 
 /** Buffer OAuth callback (provider="buffer"). Verifies the signed state marker
  *  (workspace + user + PKCE codeVerifier + expiry), exchanges the code, then
- *  upserts one platform_connections row per supported Buffer channel
- *  (facebook/instagram), provider="buffer", with channelRef = Buffer profile id
- *  and the access token stored encrypted inside a JSON envelope. Mirrors the
- *  Meta callback's conventions: session + membership are re-verified before
- *  anything is persisted, and the browser is redirected to /connections with a
- *  status flag. Exchange/channel failures redirect with a sanitized `detail`
- *  param so the Connections toast can pinpoint the failing step. */
+ *  discovers the account via the GraphQL API (account → organizations →
+ *  channels per organization) and upserts one platform_connections row per
+ *  supported Buffer channel (facebook/instagram), provider="buffer", with
+ *  channelRef = Buffer channel id and the access token stored encrypted inside
+ *  a JSON envelope (incl. grantedScopes). Mirrors the Meta callback's
+ *  conventions: session + membership are re-verified before anything is
+ *  persisted, and the browser is redirected to /connections with a status
+ *  flag. Exchange/discovery failures redirect with a sanitized `detail` param
+ *  so the Connections toast can pinpoint the failing step. */
 
 /** Failure detail for the /connections toast: supplementary and sanitized —
  *  control chars stripped, collapsed, 120 chars max. Buffer API failure
@@ -111,17 +115,43 @@ export async function GET(request: NextRequest) {
     const envelope = buildBufferTokenEnvelope(exchanged.data);
     const encrypted = encryptToken(JSON.stringify(envelope));
 
-    const listed = await listChannels(envelope.accessToken);
-    if (!listed.ok) {
-      return failureRedirect(origin, "channels_fetch", listed.message, {
+    // GraphQL discovery: account → organizations → channels per organization.
+    // An account can hold several organizations, so supported facebook/
+    // instagram channels are merged across all of them (multi-org safe).
+    const orgs = await getOrganizations(envelope.accessToken);
+    if (!orgs.ok) {
+      return failureRedirect(origin, "channels_fetch", orgs.message, {
         hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
       });
     }
+    if (orgs.data.length === 0) {
+      logCallbackFailure(origin, "channels_fetch", "no_organization", null, {
+        hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
+      });
+      return NextResponse.redirect(`${origin}/connections?buffer=error&reason=no_organization`);
+    }
 
-    // Buffer holds other services too (twitter/linkedin/pinterest) — this
-    // product only routes facebook/instagram channels into connections.
-    const channels = filterSupportedBufferChannels(listed.data);
-    if (channels.length === 0) {
+    const supported: Array<{
+      channel: BufferChannel & { service: "facebook" | "instagram" };
+      organizationId: string;
+    }> = [];
+    for (const org of orgs.data) {
+      const listed = await listChannels(envelope.accessToken, org.id);
+      if (!listed.ok) {
+        return failureRedirect(origin, "channels_fetch", listed.message, {
+          hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
+        });
+      }
+      // Safe diagnostic per organization: id + supported count only — no
+      // channel payloads.
+      const orgSupported = filterSupportedBufferChannels(listed.data);
+      logBufferOAuthDiagnostic("channels_fetch", { organizationId: org.id, supportedChannels: orgSupported.length });
+      for (const channel of orgSupported) {
+        supported.push({ channel, organizationId: org.id });
+      }
+    }
+
+    if (supported.length === 0) {
       logCallbackFailure(origin, "channels_fetch", "no_supported_channels", null, {
         hasRefreshTokenInEnvelope: Boolean(envelope.refreshToken),
       });
@@ -129,15 +159,13 @@ export async function GET(request: NextRequest) {
     }
 
     const db = getDb();
-    // Buffer's default profile first (then id for determinism), so a
-    // multi-channel account lands on its designated default per service.
-    const ordered = [...channels].sort(
-      (a, b) => Number(Boolean(b.default)) - Number(Boolean(a.default)) || a.id.localeCompare(b.id),
-    );
-
-    for (const channel of ordered) {
-      const platform = channel.service as "facebook" | "instagram";
-      const connMeta = { bufferUsername: channel.username, avatar: channel.avatar ?? null };
+    for (const { channel, organizationId } of supported) {
+      const platform = channel.service;
+      const connMeta = {
+        bufferUsername: channel.username,
+        organizationId,
+        grantedScopes: envelope.grantedScopes ?? null,
+      };
       const [existing] = await db
         .select()
         .from(platformConnections)

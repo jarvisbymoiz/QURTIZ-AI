@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { getEncryptionKey } from "@/lib/crypto/tokens";
 
 /**
- * Buffer OAuth + publish client (auth.buffer.com OAuth2 + Buffer publishing).
+ * Buffer OAuth + publish client (auth.buffer.com OAuth2 + Buffer GraphQL API).
  *
  * Buffer is the interim publishing route until the Meta App Review passes.
  * All URLs are module constants so an endpoint migration stays a one-file change.
@@ -18,10 +18,19 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  *   applyRefreshedToken implement that rotation — callers must persist the
  *   newest envelope or the next refresh will fail.
  * - Publishing is "publish-at-due-time": when a due publishing job fires, the
- *   update is created with `scheduled_at` ≈ now + 60s, so Buffer's free-plan
+ *   post is created via the documented createPost GraphQL mutation with
+ *   `mode: customScheduled` and dueAt ≈ now + 60s, so Buffer's free-plan
  *   queue cap (10 scheduled updates/channel) never accumulates.
- * - Buffer has NO upload endpoint — visuals are attached as publicly
- *   reachable signed URLs (minted fresh at fire time by the buffer provider).
+ * - API transport is Buffer's GraphQL API: EVERY call is a POST to the ROOT of
+ *   api.buffer.com (no /graphql path — this replaced the legacy REST
+ *   profiles.json / updates endpoints and their access_token= query-param
+ *   auth) with a Bearer access token and a { query } JSON body. GraphQL-level
+ *   failures arrive inside a 200 response's errors array, so HTTP 200 never
+ *   implies success.
+ * - createPost has NO documented media input yet — visuals are NOT attached
+ *   (media attach is pending documented API support; callers record
+ *   mediaAttached: false). Status polling returns later via a documented
+ *   getPost query.
  * - HTTP failures map to typed results ({ ok: false, reason, message }).
  *   Raw tokens never appear in errors or logs.
  * - The OAuth `state` marker is a stateless HMAC-signed
@@ -31,12 +40,12 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
 
 /**
  * Buffer endpoint roots. Defaults track Buffer's current hosts: the OAuth
- * authorize dialog and token exchange live on auth.buffer.com, the (still
- * REST-style) v1 API on api.buffer.com. Each value is env-overridable via
- * BUFFER_AUTHORIZE_URL / BUFFER_TOKEN_URL / BUFFER_API_BASE so a live endpoint
- * migration can be validated from .env.local without a code deploy. Empty
- * strings count as unset. NOTE: channel listing still uses profiles.json —
- * the GraphQL migration on api.buffer.com is a later batch.
+ * authorize dialog and token exchange live on auth.buffer.com, the GraphQL
+ * API on api.buffer.com (its ROOT — see bufferGraphQL). Each value is
+ * env-overridable via BUFFER_AUTHORIZE_URL / BUFFER_TOKEN_URL / BUFFER_API_BASE
+ * so a live endpoint change can be validated from .env.local without a code
+ * deploy. Empty strings count as unset. A trailing "/" on BUFFER_API_BASE is
+ * stripped defensively when the URL is composed.
  */
 function bufferEndpoint(name: string, fallback: string): string {
   const value = process.env[name];
@@ -45,7 +54,8 @@ function bufferEndpoint(name: string, fallback: string): string {
 
 export const BUFFER_AUTHORIZE_URL = bufferEndpoint("BUFFER_AUTHORIZE_URL", "https://auth.buffer.com/auth");
 export const BUFFER_TOKEN_URL = bufferEndpoint("BUFFER_TOKEN_URL", "https://auth.buffer.com/token");
-export const BUFFER_API_BASE = bufferEndpoint("BUFFER_API_BASE", "https://api.buffer.com/");
+// GraphQL root — NO path, NO trailing slash (stripped defensively in bufferGraphQL).
+export const BUFFER_API_BASE = bufferEndpoint("BUFFER_API_BASE", "https://api.buffer.com");
 
 /** OAuth scopes requested on the authorize step. `offline_access` makes
  *  auth.buffer.com return a refresh token; refresh tokens are single-use (see
@@ -109,16 +119,17 @@ export type BufferChannel = {
   id: string;
   /** Provider service id, e.g. "facebook" | "instagram" | "twitter" … */
   service: string;
+  /** Channel display name (GraphQL `name`). */
   username: string;
-  avatar?: string | null;
-  default?: boolean;
 };
 
-/** Raw shape of the v1 token.json response (snake_case, API-owned). */
+/** Raw shape of the token endpoint response (snake_case, API-owned). */
 export type BufferTokenResponse = {
   access_token: string;
   refresh_token?: string | null;
   expires_in?: number | null;
+  /** Scope string the authorization server granted (e.g. "posts:read …"). */
+  scope?: string | null;
 };
 
 /** What we persist (encrypted, camelCase) as the connection token envelope. */
@@ -127,6 +138,8 @@ export type BufferTokenEnvelope = {
   refreshToken?: string | null;
   /** Epoch ms, present only when the provider returned expires_in. */
   expiresAt?: number | null;
+  /** Scope string the authorization server granted (null when absent). */
+  grantedScopes?: string | null;
 };
 
 export function buildBufferTokenEnvelope(token: BufferTokenResponse): BufferTokenEnvelope {
@@ -134,6 +147,7 @@ export function buildBufferTokenEnvelope(token: BufferTokenResponse): BufferToke
     accessToken: token.access_token,
     refreshToken: token.refresh_token ?? null,
     expiresAt: token.expires_in != null ? Date.now() + token.expires_in * 1000 : null,
+    grantedScopes: typeof token.scope === "string" && token.scope.length > 0 ? token.scope : null,
   };
 }
 
@@ -145,6 +159,7 @@ export function decodeBufferTokenEnvelope(plain: string): BufferTokenEnvelope | 
       accessToken: parsed.accessToken,
       refreshToken: typeof parsed.refreshToken === "string" ? parsed.refreshToken : null,
       expiresAt: typeof parsed.expiresAt === "number" ? parsed.expiresAt : null,
+      grantedScopes: typeof parsed.grantedScopes === "string" ? parsed.grantedScopes : null,
     };
   } catch {
     return null;
@@ -199,6 +214,21 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
+/** Map an HTTP status to the typed failure reason (shared by the OAuth token
+ *  requests and the GraphQL transport below). */
+function reasonForStatus(status: number): BufferErrorReason {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "invalid_response";
+  return "rejected";
+}
+
+/** Collapse control chars/whitespace and cap the length of a provider-echoed
+ *  message before it is stored or logged (never echoes raw payloads). */
+function sanitizeMessage(raw: string): string {
+  return raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<BufferApiResult<T>> {
   let res: Response;
   try {
@@ -218,21 +248,90 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<BufferAp
     body = null;
   }
   if (!res.ok) {
-    const reason: BufferErrorReason =
-      res.status === 401 || res.status === 403
-        ? "auth"
-        : res.status === 429
-          ? "rate_limited"
-          : res.status >= 500
-            ? "invalid_response"
-            : "rejected";
     return {
       ok: false,
-      reason,
+      reason: reasonForStatus(res.status),
       message: messageOf(body) ?? `Buffer API error (HTTP ${res.status}).`,
     };
   }
   return { ok: true, data: body as T };
+}
+
+/* ── GraphQL transport ────────────────────────────────────────────── */
+
+/** Shape of a GraphQL response body (data + application errors). */
+type GraphQLResponse<T> = { data?: T | null; errors?: Array<{ message?: unknown }> | null };
+
+/**
+ * POST one GraphQL operation to the ROOT of api.buffer.com (no /graphql path)
+ * with a Bearer access token and a { query } JSON body.
+ *
+ * Failures are typed: non-2xx maps through reasonForStatus; a 2xx body with a
+ * non-empty errors array is a GraphQL application error → "rejected" with the
+ * first two sanitized messages (HTTP 200 never implies success). Every call
+ * logs one safe diagnostic line ({ operation, endpoint, status, hasErrors }) —
+ * never tokens or secrets.
+ */
+async function bufferGraphQL<T>(
+  accessToken: string,
+  operation: string,
+  query: string,
+): Promise<BufferApiResult<T>> {
+  const endpoint = BUFFER_API_BASE.replace(/\/+$/, "");
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logBufferOAuthDiagnostic("api", { operation, endpoint, status: null, hasErrors: false });
+    return {
+      ok: false,
+      reason: "network",
+      message: error instanceof Error ? error.message : "Buffer API request failed",
+    };
+  }
+  const text = await res.text();
+  let body: GraphQLResponse<T> | null = null;
+  try {
+    body = text ? (JSON.parse(text) as GraphQLResponse<T>) : null;
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
+    return {
+      ok: false,
+      reason: reasonForStatus(res.status),
+      message: messageOf(body) ?? `Buffer API error (HTTP ${res.status}).`,
+    };
+  }
+  const errors = body && Array.isArray(body.errors) ? body.errors : [];
+  if (errors.length > 0) {
+    logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
+    const joined = errors
+      .slice(0, 2)
+      .map((e) => (e && typeof e.message === "string" ? sanitizeMessage(e.message) : ""))
+      .filter(Boolean)
+      .join("; ");
+    return {
+      ok: false,
+      reason: "rejected",
+      message: joined.length > 0 ? joined : `Buffer ${operation} failed (GraphQL errors).`,
+    };
+  }
+  if (!body || body.data === undefined || body.data === null) {
+    logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: false });
+    return { ok: false, reason: "invalid_response", message: `Buffer ${operation} returned no data.` };
+  }
+  logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: false });
+  return { ok: true, data: body.data };
 }
 
 /* ── PKCE (OAuth2 Authorization Code + PKCE) ─────────────────────── */
@@ -334,7 +433,7 @@ export async function refreshAccessToken(args: {
   return res;
 }
 
-/* ── Channels ─────────────────────────────────────────────────────── */
+/* ── Supported channel services ───────────────────────────────────── */
 
 const SUPPORTED_BUFFER_SERVICES = ["facebook", "instagram"] as const;
 
@@ -353,112 +452,124 @@ export function filterSupportedBufferChannels(
   return channels.filter(isSupportedBufferChannel);
 }
 
-function pickString(record: Record<string, unknown>, keys: string[]): string {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return "";
+/* ── Organizations & channels (GraphQL) ───────────────────────────── */
+
+/** Exact documented operations. Field selections stay minimal (id/name/service
+ *  on channels, id/name on organizations) — do not request undocumented
+ *  fields. JSON.stringify produces a safely escaped GraphQL string literal for
+ *  the interpolated ids/text. */
+const ORGANIZATIONS_QUERY = "query GetOrganizations { account { organizations { id name } } }";
+
+function channelsQuery(organizationId: string): string {
+  return `query GetChannels { channels(input: { organizationId: ${JSON.stringify(organizationId)} }) { id name service } }`;
 }
 
-/** Map one raw channel payload to the product shape. Field fallbacks absorb
- *  v1/v2 naming drift (service ← service|type|service_type, username ←
- *  formatted_username|username|name, avatar ← avatar|profile_image). */
+function createPostMutation(args: { channelId: string; text: string; dueAt: string }): string {
+  return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, schedulingType: automatic, mode: customScheduled, dueAt: ${JSON.stringify(args.dueAt)} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
+}
+
+export type BufferOrganization = { id: string; name: string };
+
+/** List the connected Buffer account's organizations (GraphQL account →
+ *  organizations). An account with zero organizations is ok with []. */
+export async function getOrganizations(
+  accessToken: string,
+): Promise<BufferApiResult<BufferOrganization[]>> {
+  const res = await bufferGraphQL<{ account?: { organizations?: unknown } | null }>(
+    accessToken,
+    "GetOrganizations",
+    ORGANIZATIONS_QUERY,
+  );
+  if (!res.ok) return res;
+  const orgs = res.data.account?.organizations;
+  if (!Array.isArray(orgs)) {
+    return {
+      ok: false,
+      reason: "invalid_response",
+      message: "Buffer organizations query returned an unexpected payload.",
+    };
+  }
+  const mapped: BufferOrganization[] = [];
+  for (const raw of orgs) {
+    if (!isRecord(raw)) continue;
+    const id = typeof raw.id === "string" ? raw.id : "";
+    if (!id) continue;
+    mapped.push({ id, name: typeof raw.name === "string" ? raw.name : "" });
+  }
+  return { ok: true, data: mapped };
+}
+
+/** Map one raw channels[] entry to the product shape — the documented payload
+ *  is exactly { id, name, service } (no avatar or default; those fields were
+ *  a REST-era artifact and are no longer requested). */
 function toChannel(raw: unknown): BufferChannel | null {
   if (!isRecord(raw)) return null;
-  const id = raw.id != null ? String(raw.id) : "";
-  const service = pickString(raw, ["service", "type", "service_type"]);
+  const id = typeof raw.id === "string" && raw.id.length > 0 ? raw.id : "";
+  const service = typeof raw.service === "string" && raw.service.length > 0 ? raw.service : "";
   if (!id || !service) return null;
-  const channel: BufferChannel = { id, service, username: pickString(raw, ["formatted_username", "username", "name"]) };
-  const avatar = pickString(raw, ["avatar", "profile_image"]);
-  if (avatar) channel.avatar = avatar;
-  if (typeof raw.default === "boolean") channel.default = raw.default;
-  return channel;
+  return { id, service, username: typeof raw.name === "string" ? raw.name : "" };
 }
 
-/** List the Buffer account's connected channels (GET profiles.json). The
- *  payload shape has drifted across Buffer API generations, so it is parsed
- *  defensively: a top-level array, { profiles: [...] } or { data: [...] }.
- *  NOTE: intentionally still REST — the GraphQL migration on api.buffer.com
- *  is a later batch (the callback's channels_fetch failure detail is the
- *  live diagnostic until then). */
-export async function listChannels(accessToken: string): Promise<BufferApiResult<BufferChannel[]>> {
-  const url = `${BUFFER_API_BASE}profiles.json?access_token=${encodeURIComponent(accessToken)}`;
-  const res = await requestJson<unknown>(url);
+/** List the channels of ONE organization (GraphQL channels(input:
+ *  { organizationId })). A Buffer account can hold several organizations, so
+ *  the caller iterates orgs and merges supported channels across them. */
+export async function listChannels(
+  accessToken: string,
+  organizationId: string,
+): Promise<BufferApiResult<BufferChannel[]>> {
+  const res = await bufferGraphQL<{ channels?: unknown }>(
+    accessToken,
+    "GetChannels",
+    channelsQuery(organizationId),
+  );
   if (!res.ok) return res;
-  const raw = Array.isArray(res.data)
-    ? res.data
-    : isRecord(res.data) && Array.isArray(res.data.profiles)
-      ? res.data.profiles
-      : isRecord(res.data) && Array.isArray(res.data.data)
-        ? res.data.data
-        : null;
+  const raw = Array.isArray(res.data.channels) ? res.data.channels : null;
   if (!raw) {
-    return { ok: false, reason: "invalid_response", message: "Buffer profiles.json returned an unexpected payload." };
+    return {
+      ok: false,
+      reason: "invalid_response",
+      message: "Buffer channels query returned an unexpected payload.",
+    };
   }
   const channels = raw.map(toChannel).filter((c): c is BufferChannel => c !== null);
   return { ok: true, data: channels };
 }
 
-/* ── Updates ──────────────────────────────────────────────────────── */
+/* ── Posts (GraphQL createPost) ───────────────────────────────────── */
 
-export type BufferUpdateRef = { id: string; status: string };
+export type BufferUpdateRef = { id: string; status: string; dueAt?: string | null };
 
 /**
- * Queue an update on a channel (POST updates/create.json). The media link is
- * a PUBLIC url — Buffer has no upload endpoint. scheduled_at ≈ now + 60s is
- * the publish-at-due-time model (see module header).
+ * Create a scheduled post on one channel via the documented createPost
+ * mutation: schedulingType automatic + mode customScheduled + dueAt (ISO-8601
+ * UTC). dueAt ≈ now + 60s is the publish-at-due-time model (see module
+ * header). The MutationError inline fragment is ALWAYS parsed — Buffer
+ * reports application errors inside a 200 response, so HTTP 200 never implies
+ * success. Media has NO documented input yet (attach pending documented API
+ * support — see module header).
  */
-export async function createUpdate(args: {
-  accessToken: string;
-  channelId: string;
-  text: string;
-  mediaUrl?: string | null;
-  scheduledAt: Date;
-}): Promise<BufferApiResult<BufferUpdateRef>> {
-  const params = new URLSearchParams();
-  params.append("profile_ids[]", args.channelId);
-  params.append("text", args.text);
-  params.append("scheduled_at", args.scheduledAt.toISOString());
-  if (args.mediaUrl) {
-    params.append("media[link]", args.mediaUrl);
-    params.append("media[title]", "");
-    params.append("media[description]", "");
-  }
-  const url = `${BUFFER_API_BASE}updates/create.json?access_token=${encodeURIComponent(args.accessToken)}`;
-  const res = await requestJson<Record<string, unknown>>(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: params,
-  });
+export async function createPost(
+  accessToken: string,
+  args: { channelId: string; text: string; dueAt: Date },
+): Promise<BufferApiResult<BufferUpdateRef>> {
+  const dueAtIso = args.dueAt.toISOString();
+  const res = await bufferGraphQL<{
+    createPost?: { post?: { id?: unknown; dueAt?: unknown } | null; message?: unknown } | null;
+  }>(accessToken, "CreatePost", createPostMutation({ channelId: args.channelId, text: args.text, dueAt: dueAtIso }));
   if (!res.ok) return res;
-  const body = res.data;
-  const updates = Array.isArray(body?.updates) ? body.updates : [];
-  const first = isRecord(updates[0]) ? updates[0] : null;
-  const id = first && typeof first.id === "string" ? first.id : typeof body?.id === "string" ? body.id : null;
+  const payload = res.data.createPost;
+  if (payload && typeof payload.message === "string" && payload.message.length > 0) {
+    return { ok: false, reason: "rejected", message: sanitizeMessage(payload.message) };
+  }
+  const id = payload?.post && typeof payload.post.id === "string" && payload.post.id.length > 0 ? payload.post.id : null;
   if (!id) {
-    return { ok: false, reason: "invalid_response", message: "Buffer accepted the request but returned no update id." };
+    return { ok: false, reason: "rejected", message: "Buffer createPost returned no post." };
   }
-  const status =
-    (first && typeof first.status === "string" ? first.status : null) ??
-    (typeof body?.status === "string" ? body.status : null) ??
-    "queued";
-  return { ok: true, data: { id, status } };
-}
-
-/** Fetch one update's current state (GET updates/{id}.json) — minimal, for
- *  later status checks on queued updates. */
-export async function getUpdate(args: {
-  accessToken: string;
-  updateId: string;
-}): Promise<BufferApiResult<BufferUpdateRef>> {
-  const url = `${BUFFER_API_BASE}updates/${encodeURIComponent(args.updateId)}.json?access_token=${encodeURIComponent(args.accessToken)}`;
-  const res = await requestJson<Record<string, unknown>>(url);
-  if (!res.ok) return res;
-  const body = res.data;
-  const id = typeof body?.id === "string" ? body.id : args.updateId;
-  const status = typeof body?.status === "string" ? body.status : "unknown";
-  return { ok: true, data: { id, status } };
+  const dueAt =
+    payload?.post && typeof payload.post.dueAt === "string" && payload.post.dueAt.length > 0
+      ? payload.post.dueAt
+      : dueAtIso;
+  return { ok: true, data: { id, status: "queued", dueAt } };
 }
 
 /* ── OAuth state marker (stateless, HMAC-signed) ──────────────────── */

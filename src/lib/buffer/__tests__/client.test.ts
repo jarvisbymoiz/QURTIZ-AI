@@ -8,10 +8,12 @@ import {
   applyRefreshedToken,
   buildAuthorizeUrl,
   buildBufferTokenEnvelope,
+  createPost,
   decodeBufferTokenEnvelope,
   exchangeCode,
   filterSupportedBufferChannels,
   generatePkcePair,
+  getOrganizations,
   listChannels,
   pkceChallenge,
   pkceVerifier,
@@ -92,7 +94,7 @@ describe("buffer endpoint constants", () => {
       const mod = await import("@/lib/buffer/client");
       expect(mod.BUFFER_AUTHORIZE_URL).toBe("https://auth.buffer.com/auth");
       expect(mod.BUFFER_TOKEN_URL).toBe("https://auth.buffer.com/token");
-      expect(mod.BUFFER_API_BASE).toBe("https://api.buffer.com/");
+      expect(mod.BUFFER_API_BASE).toBe("https://api.buffer.com");
       expect(mod.BUFFER_OAUTH_SCOPES).toBe("posts:read posts:write account:read offline_access");
     } finally {
       restore();
@@ -347,7 +349,7 @@ describe("buffer OAuth state marker", () => {
 describe("channel filtering", () => {
   const channels: BufferChannel[] = [
     { id: "c1", service: "facebook", username: "Page A" },
-    { id: "c2", service: "instagram", username: "acct_b", default: true },
+    { id: "c2", service: "instagram", username: "acct_b" },
     { id: "c3", service: "twitter", username: "tweet" },
     { id: "c4", service: "pinterest", username: "pin" },
     { id: "c5", service: "instagram", username: "acct_c" },
@@ -364,75 +366,109 @@ describe("channel filtering", () => {
   });
 });
 
+describe("getOrganizations", () => {
+  it("POSTs the documented query to the api root with a Bearer header and maps organizations", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(
+        JSON.stringify({
+          data: { account: { organizations: [{ id: "org-1", name: "Acme" }, { id: "org-2", name: "Globex" }] } },
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await getOrganizations("tok-1");
+    expect(res).toEqual({ ok: true, data: [{ id: "org-1", name: "Acme" }, { id: "org-2", name: "Globex" }] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.buffer.com");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer tok-1");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    const body = JSON.parse(init.body as string);
+    expect(Object.keys(body)).toEqual(["query"]);
+    expect(body.query).toContain("query GetOrganizations");
+    expect(body.query).toContain("account { organizations { id name } }");
+  });
+
+  it("returns ok with an empty list when the account has no organizations", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ data: { account: { organizations: [] } } }), { status: 200 })),
+    );
+    const res = await getOrganizations("tok-1");
+    expect(res).toEqual({ ok: true, data: [] });
+  });
+
+  it("strips a trailing slash from the BUFFER_API_BASE override when composing the URL", async () => {
+    const restore = applyEndpointEnv({ BUFFER_API_BASE: "https://override.example/" });
+    vi.resetModules();
+    try {
+      const mod = await import("@/lib/buffer/client");
+      const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+        void _url;
+        void _init;
+        return new Response(JSON.stringify({ data: { account: { organizations: [] } } }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await mod.getOrganizations("tok-1");
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe("https://override.example");
+    } finally {
+      restore();
+      vi.resetModules();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("maps HTTP 401 to an auth failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "token expired" }), { status: 401 })));
+    const res = await getOrganizations("expired-tok");
+    expect(res).toEqual({ ok: false, reason: "auth", message: "token expired" });
+  });
+});
+
 describe("listChannels", () => {
-  it("parses a top-level array payload", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify([
-              { id: "p1", service: "facebook", formatted_username: "Page A", avatar: "https://example.com/a.png", default: true },
-              { id: "p2", service: "twitter", username: "tweets" },
-            ]),
-            { status: 200 },
-          ),
-      ),
-    );
-    const res = await listChannels("tok-1");
+  it("scopes the query to the organization and maps {id, name, service} to the product shape", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(
+        JSON.stringify({
+          data: {
+            channels: [
+              { id: "c1", name: "Page A", service: "facebook" },
+              { id: "c2", name: "acct_b", service: "instagram" },
+              { id: "t1", name: "tweets", service: "twitter" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await listChannels("tok-1", "org-1");
     expect(res).toEqual({
       ok: true,
       data: [
-        { id: "p1", service: "facebook", username: "Page A", avatar: "https://example.com/a.png", default: true },
-        { id: "p2", service: "twitter", username: "tweets" },
+        { id: "c1", service: "facebook", username: "Page A" },
+        { id: "c2", service: "instagram", username: "acct_b" },
+        { id: "t1", service: "twitter", username: "tweets" },
       ],
     });
-  });
-
-  it("parses a { profiles: [...] } payload with fallback field names", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              profiles: [
-                { id: 1234, type: "instagram", username: "acct_b", profile_image: "https://example.com/b.png" },
-                { id: "c8", service_type: "facebook", name: "Page C" },
-              ],
-            }),
-            { status: 200 },
-          ),
-      ),
-    );
-    const res = await listChannels("tok-1");
-    expect(res).toEqual({
-      ok: true,
-      data: [
-        { id: "1234", service: "instagram", username: "acct_b", avatar: "https://example.com/b.png" },
-        { id: "c8", service: "facebook", username: "Page C" },
-      ],
-    });
-  });
-
-  it("parses a { data: [...] } payload", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              data: [{ id: "c9", service: "instagram", formatted_username: "acct_9", default: false }],
-            }),
-            { status: 200 },
-          ),
-      ),
-    );
-    const res = await listChannels("tok-1");
-    expect(res).toEqual({
-      ok: true,
-      data: [{ id: "c9", service: "instagram", username: "acct_9", default: false }],
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.buffer.com");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer tok-1");
+    const body = JSON.parse(init.body as string);
+    expect(Object.keys(body)).toEqual(["query"]);
+    expect(body.query).toContain("query GetChannels");
+    expect(body.query).toContain("channels(input: { organizationId:");
+    expect(body.query).toContain('"org-1"');
+    expect(body.query).toContain("id name service");
   });
 
   it("drops unparseable entries instead of failing the whole list", async () => {
@@ -441,38 +477,135 @@ describe("listChannels", () => {
       vi.fn(
         async () =>
           new Response(
-            JSON.stringify([{ id: "ok", service: "facebook", username: "Page" }, { id: null, service: "x" }, 42]),
+            JSON.stringify({ data: { channels: [{ id: "ok", name: "Page", service: "facebook" }, { id: null }, 42] } }),
             { status: 200 },
           ),
       ),
     );
-    const res = await listChannels("tok-1");
+    const res = await listChannels("tok-1", "org-1");
     expect(res).toEqual({ ok: true, data: [{ id: "ok", service: "facebook", username: "Page" }] });
   });
 
-  it("returns invalid_response for a 2xx payload that is none of the known shapes", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ foo: "bar" }), { status: 200 })));
-    const res = await listChannels("tok-1");
+  it("returns invalid_response when the 2xx payload has no channels array", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: { foo: "bar" } }), { status: 200 })));
+    const res = await listChannels("tok-1", "org-1");
     expect(res).toEqual({
       ok: false,
       reason: "invalid_response",
-      message: "Buffer profiles.json returned an unexpected payload.",
+      message: "Buffer channels query returned an unexpected payload.",
     });
   });
 
-  it("surfaces HTTP failures as typed results", async () => {
+  it("maps a GraphQL errors array (HTTP 200) to a rejected failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ data: null, errors: [{ message: "Unauthorized" }, { message: "check org id" }] }), {
+            status: 200,
+          }),
+      ),
+    );
+    const res = await listChannels("tok-1", "org-1");
+    expect(res).toEqual({ ok: false, reason: "rejected", message: "Unauthorized; check org id" });
+  });
+
+  it("maps HTTP 401 to an auth failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "token expired" }), { status: 401 })));
-    const res = await listChannels("expired-tok");
+    const res = await listChannels("expired-tok", "org-1");
     expect(res).toEqual({ ok: false, reason: "auth", message: "token expired" });
+  });
+});
+
+describe("createPost", () => {
+  const DUE_AT = new Date("2026-09-04T09:59:00.000Z");
+
+  it("POSTs the documented createPost mutation with schedulingType automatic, mode customScheduled and dueAt", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(
+        JSON.stringify({
+          data: { createPost: { post: { id: "post-1", text: "Hello #tag", dueAt: "2026-09-04T10:00:00.000Z" } } },
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await createPost("tok-1", { channelId: "ch-1", text: "Hello #tag", dueAt: DUE_AT });
+    expect(res).toEqual({
+      ok: true,
+      data: { id: "post-1", status: "queued", dueAt: "2026-09-04T10:00:00.000Z" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.buffer.com");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer tok-1");
+    const body = JSON.parse(init.body as string);
+    expect(Object.keys(body)).toEqual(["query"]);
+    expect(body.query).toContain("mutation CreatePost");
+    expect(body.query).toContain("createPost(input: {");
+    expect(body.query).toContain('"ch-1"');
+    expect(body.query).toContain("schedulingType: automatic");
+    expect(body.query).toContain("mode: customScheduled");
+    expect(body.query).toContain('"2026-09-04T09:59:00.000Z"');
+    expect(body.query).toContain("... on PostActionSuccess { post { id text dueAt } }");
+    expect(body.query).toContain("... on MutationError { message }");
+  });
+
+  it("maps a MutationError payload (HTTP 200) to a rejected failure with its message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ data: { createPost: { message: "Channel not found" } } }), { status: 200 })),
+    );
+    const res = await createPost("tok-1", { channelId: "ch-1", text: "Hello", dueAt: DUE_AT });
+    expect(res).toEqual({ ok: false, reason: "rejected", message: "Channel not found" });
+  });
+
+  it("falls back to the requested dueAt when the success payload omits it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ data: { createPost: { post: { id: "post-2", text: "Hi" } } } }), { status: 200 })),
+    );
+    const res = await createPost("tok-1", { channelId: "ch-1", text: "Hi", dueAt: DUE_AT });
+    expect(res).toEqual({ ok: true, data: { id: "post-2", status: "queued", dueAt: "2026-09-04T09:59:00.000Z" } });
+  });
+
+  it("maps a rejected creation (HTTP 4xx) to a typed failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ message: "validation failed" }), { status: 400 })),
+    );
+    const res = await createPost("tok-1", { channelId: "ch-1", text: "Hi", dueAt: DUE_AT });
+    expect(res).toEqual({ ok: false, reason: "rejected", message: "validation failed" });
   });
 });
 
 describe("token envelope", () => {
   it("encrypts and decrypts an envelope round-trip via tokens.ts (refresh_token survives)", () => {
-    const envelope = { accessToken: "buf-access-token-1", refreshToken: "buf-refresh-token-1", expiresAt: 4102444800000 };
+    const envelope: BufferTokenEnvelope = {
+      accessToken: "buf-access-token-1",
+      refreshToken: "buf-refresh-token-1",
+      expiresAt: 4102444800000,
+      grantedScopes: null,
+    };
     const enc = encryptToken(JSON.stringify(envelope));
     expect(enc).not.toContain("buf-access-token-1");
     expect(enc).not.toContain("buf-refresh-token-1");
+    const dec = decryptToken(enc);
+    expect(dec).not.toBeNull();
+    expect(decodeBufferTokenEnvelope(dec as string)).toEqual(envelope);
+  });
+
+  it("round-trips grantedScopes through encrypt/decrypt", () => {
+    const envelope: BufferTokenEnvelope = {
+      accessToken: "buf-access-token-2",
+      refreshToken: "buf-refresh-token-2",
+      expiresAt: 4102444800000,
+      grantedScopes: "posts:read posts:write account:read offline_access",
+    };
+    const enc = encryptToken(JSON.stringify(envelope));
     const dec = decryptToken(enc);
     expect(dec).not.toBeNull();
     expect(decodeBufferTokenEnvelope(dec as string)).toEqual(envelope);
@@ -494,9 +627,14 @@ describe("token envelope", () => {
     expect((env.expiresAt as number) - after).toBeLessThanOrEqual(3600_000 + 1);
   });
 
-  it("defaults missing refresh_token/expires_in to null", () => {
+  it("copies the token scope into grantedScopes", () => {
+    const env = buildBufferTokenEnvelope({ access_token: "tok", scope: "posts:read posts:write" });
+    expect(env.grantedScopes).toBe("posts:read posts:write");
+  });
+
+  it("defaults missing refresh_token/expires_in/scope to null", () => {
     const env = buildBufferTokenEnvelope({ access_token: "tok" });
-    expect(env).toEqual({ accessToken: "tok", refreshToken: null, expiresAt: null });
+    expect(env).toEqual({ accessToken: "tok", refreshToken: null, expiresAt: null, grantedScopes: null });
   });
 
   it("returns null for malformed envelopes", () => {

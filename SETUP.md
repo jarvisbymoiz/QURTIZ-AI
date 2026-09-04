@@ -114,13 +114,22 @@ permanently with a reconnection prompt.
 4. Publishing jobs snapshot the workspace publishing provider at schedule
    time (`settings` key `publishing` → `{ provider }`; default `meta`). Jobs
    created while a provider is active keep that provider even if it is
-   toggled later. Buffer updates are created at fire time with
-   `scheduled_at` ≈ now + 60s so the free-plan queue cap (10 scheduled
-   updates/channel) never accumulates; visuals attach as fresh signed URLs.
-5. Channel listing still uses Buffer's REST `profiles.json` endpoint; the
-   migration to the GraphQL API on `api.buffer.com` is planned next (until
-   then, a failing channel fetch surfaces a `channels_fetch` detail in the
-   Connections toast and a `[buffer-oauth]` server log line).
+   toggled later. Buffer posts are created at fire time via the documented
+   `createPost` GraphQL mutation (`schedulingType: automatic`,
+   `mode: customScheduled`) with `dueAt` ≈ now + 60s (ISO-8601 UTC) so the
+   free-plan queue cap (10 scheduled updates/channel) never accumulates.
+   The documented mutation has no media input yet — visuals are not
+   attached (the publishing job result records `mediaAttached: false`
+   until Buffer documents media support).
+5. API transport is Buffer's GraphQL API: every call is a
+   `POST https://api.buffer.com` (the root — no `/graphql` path) with
+   `Authorization: Bearer <accessToken>` and a `{ "query": ... }` JSON body.
+   The connect flow discovers `account { organizations }` and then
+   `channels(input: { organizationId })` per organization; publishing uses
+   the `createPost` mutation above. GraphQL-level failures can arrive inside
+   an HTTP 200 `errors` array and are surfaced as rejected publishes /
+   sanitized `detail` params in the Connections toast. Refresh tokens stay
+   single-use and are already rotated + persisted by the publishing worker.
 
 ## Troubleshooting
 

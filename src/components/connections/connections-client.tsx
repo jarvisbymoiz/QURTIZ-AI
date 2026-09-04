@@ -52,6 +52,8 @@ const BUFFER_ERROR_TEXT: Record<string, string> = {
   oauth_invalid: "That Buffer connection link was invalid or expired. Try connecting again.",
   token_exchange: "Buffer rejected the authorization. Try connecting again.",
   channels_fetch: "Buffer authorized, but its channels could not be loaded. Try connecting again.",
+  no_organization:
+    "Buffer account connected, but it has no organizations. Create one in Buffer and reconnect.",
   no_supported_channels:
     "Buffer authorized, but no Facebook or Instagram channels are linked to your Buffer account. Link them inside Buffer, then connect again.",
   oauth_failed: "Buffer connection failed. Try connecting again.",

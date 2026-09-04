@@ -24,7 +24,7 @@ import { QUEUES } from "./boss";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import { publishPost } from "@/lib/meta/publish";
 import { publishViaBuffer } from "@/lib/publish/buffer-provider";
-import { applyRefreshedToken, decodeBufferTokenEnvelope, refreshAccessToken } from "@/lib/buffer/client";
+import { applyRefreshedToken, decodeBufferTokenEnvelope, logBufferOAuthDiagnostic, refreshAccessToken } from "@/lib/buffer/client";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { hasWorkspaceAIConfig } from "@/lib/ai/config";
@@ -283,7 +283,8 @@ function isTransientBufferFailure(reason: string): boolean {
  * atomic claim, honest statuses/attempts/lastError/result + notifications,
  * and the same H2 guards (never post content that is no longer scheduled).
  *
- * Publish model: the update is created NOW with scheduled_at ≈ now + 60s
+ * Publish model: the post is created NOW via Buffer's createPost GraphQL
+ * mutation (mode: customScheduled) with dueAt ≈ now + 60s
  * (publish-at-due-time), so Buffer's free-plan queue cap (10 scheduled
  * updates/channel) never accumulates.
  */
@@ -357,7 +358,10 @@ async function attemptBufferPublish(publishingJobId: string): Promise<void> {
   }
 
   const token = decryptToken(conn.encryptedToken);
-  if (!token) {
+  // The encrypted payload is the JSON token envelope — the real access token
+  // (and the single-use refresh token) ride inside it.
+  const envelope = token ? decodeBufferTokenEnvelope(token) : null;
+  if (!envelope) {
     const reason = "Stored Buffer token could not be decrypted — reconnect the account.";
     await db
       .update(publishingJobs)
@@ -402,23 +406,26 @@ async function attemptBufferPublish(publishingJobId: string): Promise<void> {
     return;
   }
 
+  // Latest visual — recorded in the result as mediaAttached: false when it
+  // exists (the documented createPost mutation has NO media input yet; media
+  // attach is pending documented API support). Same visual lookup as the Meta
+  // path so nothing is silently dropped.
   const [visual] = await db
     .select({ storagePath: visualAssets.storagePath })
     .from(visualAssets)
     .where(eq(visualAssets.contentItemId, variant.contentItemId))
     .orderBy(desc(visualAssets.createdAt))
     .limit(1);
+  const hasVisual = Boolean(visual?.storagePath);
 
   const message = [item?.caption ?? variant.caption, (variant.hashtags ?? []).map((h) => `#${h}`).join(" ")]
     .filter(Boolean)
     .join("\n\n");
 
   let result = await publishViaBuffer({
-    workspaceId: job.workspaceId,
     channelId,
-    accessToken: token,
+    accessToken: envelope.accessToken,
     text: message,
-    visualStoragePath: visual?.storagePath ?? null,
   });
 
   // Single refresh-retry on an auth rejection: Buffer refresh tokens are
@@ -428,8 +435,7 @@ async function attemptBufferPublish(publishingJobId: string): Promise<void> {
   // refresh fails or the envelope carries no refresh token, `result` stays
   // untouched and falls through to the permanent auth-failure handling below.
   if (!result.ok && result.reason === "auth") {
-    const envelope = decodeBufferTokenEnvelope(token);
-    if (envelope?.refreshToken) {
+    if (envelope.refreshToken) {
       const refreshed = await refreshAccessToken({ refreshToken: envelope.refreshToken });
       if (refreshed.ok) {
         const nextEnvelope = applyRefreshedToken(envelope, refreshed.data);
@@ -438,23 +444,38 @@ async function attemptBufferPublish(publishingJobId: string): Promise<void> {
           .set({ encryptedToken: encryptToken(JSON.stringify(nextEnvelope)), updatedAt: new Date() })
           .where(eq(platformConnections.id, conn.id));
         result = await publishViaBuffer({
-          workspaceId: job.workspaceId,
           channelId,
           accessToken: nextEnvelope.accessToken,
           text: message,
-          visualStoragePath: visual?.storagePath ?? null,
         });
       }
     }
   }
 
   if (result.ok) {
-    // Buffer accepted the update — it is queued and will fire ~now + 60s.
+    // Buffer accepted the post — it is queued and will fire ~now + 60s. The
+    // documented createPost mutation has no media input yet, so a variant
+    // visual is NOT attached; record that honestly in the result + log line
+    // instead of dropping it silently (media attach pending documented API
+    // support).
+    if (hasVisual) {
+      logBufferOAuthDiagnostic("publish", {
+        operation: "createPost",
+        channelId,
+        mediaAttached: false,
+        note: "buffer media attach pending documented API support",
+      });
+    }
     await db
       .update(publishingJobs)
       .set({
         status: "published",
-        result: { updateId: result.updateId, status: result.status, scheduledAt: result.scheduledAt.toISOString() },
+        result: {
+          updateId: result.updateId,
+          status: result.status,
+          scheduledAt: result.scheduledAt.toISOString(),
+          ...(hasVisual ? { mediaAttached: false } : {}),
+        },
         updatedAt: new Date(),
       })
       .where(eq(publishingJobs.id, job.id));
