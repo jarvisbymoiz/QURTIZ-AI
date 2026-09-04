@@ -9,6 +9,7 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { brands } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 
 export const trendsSchema = z.object({
   trendingTopics: z.array(z.object({
@@ -90,6 +91,14 @@ Reply ONLY with JSON: {"trendingTopics":[{"topic","why"}],"visualDirections":[{"
     ? prompt + "\n\nLive search context (use it):\n" + pre
     : prompt + "\n\nNote: no live search available — base suggestions on your knowledge and label nothing as live data.";
 
-  const result = await generateObject({ model, schema, prompt: finalPrompt, maxOutputTokens: 2048 });
+  const result = await generateObject({
+    model,
+    schema,
+    prompt: finalPrompt,
+    maxOutputTokens: 2048,
+    // Bounded: a stalled provider request aborts instead of hanging the caller.
+    abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+    maxRetries: 1,
+  });
   return { ok: true, trends: result.object, sourced };
 }

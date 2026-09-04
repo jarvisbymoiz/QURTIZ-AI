@@ -7,6 +7,7 @@ import { getDb } from "@/db";
 import { aiInsights, contentItems, postMetrics } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { rateLimit } from "@/lib/security/rate-limit";
@@ -102,6 +103,9 @@ export async function runPerformanceAnalysisAction(): Promise<ActionResult & { i
 Data (JSON): ${JSON.stringify(summary)}
 Rules: reference the actual numbers; label estimates as estimates; no generic advice; format each insight as one line starting with "- ".`,
       maxOutputTokens: 1024,
+      // Bounded: a stalled provider request aborts instead of hanging the action.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     });
 
     const db = getDb();

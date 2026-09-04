@@ -15,6 +15,7 @@ import {
 } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
 import { sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { refreshCompetitor } from "@/lib/competitors/discovery";
@@ -236,6 +237,9 @@ Top research opportunities: ${JSON.stringify(topResearch)}
 Competitor analyses: ${JSON.stringify(competitorRows)}
 Our measured strategy: ${strategyRows[0]?.content ?? "(not enough data yet)"}`,
       maxOutputTokens: 768,
+      // Bounded: a stalled provider request aborts instead of hanging the action.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     });
     const [row] = await db
       .insert(aiInsights)

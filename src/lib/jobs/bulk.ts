@@ -16,7 +16,7 @@ import {
   researchItems,
   workspaces,
 } from "@/db/schema";
-import { generateAndPersistContent } from "@/lib/ai/content";
+import { generateAndPersistContent, AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { withRateLimitRetry } from "@/lib/ai/provider";
@@ -188,6 +188,9 @@ Create a plan for exactly ${count} DISTINCT social media posts. Rules:
 - Respect all brand rules and memory.
 Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}`,
         maxOutputTokens: 3072,
+        // Bounded: a stalled provider request aborts instead of hanging the job.
+        abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+        maxRetries: 1,
       }),
     );
 

@@ -5,6 +5,7 @@ import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, researchItems } from "@/db/schema";
 import { estimateCostFromUsage, AIConfigError, type ResolvedTextModel } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
 import { overallOpportunity } from "@/lib/ai/scores";
 import { topicScoresSchema } from "@/lib/ai/research-types";
@@ -135,6 +136,10 @@ Research content opportunities: trending angles, audience questions, content gap
         ? `${userPrompt}\n\nUse this live web context (cite only URLs from it):\n${grounded.map((s) => `- ${s.title}: ${s.url}`).join("\n")}`
         : userPrompt,
       maxOutputTokens: 4096,
+      // Bounded: a stalled provider request aborts instead of hanging the
+      // caller forever; SDK-internal retries capped at 1 on top.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     });
 
     try {

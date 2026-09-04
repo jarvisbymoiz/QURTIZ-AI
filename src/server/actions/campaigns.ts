@@ -8,6 +8,7 @@ import { getDb } from "@/db";
 import { campaigns, campaignItems, jobs } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 
@@ -87,6 +88,9 @@ CTA: ${d.cta || "(brand default)"}
 Days: one entry per day 1..${d.durationDays}. Classic arc: announcement, problem, benefits, demonstration, social proof, urgency, final reminder (adapt to the duration).
 Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
       maxOutputTokens: 2048,
+      // Bounded: a stalled provider request aborts instead of hanging the action.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     });
     const stripped = res.text.replace(/```json|```/g, "").trim();
     const start = stripped.indexOf("[");

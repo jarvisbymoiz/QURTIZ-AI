@@ -6,6 +6,7 @@ import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { AIConfigError } from "@/lib/ai/provider";
 import { scheduleItem, type ScheduleOutcome } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
 import { startBulkPlanCore } from "@/lib/jobs/bulk";
@@ -24,6 +25,33 @@ export type AgentToolContext = {
   userId: string;
   runId: string;
 };
+
+/**
+ * Human-readable message for a failed tool execution, safe to hand back to
+ * the agent as a tool result. AIConfigError carries its own user-facing
+ * detail; anything else is the error message, defensively scrubbed of
+ * key-like strings and capped at 300 chars. Rate-limit/timeout failures get
+ * an actionable hint instead of a dead end.
+ */
+function formatAgentToolError(error: unknown): string {
+  let message =
+    error instanceof AIConfigError
+      ? error.detail
+      : error instanceof Error
+        ? error.message
+        : "The operation failed.";
+  // Defensive scrub: never surface anything resembling a credential.
+  message = message.replace(
+    /\b(?:sk|rk|pk|ghp|gho)-[A-Za-z0-9_-]{8,}\b|Bearer\s+\S+|api[_-]?key\s*[=:]\s*\S+/gi,
+    "[redacted]",
+  );
+  if (message.length > 300) message = message.slice(0, 300) + "…";
+  if (/\b429\b|rate[\s-]?limit|time[\s-]?out|timed out|abort/i.test(message)) {
+    message +=
+      " (The configured AI model is rate-limited or stalled — try again or switch to a non-free model in AI Configuration.)";
+  }
+  return message;
+}
 
 /**
  * Build the M1 agent tool set. All tools are read / internal-write only —
@@ -115,24 +143,32 @@ export function buildAgentTools(ctx: AgentToolContext) {
       objective: z.string().max(300).optional().describe("e.g. engagement, leads, sales"),
     }),
     execute: async (input) => {
-      const { itemId, qa } = await generateAndPersistContent({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        input: {
-          topic: input.topic,
-          objective: input.objective ?? null,
-          platforms: input.platforms,
-          preferredFormat: null,
-        },
-      });
-      await logStep("create_content", input, { itemId, qaScore: qa.score });
-      return {
-        created: true,
-        itemId,
-        qaScore: qa.score,
-        qaIssues: qa.issues,
-        message: `Content created (QA ${qa.score}/100) and saved to Content Studio as ${qa.passed ? "Ready for Review" : "Draft (QA issues found)"}.`,
-      };
+      // A failed generation must surface as a tool result the agent can
+      // explain to the user — never as a throw that breaks the agent stream.
+      try {
+        const { itemId, qa } = await generateAndPersistContent({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          input: {
+            topic: input.topic,
+            objective: input.objective ?? null,
+            platforms: input.platforms,
+            preferredFormat: null,
+          },
+        });
+        await logStep("create_content", input, { itemId, qaScore: qa.score });
+        return {
+          created: true,
+          itemId,
+          qaScore: qa.score,
+          qaIssues: qa.issues,
+          message: `Content created (QA ${qa.score}/100) and saved to Content Studio as ${qa.passed ? "Ready for Review" : "Draft (QA issues found)"}.`,
+        };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("create_content", input, { created: false, error: message });
+        return { created: false, error: message };
+      }
     },
   });
 
@@ -144,20 +180,28 @@ export function buildAgentTools(ctx: AgentToolContext) {
       notes: z.string().max(1000).optional().describe("Optional focus from the user"),
     }),
     execute: async (input) => {
-      const result = await researchTopics({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        niche: input.niche,
-        notes: input.notes ?? null,
-      });
-      await logStep("research_niche", input, { ok: result.ok, count: result.ok ? result.count : undefined });
-      if (!result.ok) return { found: false, message: result.message };
-      return {
-        found: true,
-        count: result.count,
-        sourced: result.sourced,
-        message: `${result.count} opportunities saved to the Research Lab${result.sourced ? " with live web sources" : " (AI estimates — no live sources on current plan)"}.`,
-      };
+      // Research failures surface as a tool result the agent can explain —
+      // never as a throw that breaks the agent stream.
+      try {
+        const result = await researchTopics({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          niche: input.niche,
+          notes: input.notes ?? null,
+        });
+        await logStep("research_niche", input, { ok: result.ok, count: result.ok ? result.count : undefined });
+        if (!result.ok) return { found: false, message: result.message };
+        return {
+          found: true,
+          count: result.count,
+          sourced: result.sourced,
+          message: `${result.count} opportunities saved to the Research Lab${result.sourced ? " with live web sources" : " (AI estimates — no live sources on current plan)"}.`,
+        };
+      } catch (error) {
+        const message = formatAgentToolError(error);
+        await logStep("research_niche", input, { found: false, error: message });
+        return { found: false, message };
+      }
     },
   });
 

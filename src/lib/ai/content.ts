@@ -10,6 +10,14 @@ import { runContentQa, type QaResult } from "@/lib/content/qa";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import type { ContentRulesInput } from "@/lib/validation";
 
+/**
+ * Hard ceiling for one structured AI generation call. OpenRouter free-tier
+ * models can stall in provider queueing/rate caps indefinitely; without an
+ * abortSignal a hung request awaits forever and the calling workflow (chat
+ * tool, bulk job) sticks. Fail fast instead of hanging.
+ */
+export const AI_GENERATION_TIMEOUT_MS = 120_000;
+
 export const generatedContentSchema = z.object({
   hook: z.string().describe("Scroll-stopping opening line"),
   mainCopy: z.string().describe("Core message body shared across platforms"),
@@ -167,6 +175,10 @@ Produce one variant per target platform.`;
       schema: generatedContentSchema,
       system,
       prompt,
+      // Bounded: a stalled provider request aborts instead of hanging the
+      // caller forever; SDK-internal retries capped at 1 on top.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     }),
   );
 

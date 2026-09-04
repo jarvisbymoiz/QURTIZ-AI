@@ -7,6 +7,7 @@ import { decryptToken } from "@/lib/crypto/tokens";
 import { GRAPH_HOST, GRAPH_VERSION } from "@/lib/meta/oauth";
 import { generateText } from "ai";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 
 export type CompetitorFetchResult =
   | { ok: true; analysis: string }
@@ -106,6 +107,9 @@ Our summary: ${ctx.ourSummary}
 Our measured totals: ${ctx.ourTotalsSummary}
 Format: "Strengths: ...\\nWeaknesses: ...\\nOpportunities: ..." each item on its own line starting with "- ".`,
       maxOutputTokens: 768,
+      // Bounded: a stalled provider request aborts instead of hanging the sync.
+      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      maxRetries: 1,
     });
     analysis = res2.text;
   } catch {
