@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   ArrowUp,
+  Ban,
   Brain,
   CalendarClock,
   CheckCheck,
@@ -19,7 +20,9 @@ import {
   Paperclip,
   Pencil,
   PenSquare,
+  RotateCcw,
   Search,
+  Square,
   TrendingUp,
   Megaphone,
   X,
@@ -29,10 +32,22 @@ import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/chat/markdown";
+import { chatRunMetadataOf, type ChatRunStatusResponse } from "@/lib/ai/chat-run";
 
 const MAX_FILE_MB = 9;
 // How long the conversation scrollbar stays visible after the last scroll event.
 const SCROLL_HIDE_DELAY_MS = 600;
+
+/**
+ * Resolved truth for rendering tool activity on an assistant message.
+ * - live:      the run is still streaming (pulsing rows are real)
+ * - completed: the run finished (metadata or reconnect fetch) — a tool part
+ *              that never reached a terminal state is a display artifact of
+ *              the ended stream, NOT an interruption
+ * - failed:    the run failed (metadata runStatus/reconnect) — show why
+ * - cancelled: the user stopped the run
+ */
+type ToolTruth = "live" | "completed" | "failed" | "cancelled";
 
 function toolDisplayName(type: string): string {
   const name = type.replace(/^tool-/, "");
@@ -51,50 +66,113 @@ function toolDisplayName(type: string): string {
 function ToolActivity({
   type,
   state,
-  streamEnded,
+  truth,
+  errorText,
 }: {
   type: string;
   state?: string;
-  streamEnded?: boolean;
+  truth: ToolTruth;
+  errorText?: string | null;
 }) {
   const name = type.replace(/^tool-/, "");
+  const label = toolDisplayName(type);
   const done = state === "output-available";
-  // The stream is over (ready/error) but this tool never reached a terminal
-  // state — e.g. the server restarted mid-stream or the model stalled after
-  // the tool call. Render an honest interrupted state instead of pulsing
-  // forever.
-  if (!done && streamEnded) {
+  // A tool-level error is terminal for THIS tool (the agent keeps going with
+  // non-blocking tool failures) — always rendered as the failure it is.
+  const errored = state === "output-error";
+
+  if (errored) {
     return (
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <CircleAlert className="size-3.5" aria-hidden />
-        <span>{toolDisplayName(type)} — interrupted (try again)</span>
+      <div className="flex items-start gap-2 text-xs text-muted-foreground">
+        <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+        <span>
+          {label} — failed
+          {errorText ? <span className="block text-destructive/90">{errorText}</span> : null}
+        </span>
       </div>
     );
   }
-  const icon =
-    name === "web_search" ? <Search className="size-3.5" aria-hidden /> :
-    name === "schedule_content" ? <CalendarClock className="size-3.5" aria-hidden /> :
-    name === "create_content" ? <PenSquare className="size-3.5" aria-hidden /> :
-    name === "research_niche" ? <TrendingUp className="size-3.5" aria-hidden /> :
-    name === "update_brand_memory" ? <Brain className="size-3.5" aria-hidden /> :
-    <Brain className="size-3.5" aria-hidden />;
+  if (done) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <CheckCheck className="size-3.5" aria-hidden />
+        <span>{label}</span>
+      </div>
+    );
+  }
+  // Non-terminal tool part. Truth decides — never a guessed "interrupted".
+  if (truth === "live") {
+    const icon =
+      name === "web_search" ? <Search className="size-3.5" aria-hidden /> :
+      name === "schedule_content" ? <CalendarClock className="size-3.5" aria-hidden /> :
+      name === "create_content" ? <PenSquare className="size-3.5" aria-hidden /> :
+      name === "research_niche" ? <TrendingUp className="size-3.5" aria-hidden /> :
+      name === "update_brand_memory" ? <Brain className="size-3.5" aria-hidden /> :
+      <Brain className="size-3.5" aria-hidden />;
+    return (
+      <div className="flex items-center gap-2 text-xs animate-pulse text-primary">
+        {icon}
+        <span>{label}…</span>
+      </div>
+    );
+  }
+  if (truth === "cancelled") {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Ban className="size-3.5" aria-hidden />
+        <span>{label} — stopped</span>
+      </div>
+    );
+  }
+  if (truth === "failed") {
+    return (
+      <div className="flex items-start gap-2 text-xs text-muted-foreground">
+        <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+        <span>
+          {label} — failed
+          {errorText ? <span className="block text-destructive/90">{errorText}</span> : null}
+        </span>
+      </div>
+    );
+  }
+  // truth === "completed": the run finished successfully; render the dangling
+  // part as the muted completed step it counts as.
   return (
-    <div className={cn("flex items-center gap-2 text-xs", done ? "text-muted-foreground" : "animate-pulse text-primary")}>
-      {done ? <CheckCheck className="size-3.5" aria-hidden /> : icon}
-      <span>{toolDisplayName(type)}{done ? "" : "…"}</span>
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <CheckCheck className="size-3.5" aria-hidden />
+      <span>{label}</span>
     </div>
   );
 }
 
+/** Classify one tool part into its truthful render state. */
+function classifyPart(
+  state: string | undefined,
+  truth: ToolTruth,
+): "completed" | "failed" | "stopped" | "live" {
+  if (state === "output-available") return "completed";
+  if (state === "output-error") return "failed";
+  if (truth === "live") return "live";
+  if (truth === "cancelled") return "stopped";
+  if (truth === "failed") return "failed";
+  return "completed";
+}
+
 function ToolActivitySummary({
   parts,
-  streamEnded,
+  truth,
+  runError,
 }: {
   parts: { type: string; state?: string }[];
-  streamEnded: boolean;
+  truth: ToolTruth;
+  runError?: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  const doneCount = parts.filter((p) => p.state === "output-available").length;
+  const classified = parts.map((p) => classifyPart(p.state, truth));
+  const doneCount = classified.filter((c) => c === "completed").length;
+  const failedCount = classified.filter((c) => c === "failed").length;
+  const stoppedCount = classified.filter((c) => c === "stopped").length;
+  const liveCount = classified.filter((c) => c === "live").length;
   const allDone = doneCount === parts.length;
   return (
     <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -105,12 +183,28 @@ function ToolActivitySummary({
       >
         {allDone ? (
           <CheckCheck className="size-3.5 text-emerald-500" aria-hidden />
+        ) : failedCount > 0 ? (
+          <CircleAlert className="size-3.5 text-destructive" aria-hidden />
+        ) : stoppedCount > 0 ? (
+          <Ban className="size-3.5" aria-hidden />
         ) : (
           <CircleAlert className="size-3.5" aria-hidden />
         )}
         {allDone ? (
           <span>
             Completed {parts.length} step{parts.length === 1 ? "" : "s"}
+          </span>
+        ) : failedCount > 0 ? (
+          <span>
+            Completed {doneCount} of {parts.length} steps — {failedCount} failed
+          </span>
+        ) : stoppedCount > 0 ? (
+          <span>
+            Stopped after {doneCount} of {parts.length} steps
+          </span>
+        ) : liveCount > 0 ? (
+          <span>
+            Working — {doneCount} of {parts.length} steps done
           </span>
         ) : (
           <span>
@@ -122,7 +216,7 @@ function ToolActivitySummary({
       {open ? (
         <div className="mt-2 space-y-1 border-t pt-2">
           {parts.map((p, i) => (
-            <ToolActivity key={i} type={p.type} state={p.state} streamEnded={streamEnded} />
+            <ToolActivity key={i} type={p.type} state={p.state} truth={truth} errorText={classified[i] === "failed" ? runError : null} />
           ))}
         </div>
       ) : null}
@@ -155,11 +249,13 @@ function FileChip({ part }: { part: { mediaType?: string; url?: string; filename
 
 function MessageBody({
   message,
-  streamEnded,
+  truth,
+  runError,
   onEdit,
 }: {
   message: UIMessage;
-  streamEnded: boolean;
+  truth: ToolTruth;
+  runError?: string | null;
   onEdit?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -180,7 +276,7 @@ function MessageBody({
   return (
     <div className="space-y-2">
       {toolParts.length > 1 ? (
-        <ToolActivitySummary parts={toolParts} streamEnded={streamEnded} />
+        <ToolActivitySummary parts={toolParts} truth={truth} runError={runError} />
       ) : null}
       {(message.parts ?? []).map((part, i) => {
         if (part.type === "text") {
@@ -215,8 +311,17 @@ function MessageBody({
         }
         if (part.type.startsWith("tool-")) {
           if (toolParts.length > 1) return null; // already collapsed
-          const tp = part as unknown as { state?: string };
-          return <ToolActivity key={i} type={part.type} state={tp.state} streamEnded={streamEnded} />;
+          const tp = part as unknown as { state?: string; errorText?: string };
+          return (
+            <ToolActivity
+              key={i}
+              type={part.type}
+              state={tp.state}
+              truth={truth}
+              // Tool-level error text wins; the run error explains run-level failures.
+              errorText={tp.errorText ?? (tp.state === "output-error" || truth === "failed" ? runError : null)}
+            />
+          );
         }
         return null;
       })}
@@ -251,6 +356,9 @@ export function ChatPanel({
   const [attachments, setAttachments] = useState<File[]>([]);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const persistedCount = useRef(initialMessages.length);
+  // Persist generation: bumped when the tail is replaced (retry) so an
+  // in-flight persist of the replaced turn cannot clobber the rollback.
+  const persistGen = useRef(0);
   const currentThreadId = useRef<string | null>(threadId);
   const persisting = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -259,6 +367,13 @@ export function ChatPanel({
   const [atBottom, setAtBottom] = useState(true);
   const [scrolling, setScrolling] = useState(false);
   const [editingText, setEditingText] = useState("");
+  const [stopping, setStopping] = useState(false);
+  // Reconnect-to-truth: backend status fetched once per runId (via
+  // /api/chat/run/[runId]) for messages whose stream ended without terminal
+  // metadata — cancelled runs, dropped streams, legacy rows.
+  const fetchedRuns = useRef<Set<string>>(new Set());
+  const fetchingRuns = useRef<Set<string>>(new Set());
+  const [runTruths, setRunTruths] = useState<Record<string, ChatRunStatusResponse>>({});
 
   const { messages, sendMessage, status, error, stop, regenerate, setMessages } = useChat({
     id: currentThreadId.current ?? "new-chat",
@@ -316,12 +431,16 @@ export function ChatPanel({
     };
   }, []);
 
-  // Persist new messages after a completed turn.
+  // Persist new messages after a terminal turn — success ("ready") AND
+  // failure ("error"): the complete UIMessage (all parts incl. tool
+  // inputs/outputs and the runId/runStatus metadata) is sent as-is, so
+  // reloaded threads re-render tools in their real states.
   useEffect(() => {
-    if (status !== "ready" || persisting.current) return;
+    if ((status !== "ready" && status !== "error") || persisting.current) return;
     const newMessages = messages.slice(persistedCount.current);
     if (newMessages.length === 0) return;
 
+    const gen = persistGen.current;
     persisting.current = true;
     (async () => {
       try {
@@ -336,6 +455,7 @@ export function ChatPanel({
         });
         if (!res.ok) throw new Error("persist failed");
         const data = (await res.json()) as { threadId: string };
+        if (gen !== persistGen.current) return; // tail replaced while posting
         persistedCount.current = messages.length;
         if (!currentThreadId.current && data.threadId) {
           currentThreadId.current = data.threadId;
@@ -348,6 +468,36 @@ export function ChatPanel({
       }
     })();
   }, [status, messages, workspaceId, router]);
+
+  // Reconnect-to-truth: whenever the panel is idle (stream ended, errored,
+  // or a reloaded thread), resolve any message whose run metadata is still
+  // "running" against the backend. This is what renders the real outcome for
+  // cancelled runs and dropped streams — the foundation Batch 2 resume
+  // builds on.
+  useEffect(() => {
+    if (status === "submitted" || status === "streaming") return;
+    for (const m of messages) {
+      const meta = chatRunMetadataOf(m);
+      if (!meta || meta.runStatus !== "running") continue;
+      if (fetchedRuns.current.has(meta.runId) || fetchingRuns.current.has(meta.runId)) continue;
+      fetchingRuns.current.add(meta.runId);
+      fetch(`/api/chat/run/${meta.runId}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error("run status unavailable");
+          const data = (await res.json()) as ChatRunStatusResponse;
+          fetchedRuns.current.add(meta.runId);
+          setRunTruths((prev) => ({ ...prev, [meta.runId]: data }));
+        })
+        .catch(() => {
+          // One attempt per runId; the tool rows keep the muted completed
+          // default rather than guessing a failure.
+          fetchedRuns.current.add(meta.runId);
+        })
+        .finally(() => {
+          fetchingRuns.current.delete(meta.runId);
+        });
+    }
+  }, [status, messages]);
 
   async function handleSend(e?: React.FormEvent) {
     e?.preventDefault();
@@ -394,6 +544,89 @@ export function ChatPanel({
   }
 
   const busy = status === "submitted" || status === "streaming";
+
+  useEffect(() => {
+    if (!busy) setStopping(false);
+  }, [busy]);
+
+  // The live run id arrives with the stream's start event (message metadata),
+  // so Stop can target the backend run immediately.
+  const liveRunId = busy
+    ? chatRunMetadataOf(messages[messages.length - 1])?.runId ?? null
+    : null;
+
+  // Real cancellation: abort the server-side run (tools stop, run marked
+  // cancelled), then stop the local stream. The stale "running" metadata on
+  // the message is resolved against /api/chat/run/[runId] right after.
+  async function handleStop() {
+    if (!busy || stopping) return;
+    setStopping(true);
+    try {
+      if (liveRunId) {
+        await fetch("/api/chat/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runId: liveRunId }),
+        });
+      }
+    } catch {
+      // Cancel endpoint unavailable — still stop the local stream.
+    }
+    stop();
+  }
+
+  // Retry a failed run: re-submits the original user text via regenerate.
+  // The tail is replaced, so roll the persisted cursor back to the retried
+  // message and bump the generation so an in-flight persist of the failed
+  // turn cannot clobber the rollback. Failed runs insert no content_items,
+  // so re-running cannot duplicate anything.
+  function retryLast() {
+    if (busy) return;
+    const last = messages[messages.length - 1];
+    if (!last) return;
+    persistGen.current += 1;
+    if (last.role === "assistant") {
+      // The failed assistant message is replaced by the retry's response.
+      persistedCount.current = messages.length - 1;
+      void regenerate({ messageId: last.id });
+    } else {
+      // Error before any assistant response — the (already persisted) user
+      // message stays; the retry's response becomes the new tail.
+      persistedCount.current = messages.length;
+      void regenerate();
+    }
+  }
+
+  // Truthful run outcome for an assistant message (drives tool rendering).
+  function resolveRunTruth(m: UIMessage, isLive: boolean): { truth: ToolTruth; error: string | null } {
+    if (isLive) return { truth: "live", error: null };
+    const meta = chatRunMetadataOf(m);
+    if (meta) {
+      if (meta.runStatus === "failed") return { truth: "failed", error: meta.runError ?? null };
+      if (meta.runStatus === "cancelled") return { truth: "cancelled", error: meta.runError ?? null };
+      if (meta.runStatus === "completed") return { truth: "completed", error: null };
+      // Stale "running": the stream ended before terminal metadata arrived.
+      const fetched = runTruths[meta.runId];
+      if (fetched) {
+        if (fetched.status === "failed") return { truth: "failed", error: fetched.error };
+        if (fetched.status === "cancelled") return { truth: "cancelled", error: fetched.error };
+        // Still running server-side (e.g. the tab dropped mid-run) — the
+        // pulsing rows are real; Batch 2 resume picks this up.
+        return { truth: fetched.status === "running" ? "live" : "completed", error: null };
+      }
+    }
+    // No run metadata (legacy rows) or fetch still in flight: default to the
+    // completed rendering — never a guessed failure.
+    return { truth: "completed", error: null };
+  }
+
+  // Backend truth for the errored live run (reconnect banner).
+  const errorRunTruth = (() => {
+    if (status !== "error") return null;
+    const last = messages[messages.length - 1];
+    const meta = chatRunMetadataOf(last);
+    return meta ? runTruths[meta.runId] ?? null : null;
+  })();
 
   // The AI SDK surfaces the chat route's JSON error body as the raw message
   // text; parse it so the human `message` field (e.g. "AI is not configured
@@ -462,8 +695,12 @@ export function ChatPanel({
       ) : (
         <div ref={scrollRef} onScroll={handleScroll}
           className={cn("relative flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin scroll-autohide", scrolling && "scroll-active")}>
-          {messages.map((m) => {
+          {messages.map((m, i) => {
             const isUser = m.role === "user";
+            const isLiveMessage = !isUser && busy && i === messages.length - 1;
+            const { truth, error: runError } = resolveRunTruth(m, isLiveMessage);
+            const canRetry =
+              !isUser && !busy && truth === "failed" && i === messages.length - 1;
             return (
               <div key={m.id} data-uid={m.id} className={cn("flex gap-3", isUser && "justify-end")}>
                 {!isUser ? (
@@ -482,9 +719,18 @@ export function ChatPanel({
                   ) : null}
                   <MessageBody
                     message={m}
-                    streamEnded={status === "ready" || status === "error"}
+                    truth={truth}
+                    runError={runError}
                     onEdit={isUser && !busy ? () => startEdit(m) : undefined}
                   />
+                  {canRetry ? (
+                    <div className="mt-2">
+                      <Button size="sm" variant="outline" onClick={retryLast}>
+                        <RotateCcw className="size-3.5" aria-hidden />
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );
@@ -492,7 +738,7 @@ export function ChatPanel({
           {status === "submitted" ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="size-2 animate-pulse rounded-full bg-primary" aria-hidden />
-              AI Agent is thinking…
+              {stopping ? "Stopping…" : "AI Agent is thinking…"}
             </div>
           ) : null}
         </div>
@@ -510,12 +756,35 @@ export function ChatPanel({
       ) : null}
 
       {error ? (
-        <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 p-3">
-          <p className="flex items-center gap-2 text-sm text-destructive">
-            <AlertTriangle className="size-4" aria-hidden />
-            {errorText}
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <p className="flex items-start gap-2 text-sm text-destructive">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            {errorRunTruth ? (
+              errorRunTruth.status === "completed" ? (
+                <span>
+                  The connection dropped, but the run completed on the server — any created content is saved.
+                  {errorRunTruth.steps.length > 0 ? (
+                    <span className="block text-xs text-muted-foreground">
+                      Steps: {errorRunTruth.steps.map((s) => s.name).join(", ")}
+                    </span>
+                  ) : null}
+                </span>
+              ) : errorRunTruth.status === "cancelled" ? (
+                <span>The run was cancelled.</span>
+              ) : (
+                <span>
+                  Run failed
+                  {errorRunTruth.steps.length > 0
+                    ? ` at ${errorRunTruth.steps[errorRunTruth.steps.length - 1].name}`
+                    : ""}
+                  {errorRunTruth.error ? `: ${errorRunTruth.error}` : "."}
+                </span>
+              )
+            ) : (
+              errorText
+            )}
           </p>
-          <Button size="sm" variant="outline" onClick={() => regenerate()}>Retry</Button>
+          <Button size="sm" variant="outline" className="shrink-0" onClick={retryLast}>Retry</Button>
         </div>
       ) : null}
 
@@ -601,8 +870,15 @@ export function ChatPanel({
           aria-label="Message"
         />
         {busy ? (
-          <Button type="button" size="icon" variant="outline" onClick={() => stop()} aria-label="Stop generating">
-            <span className="size-2.5 rounded bg-foreground" aria-hidden />
+          <Button
+            type="button"
+            size="icon"
+            variant="outline"
+            onClick={() => { void handleStop(); }}
+            disabled={stopping}
+            aria-label={stopping ? "Stopping…" : "Stop generating"}
+          >
+            <Square className="size-3 fill-current" aria-hidden />
           </Button>
         ) : (
           <Button type="submit" size="icon" disabled={!input.trim() && attachments.length === 0} aria-label="Send message">

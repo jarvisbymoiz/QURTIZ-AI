@@ -14,6 +14,7 @@ import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
+import { isRunRegistered, registerRunController, unregisterRunController } from "@/lib/ai/run-registry";
 import { and, desc } from "drizzle-orm";
 import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
@@ -106,6 +107,11 @@ export async function POST(request: NextRequest) {
     .values({ workspaceId, userId: user.id, kind: "chat", model: textModel.modelId })
     .returning();
 
+  // Real cancellation: the cancel route aborts this controller, which trips
+  // the combined abort signal below (user cancel OR the 600s safety cap).
+  const cancelController = new AbortController();
+  registerRunController(run.id, cancelController);
+
   const system = buildSystemPrompt({
     brandSummary: summarizeBrandBrain(brandRow ?? null),
     memories,
@@ -130,21 +136,42 @@ export async function POST(request: NextRequest) {
       messages: convertToModelMessages(recent),
       tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
       stopWhen: stepCountIs(6),
-      // Overall safety net for the entire streamed response. A dead SSE
+      // Overall safety net for the entire streamed response, combined with
+      // the user-cancel signal (AbortSignal.any — Node 22). A dead SSE
       // connection (server restart) or a stalled provider step used to leave
       // the stream open forever — the client pulsed on a non-terminal tool
       // part indefinitely. 10 minutes is generous beyond any legitimate
       // tool-heavy chat (bounded content generation is ~≤9 min pathological),
       // but guarantees the stream can never hang forever.
-      abortSignal: AbortSignal.timeout(600_000),
+      abortSignal: AbortSignal.any([cancelController.signal, AbortSignal.timeout(600_000)]),
       // Gemini-only option; other providers (openai-compatible) ignore it.
       ...(textModel.provider === "gemini"
         ? { providerOptions: { google: { thinkingConfig: { includeThoughts: true } } } }
         : {}),
+      // On abort the SDK never calls onFinish — this is the only terminal
+      // bookkeeping for cancelled/timed-out runs. A user cancel removes the
+      // registry entry before aborting; a still-registered run means the
+      // 600s safety cap (or another non-user abort) tripped.
+      onAbort: () => {
+        const userCancelled = !isRunRegistered(run.id);
+        unregisterRunController(run.id);
+        void db
+          .update(agentRuns)
+          .set({
+            status: userCancelled ? "cancelled" : "failed",
+            error: userCancelled ? "Run cancelled by user" : "Generation timed out (600s safety cap)",
+            finishedAt: new Date(),
+          })
+          .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")))
+          .catch(() => {
+            // Never let run bookkeeping break the response.
+          });
+      },
       onError: (error) => {
         streamError = error instanceof Error ? error.message : "Provider stream error";
       },
       onFinish: async ({ usage, finishReason }) => {
+        unregisterRunController(run.id);
         try {
           const failed = finishReason === "error" || streamError !== null;
           await db
@@ -159,16 +186,39 @@ export async function POST(request: NextRequest) {
               finishedAt: new Date(),
               error: failed ? streamError ?? "Generation failed (finishReason=error)" : null,
             })
-            .where(eq(agentRuns.id, run.id));
+            .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")));
         } catch {
           // Never let run bookkeeping break the response.
         }
       },
     });
 
-    return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse({
+      // Run truth for the client: runId arrives with the stream `start` event
+      // (so Stop can target the run immediately), and the terminal status
+      // rides the `finish` event — persisted with the message so reloaded
+      // threads render tools in their real states instead of guessing.
+      // (User cancellation ends the stream with an `abort` part and no
+      // finish event; the client resolves that stale "running" metadata
+      // against /api/chat/run/[runId].)
+      messageMetadata: ({ part }) => {
+        if (part.type === "start") {
+          return { runId: run.id, runStatus: "running" as const };
+        }
+        if (part.type === "finish") {
+          const failed = part.finishReason === "error" || streamError !== null;
+          return {
+            runId: run.id,
+            runStatus: failed ? ("failed" as const) : ("completed" as const),
+            ...(failed ? { runError: streamError ?? "Generation failed (finishReason=error)" } : {}),
+          };
+        }
+        return undefined;
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown provider error";
+    unregisterRunController(run.id);
     try {
       await db
         .update(agentRuns)

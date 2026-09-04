@@ -179,6 +179,12 @@ function buildRequestBody(args: {
   // JSON mode: schema-aware servers can be targeted later; every
   // OpenAI-compatible server implements json_object at minimum.
   if (o.responseFormat?.type === "json") body.response_format = { type: "json_object" };
+  if (args.stream) {
+    // Standard OpenAI field that makes the server report token usage in the
+    // final stream chunk (OpenAI, OpenRouter, vLLM, Groq, ... all support
+    // it). Without it usage — and therefore cost bookkeeping — stays null.
+    body.stream_options = { include_usage: true };
+  }
   return body;
 }
 
@@ -311,6 +317,14 @@ export function createOpenAICompatibleModel(opts: {
  * Parse an SSE byte stream from /chat/completions into V2 stream parts.
  * Honest terminal behavior: a truncated stream ends with finishReason
  * "error" instead of pretending success.
+ *
+ * Tool calls: tool-input-start/delta are streamed for the UI, and a terminal
+ * `tool-call` part (with the accumulated arguments) is emitted for every tool
+ * state before the finish part. The terminal tool-call part is what tells
+ * streamText to actually EXECUTE the tool — without it the call dangles as a
+ * UI-only "input-streaming" fragment, no tool ever runs, and the run still
+ * finishes "completed" (the exact bug that froze chat tool parts and produced
+ * false "interrupted" states for every openai-compatible provider).
  */
 function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<LanguageModelV2StreamPart> {
   const decoder = new TextDecoder();
@@ -322,7 +336,8 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
   let startedReasoning = false;
   const toolStates = new Map<number, { id: string; name: string; args: string; started: boolean }>();
   let usage: LanguageModelV2Usage = { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined };
-  let emittedFinish = false;
+  let finishReason: string | null = null;
+  let sawDone = false;
   let streamError: string | null = null;
 
   function push(controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>, part: LanguageModelV2StreamPart) {
@@ -333,6 +348,12 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
     }
   }
 
+  /**
+   * Close every open tool state: end the streamed input and emit the
+   * terminal `tool-call` part so the SDK executes the tool. Partial/malformed
+   * arguments stay honest — streamText flags them as an invalid tool call and
+   * feeds the error back to the model instead of executing them.
+   */
   function flushToolStates(controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>) {
     for (const st of toolStates.values()) {
       if (!st.started) {
@@ -340,8 +361,28 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
         if (st.args) push(controller, { type: "tool-input-delta", id: st.id, delta: st.args });
       }
       push(controller, { type: "tool-input-end", id: st.id });
+      push(controller, {
+        type: "tool-call",
+        toolCallId: st.id,
+        toolName: st.name || "function",
+        input: st.args || "{}",
+      });
     }
     toolStates.clear();
+  }
+
+  function pushTerminal(controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>) {
+    flushToolStates(controller);
+    if (startedReasoning) push(controller, { type: "reasoning-end", id: reasoningId });
+    if (startedText) push(controller, { type: "text-end", id: textId });
+    if (finishReason !== null) {
+      push(controller, { type: "finish", finishReason: mapFinishReason(finishReason), usage });
+    } else {
+      // Stream ended without a finish_reason (truncated / server closed early).
+      streamError = "Provider stream ended unexpectedly (no finish_reason received).";
+      push(controller, { type: "error", error: streamError });
+      push(controller, { type: "finish", finishReason: "error", usage });
+    }
   }
 
   return new ReadableStream<LanguageModelV2StreamPart>({
@@ -358,7 +399,11 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
             for (const line of rawEvent.split("\n")) {
               if (!line.startsWith("data:")) continue;
               const data = line.slice(5).trim();
-              if (!data || data === "[DONE]") continue;
+              if (data === "[DONE]") {
+                sawDone = true;
+                break;
+              }
+              if (!data) continue;
               let chunk: {
                 choices?: { delta?: Record<string, unknown>; finish_reason?: string }[];
                 usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
@@ -402,17 +447,15 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
                   if (tc.id) st.id = tc.id;
                   if (st.started) {
                     if (tc.function?.arguments) {
+                      st.args += tc.function.arguments;
                       push(controller, { type: "tool-input-delta", id: st.id, delta: tc.function.arguments });
                     }
                   } else if (tc.function?.name) {
                     st.name = tc.function.name;
                     push(controller, { type: "tool-input-start", id: st.id, toolName: st.name });
                     st.started = true;
-                    if (st.args) {
-                      push(controller, { type: "tool-input-delta", id: st.id, delta: st.args });
-                      st.args = "";
-                    }
                     if (tc.function.arguments) {
+                      st.args += tc.function.arguments;
                       push(controller, { type: "tool-input-delta", id: st.id, delta: tc.function.arguments });
                     }
                   } else if (tc.function?.arguments) {
@@ -423,29 +466,17 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
               }
 
               const fr = chunk.choices?.[0]?.finish_reason;
-              if (fr) {
-                if (chunk.usage) usage = readUsage({ usage: chunk.usage });
-                flushToolStates(controller);
-                if (startedReasoning) push(controller, { type: "reasoning-end", id: reasoningId });
-                if (startedText) push(controller, { type: "text-end", id: textId });
-                push(controller, { type: "finish", finishReason: mapFinishReason(fr), usage });
-                emittedFinish = true;
-                break;
-              }
+              if (fr && finishReason === null) finishReason = fr;
+              // Usage can arrive with the finish chunk, or (with
+              // stream_options.include_usage) in a trailing usage-only chunk
+              // after it — keep reading until [DONE] / end of stream.
+              if (chunk.usage) usage = readUsage({ usage: chunk.usage });
             }
-            if (emittedFinish) break;
+            if (sawDone) break;
           }
-          if (emittedFinish) break;
+          if (sawDone) break;
         }
-        // Stream ended without a finish part (truncated / server closed early).
-        if (!emittedFinish) {
-          streamError = "Provider stream ended unexpectedly (no finish_reason received).";
-          push(controller, { type: "error", error: streamError });
-          flushToolStates(controller);
-          if (startedReasoning) push(controller, { type: "reasoning-end", id: reasoningId });
-          if (startedText) push(controller, { type: "text-end", id: textId });
-          push(controller, { type: "finish", finishReason: "error", usage });
-        }
+        pushTerminal(controller);
         controller.close();
       } catch (error) {
         streamError = error instanceof Error ? error.message : "Provider stream error";

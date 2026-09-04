@@ -1,5 +1,6 @@
 ﻿import { NextResponse, type NextRequest } from "next/server";
 import type { UIMessage } from "ai";
+import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
@@ -8,6 +9,25 @@ import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/wor
 import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
+
+// Validate the envelope while keeping every part INTACT: tool inputs/outputs,
+// reasoning, file parts, and message metadata (runId/runStatus run truth) all
+// pass through untouched — reloaded threads must re-render tools in their
+// real terminal states. Unknown fields are preserved (passthrough), only the
+// structural minimum is enforced.
+const persistedMessageSchema = z
+  .object({
+    id: z.string().min(1),
+    role: z.enum(["system", "user", "assistant"]),
+    parts: z.array(z.unknown()),
+  })
+  .passthrough();
+
+const persistBodySchema = z.object({
+  threadId: z.string().uuid().nullable().optional(),
+  workspaceId: z.string().uuid().optional(),
+  messages: z.array(persistedMessageSchema).min(1).max(100),
+});
 
 function textOf(message: UIMessage): string {
   return (message.parts ?? [])
@@ -29,12 +49,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
 
-  const body = (await request.json().catch(() => null)) as
-    | { threadId?: string | null; workspaceId?: string; messages?: UIMessage[] }
-    | null;
-  if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
+  const parsed = persistBodySchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
+  // Envelope validated above; parts are intentionally kept opaque (passthrough)
+  // so tool outputs and run metadata survive persistence untouched.
+  const body = parsed.data as unknown as {
+    threadId?: string | null;
+    workspaceId?: string;
+    messages: UIMessage[];
+  };
 
   const workspaceId = body.workspaceId ?? (await resolveActionWorkspace(user.id));
   if (!workspaceId) {
