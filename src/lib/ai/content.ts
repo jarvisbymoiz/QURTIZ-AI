@@ -1,9 +1,9 @@
-﻿import { generateObject } from "ai";
+﻿import { generateObject, generateText, NoObjectGeneratedError, type LanguageModelUsage } from "ai";
 import { z } from "zod";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brandMemory, brands, contentItems, contentVariants } from "@/db/schema";
-import { estimateCostFromUsage, withRateLimitRetry } from "@/lib/ai/provider";
+import { estimateCostFromUsage, withRateLimitRetry, type ResolvedTextModel } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
@@ -18,23 +18,61 @@ import type { ContentRulesInput } from "@/lib/validation";
  */
 export const AI_GENERATION_TIMEOUT_MS = 120_000;
 
+/**
+ * Tolerant field helpers: weak models (OpenRouter free tier) omit fields,
+ * send null, or drift on enum values. Each helper maps such input to
+ * `undefined` so Zod's `.default()` applies instead of failing the whole
+ * object during validation.
+ */
+function tolerantString(defaultValue: string) {
+  return z.preprocess(
+    (v) => (typeof v === "string" ? v : undefined),
+    z.string().default(defaultValue),
+  );
+}
+
+function tolerantStringArray(defaultValue: string[]) {
+  return z.preprocess(
+    (v) => (Array.isArray(v) ? v : undefined),
+    z.array(z.string()).default(defaultValue),
+  );
+}
+
+const CONTENT_FORMATS = ["single_image", "carousel", "reel", "story", "text_post"] as const;
+
+/**
+ * Format is mapped AFTER parse: models drift on format naming ("video",
+ * "post", …) and one unknown value must not fail the whole response —
+ * unknown values fall back to "single_image" here, so post-parse the field
+ * is always a valid DB enum value.
+ */
+function tolerantFormat() {
+  return z.preprocess(
+    (v) => (CONTENT_FORMATS.includes(v as (typeof CONTENT_FORMATS)[number]) ? v : undefined),
+    z.enum(CONTENT_FORMATS).default("single_image"),
+  );
+}
+
 export const generatedContentSchema = z.object({
-  hook: z.string().describe("Scroll-stopping opening line"),
-  mainCopy: z.string().describe("Core message body shared across platforms"),
-  cta: z.string().describe("Call to action, consistent with brand rules"),
-  firstComment: z.string().describe("A first comment the brand should post under its own content: adds hashtags/extra context/CTA link. Keep it natural, 1-2 sentences."),
-  hashtags: z.array(z.string()).max(15).describe("Hashtags without the # symbol"),
-  keywords: z.array(z.string()).max(10).describe("SEO/keyword terms covered"),
-  visualConcept: z.string().describe("Description of the visual to create"),
-  relevanceScore: z.number().min(0).max(10),
-  engagementScore: z.number().min(0).max(10),
+  hook: z.string().min(1).describe("Scroll-stopping opening line"),
+  mainCopy: z.string().min(1).describe("Core message body shared across platforms"),
+  cta: tolerantString("").describe("Call to action, consistent with brand rules"),
+  firstComment: tolerantString("").describe("A first comment the brand should post under its own content: adds hashtags/extra context/CTA link. Keep it natural, 1-2 sentences."),
+  hashtags: z.array(z.string()).min(1).max(15).describe("Hashtags without the # symbol"),
+  keywords: tolerantStringArray([]).describe("SEO/keyword terms covered"),
+  visualConcept: tolerantString("").describe("Description of the visual to create"),
+  // Scores are intentionally unbounded in the schema and clamped in code
+  // (clampAiScore): strict min/max only gives weak models another way to
+  // fail validation.
+  relevanceScore: z.number().optional().describe("Estimated relevance, 0-10"),
+  engagementScore: z.number().optional().describe("Estimated engagement, 0-10"),
   variants: z.array(
     z.object({
       platform: z.enum(["facebook", "instagram"]),
-      format: z.enum(["single_image", "carousel", "reel", "story", "text_post"]),
-      caption: z.string().describe("Platform-adapted caption. Reels get shorter, punchier captions."),
-      hashtags: z.array(z.string()).max(15),
-      cta: z.string(),
+      format: tolerantFormat(),
+      caption: z.string().min(1).describe("Platform-adapted caption. Reels get shorter, punchier captions."),
+      hashtags: tolerantStringArray([]),
+      cta: tolerantString(""),
       script: z
         .object({
           hook: z.string().optional(),
@@ -51,6 +89,7 @@ export const generatedContentSchema = z.object({
           outro: z.string().optional(),
           totalDuration: z.union([z.literal(10), z.literal(20), z.literal(30), z.literal(60)]).optional(),
         })
+        .optional()
         .describe("For reel format: complete scene-by-scene script with voiceover, visual direction, on-screen text, transitions and timing. Empty object otherwise."),
       slides: z
         .array(
@@ -76,6 +115,217 @@ export type GenerateContentInput = {
   toneOverride?: string | null;
   visualStyleHint?: string | null;
 };
+
+/* ── Response parsing: lenient extract → parse → validate ──────────────── */
+
+/**
+ * Response-shape diagnostics for a model response that could not be turned
+ * into valid content. Deliberately excludes the raw model text — it can be
+ * large and must never leak into tool results or logs.
+ */
+export type ContentParseDiagnostics = {
+  rawLength: number;
+  hadFence: boolean;
+  hadBraces: boolean;
+  issues: string;
+};
+
+/**
+ * Thrown when the primary structured-output call AND both bounded fallbacks
+ * fail to produce a valid GeneratedContent. Carries only a short
+ * response-shape summary — never the full model text.
+ */
+export class AIContentParseError extends Error {
+  readonly diagnostics: ContentParseDiagnostics;
+  constructor(diagnostics: ContentParseDiagnostics) {
+    super(
+      `The AI model's response could not be parsed into a valid post even after retries ` +
+        `(raw length ${diagnostics.rawLength}, ${diagnostics.hadFence ? "markdown-fenced" : "unfenced"}, ` +
+        `${diagnostics.hadBraces ? "contained a JSON object" : "no JSON object"}): ${diagnostics.issues}`,
+    );
+    this.name = "AIContentParseError";
+    this.diagnostics = diagnostics;
+  }
+}
+
+/**
+ * Pull a brace-delimited JSON candidate out of raw model output: strip an
+ * outer markdown fence, then take the substring from the first "{" to the
+ * last "}". Returns null when the text contains no brace-delimited object —
+ * arbitrary prose is never handed to JSON.parse.
+ */
+export function extractJsonCandidate(raw: string): string | null {
+  let text = raw.trim();
+  // Strip an outer ```json … ``` / ``` … ``` fence; tolerate prose that
+  // follows the closing fence.
+  const fenced = text.match(/^```[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)\r?\n```/);
+  if (fenced) text = fenced[1].trim();
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first === -1 || last <= first) return null;
+  return text.slice(first, last + 1);
+}
+
+/**
+ * Clamp an AI-estimated score onto the app's 0–10 scale — the Studio UI
+ * renders these as "X/10" (studio-client.tsx, post-workspace.tsx) and the
+ * previous schema enforced min(0).max(10). Garbage/missing values fall back
+ * to 7 instead of failing the whole item over a score.
+ */
+export function clampAiScore(value: number | undefined): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return 7;
+  return Math.max(0, Math.min(10, value));
+}
+
+/**
+ * Validate an unknown value against the content schema. On success the data
+ * is normalized (scores clamped) so callers never see out-of-range or
+ * missing scores. Zod issues are flattened to a ≤400-char string.
+ */
+export function validateGeneratedContent(
+  candidate: unknown,
+): { ok: true; data: GeneratedContent } | { ok: false; issues: string } {
+  const parsed = generatedContentSchema.safeParse(candidate);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.map(String).join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    return { ok: false, issues: issues.length > 400 ? `${issues.slice(0, 400)}…` : issues };
+  }
+  return {
+    ok: true,
+    data: {
+      ...parsed.data,
+      relevanceScore: clampAiScore(parsed.data.relevanceScore),
+      engagementScore: clampAiScore(parsed.data.engagementScore),
+    },
+  };
+}
+
+/**
+ * Lenient parse pipeline for raw model text: extract a JSON candidate, then
+ * JSON.parse, then schema-validate. Lenient on purpose — weak models wrap
+ * JSON in fences or prepend/append prose around it.
+ */
+export function parseGeneratedContentObject(
+  raw: string,
+): { ok: true; data: GeneratedContent } | { ok: false; issues: string } {
+  const candidate = extractJsonCandidate(raw);
+  if (candidate === null) {
+    return { ok: false, issues: "no JSON object found in the model response" };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(candidate);
+  } catch (error) {
+    return {
+      ok: false,
+      issues: `invalid JSON (${error instanceof Error ? error.message : "parse error"})`,
+    };
+  }
+  return validateGeneratedContent(value);
+}
+
+/* ── Bounded generation pipeline: primary + ≤2 fallbacks ───────────────── */
+
+/** Concise type list for the strict-JSON retry (kept in sync with the schema). */
+const STRICT_JSON_SHAPE =
+  "{ hook: string, mainCopy: string, cta: string, firstComment: string, hashtags: string[], " +
+  "keywords: string[], visualConcept: string, relevanceScore: number, engagementScore: number, " +
+  'variants: [{ platform: "facebook" | "instagram", format: "single_image" | "carousel" | "reel" | "story" | "text_post", ' +
+  "caption: string, hashtags: string[], cta: string }] }";
+
+/**
+ * Structured content generation with a bounded fallback pipeline.
+ *
+ * For OpenAI-compatible gateways the primary `generateObject` request goes
+ * out as generic JSON mode (`response_format: { type: "json_object" }`) —
+ * the schema itself is only conveyed via prompt injection, so weak models
+ * still answer with fenced/prose-wrapped JSON ("No object generated: could
+ * not parse the response.") or JSON that fails validation ("response did
+ * not match schema."). Recovery, in order:
+ *   0. zero-cost rescue — run the primary's OWN raw text (attached to
+ *      NoObjectGeneratedError) through the lenient parser above;
+ *   1. one strict-JSON retry via generateText (same model/system/prompt);
+ *   2. one repair attempt feeding back the validation issues.
+ * Hard bound: primary + 2 fallback AI calls — never more. Transport-level
+ * failures (429/timeout) are not parse failures and propagate unchanged;
+ * withRateLimitRetry has already retried those. Never fabricates content:
+ * every fallback result must pass full schema validation.
+ */
+async function generateContentObjectWithFallbacks(args: {
+  model: ResolvedTextModel["model"];
+  system: string;
+  prompt: string;
+}): Promise<{ object: GeneratedContent; usage: LanguageModelUsage | undefined }> {
+  try {
+    const result = await withRateLimitRetry(() =>
+      generateObject({
+        model: args.model,
+        schema: generatedContentSchema,
+        system: args.system,
+        prompt: args.prompt,
+        // Bounded: a stalled provider request aborts instead of hanging the
+        // caller forever; SDK-internal retries capped at 1 on top.
+        abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+        maxRetries: 1,
+      }),
+    );
+    return { object: result.object, usage: result.usage };
+  } catch (primaryError) {
+    // Only unusable MODEL OUTPUT falls through to the fallbacks. Everything
+    // else (rate limit, timeout, HTTP error) keeps its own meaning.
+    if (!NoObjectGeneratedError.isInstance(primaryError)) throw primaryError;
+
+    let lastRaw = primaryError.text ?? "";
+    let lastIssues = "the model returned no usable structured response";
+
+    // Step 0: the primary's raw text may itself be recoverable — the SDK's
+    // parser is a strict JSON.parse, ours strips fences/prose first.
+    if (lastRaw.length > 0) {
+      const rescued = parseGeneratedContentObject(lastRaw);
+      if (rescued.ok) return { object: rescued.data, usage: primaryError.usage };
+      lastIssues = rescued.issues;
+    }
+
+    // Fallback 1: strict-JSON retry (one call, same per-call ceiling).
+    const strictRetry = await withRateLimitRetry(() =>
+      generateText({
+        model: args.model,
+        system: args.system,
+        prompt: `${args.prompt}\n\nIMPORTANT: Respond with ONLY a valid JSON object — no markdown fences, no commentary — matching this shape: ${STRICT_JSON_SHAPE}`,
+        abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+        maxRetries: 1,
+      }),
+    );
+    const firstParse = parseGeneratedContentObject(strictRetry.text);
+    if (firstParse.ok) return { object: firstParse.data, usage: strictRetry.usage };
+    lastRaw = strictRetry.text;
+    lastIssues = firstParse.issues;
+
+    // Fallback 2: one repair attempt with the validation issues fed back.
+    const repair = await withRateLimitRetry(() =>
+      generateText({
+        model: args.model,
+        system: args.system,
+        prompt: `This JSON failed validation: ${firstParse.issues}\nReturn the corrected JSON object only — no markdown fences, no commentary.\n\n${strictRetry.text}`,
+        abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+        maxRetries: 1,
+      }),
+    );
+    const repaired = parseGeneratedContentObject(repair.text);
+    if (repaired.ok) return { object: repaired.data, usage: repair.usage };
+    lastRaw = repair.text;
+    lastIssues = repaired.issues;
+
+    throw new AIContentParseError({
+      rawLength: lastRaw.length,
+      hadFence: lastRaw.includes("```"),
+      hadBraces: lastRaw.includes("{") && lastRaw.includes("}"),
+      issues: lastIssues,
+    });
+  }
+}
 
 
 export function buildContentSystemPrompt(args: { brandName: string; brandSummary: string; memoryLines: string }): string {
@@ -169,20 +419,9 @@ ${ctx.input.visualStyleHint ? `Visual style hint: ${ctx.input.visualStyleHint}` 
 ${ctx.input.preferredFormat ? `Preferred format: ${ctx.input.preferredFormat}` : "Choose the best format per platform and explain nothing — just produce it."}
 Produce one variant per target platform.`;
 
-  const result = await withRateLimitRetry(() =>
-    generateObject({
-      model,
-      schema: generatedContentSchema,
-      system,
-      prompt,
-      // Bounded: a stalled provider request aborts instead of hanging the
-      // caller forever; SDK-internal retries capped at 1 on top.
-      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
-      maxRetries: 1,
-    }),
-  );
+  // Primary structured-output call + bounded parse-failure fallbacks.
+  const { object: d, usage } = await generateContentObjectWithFallbacks({ model, system, prompt });
 
-  const usage = result.usage;
   try {
     await db
       .update(agentRuns)
@@ -198,7 +437,6 @@ Produce one variant per target platform.`;
     // bookkeeping must not fail the generation
   }
 
-  const d = result.object;
   const qa = runContentQa({
     caption: d.variants[0]?.caption ?? d.mainCopy,
     hashtags: d.hashtags,
@@ -224,8 +462,8 @@ Produce one variant per target platform.`;
       keywords: d.keywords,
       visualConcept: d.visualConcept,
       aiScores: {
-        relevance: d.relevanceScore,
-        engagement: d.engagementScore,
+        relevance: clampAiScore(d.relevanceScore),
+        engagement: clampAiScore(d.engagementScore),
         estimated: true,
       },
       qa: qa as unknown as Record<string, unknown>,
@@ -243,7 +481,10 @@ Produce one variant per target platform.`;
       caption: v.caption,
       hashtags: v.hashtags,
       cta: v.cta,
-      script: v.script as unknown as Record<string, unknown>,
+      script: (v.script ?? {}) as unknown as Record<string, unknown>,
+      // Persist generated carousel slides — the column exists and the visual
+      // generator reads them; before this insert dropped them entirely.
+      slides: v.slides ?? [],
       qa: runContentQa({
         caption: v.caption,
         hashtags: v.hashtags,

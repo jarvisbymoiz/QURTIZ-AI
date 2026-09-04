@@ -5,7 +5,7 @@ import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
-import { generateAndPersistContent } from "@/lib/ai/content";
+import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
 import { AIConfigError } from "@/lib/ai/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
@@ -50,6 +50,25 @@ function formatAgentToolError(error: unknown): string {
     message +=
       " (The configured AI model is rate-limited or stalled — try again or switch to a non-free model in AI Configuration.)";
   }
+  return message;
+}
+
+/**
+ * Terminal message for AIContentParseError: after the primary structured
+ * call and both fallbacks nothing parsable came back, so retrying within
+ * the same turn would only burn tokens on a model that cannot produce valid
+ * JSON. Same defensive scrub as formatAgentToolError.
+ */
+function formatContentParseError(error: AIContentParseError): string {
+  let message =
+    "The AI model's response could not be parsed into a valid post even after retries " +
+    `(details: ${error.diagnostics.issues.slice(0, 120)}). ` +
+    "Report this error to the user and STOP — do not retry automatically or invent a caption.";
+  message = message.replace(
+    /\b(?:sk|rk|pk|ghp|gho)-[A-Za-z0-9_-]{8,}\b|Bearer\s+\S+|api[_-]?key\s*[=:]\s*\S+/gi,
+    "[redacted]",
+  );
+  if (message.length > 300) message = message.slice(0, 300) + "…";
   return message;
 }
 
@@ -185,7 +204,13 @@ export function buildAgentTools(ctx: AgentToolContext) {
           message: `Content created (QA ${qa.score}/100) and saved to Content Studio as ${qa.passed ? "Ready for Review" : "Draft (QA issues found)"}.`,
         };
       } catch (error) {
-        const message = formatAgentToolError(error);
+        // Parse failures after all retries are terminal: instruct the agent
+        // to stop instead of looping on a model that cannot produce valid
+        // JSON (and never invent a caption as a substitute).
+        const message =
+          error instanceof AIContentParseError
+            ? formatContentParseError(error)
+            : formatAgentToolError(error);
         await logStep("create_content", input, { created: false, error: message });
         return { created: false, error: message };
       }
