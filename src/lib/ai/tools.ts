@@ -1,12 +1,13 @@
 ﻿import { tool } from "ai";
 import { z } from "zod";
-import { and, desc, eq, ilike } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentSteps, brandMemory, brands, contentItems } from "@/db/schema";
+import { agentSteps, brandMemory, brands, contentItems, contentVariants, platformConnections } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
 import { AIConfigError } from "@/lib/ai/provider";
+import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
 import { startBulkPlanCore } from "@/lib/jobs/bulk";
@@ -292,6 +293,40 @@ export function buildAgentTools(ctx: AgentToolContext) {
                 ? "This item is already published and cannot be scheduled again."
                 : "This content is not approved yet — approve it first.",
           };
+        }
+
+        // Per-platform connection pre-flight: scheduleItem stamps the job's
+        // provider per variant from the active connection, so the worker
+        // routes to the right adapter (Buffer vs Meta). We fail fast with a
+        // structured message when NO variant has a routable platform — the
+        // agent should not create a job the worker will permanently fail.
+        const itemVariants = await db
+          .select({ platform: contentVariants.platform })
+          .from(contentVariants)
+          .where(and(eq(contentVariants.contentItemId, item.id), eq(contentVariants.workspaceId, ctx.workspaceId)));
+        const platforms = [...new Set(itemVariants.map((v) => v.platform))];
+        if (platforms.length > 0) {
+          const conns = await db
+            .select({ platform: platformConnections.platform })
+            .from(platformConnections)
+            .where(and(
+              eq(platformConnections.workspaceId, ctx.workspaceId),
+              inArray(platformConnections.platform, platforms),
+              eq(platformConnections.status, "connected"),
+            ));
+          const connectedPlatforms = new Set(conns.map((c) => c.platform));
+          const workspaceProvider = await getWorkspacePublishProvider(ctx.workspaceId);
+          const unrouted = platforms.filter((p) => !connectedPlatforms.has(p));
+          if (unrouted.length > 0 && !workspaceProvider) {
+            const missing = unrouted.length === 1
+              ? unrouted[0]
+              : `${unrouted.slice(0, -1).join(", ")} and ${unrouted[unrouted.length - 1]}`;
+            await logStep("schedule_content", input, { ok: false, unroutedPlatforms: unrouted });
+            return {
+              scheduled: false,
+              message: `No active social connection for ${missing}. Connect one on the Connections page.`,
+            };
+          }
         }
 
         const result = await scheduleItem({

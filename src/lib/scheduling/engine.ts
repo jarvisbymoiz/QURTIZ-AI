@@ -3,7 +3,7 @@
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
-import { getWorkspacePublishProvider } from "@/lib/publish/provider";
+import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
 import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
 
 export type ScheduleOutcome =
@@ -87,13 +87,16 @@ export async function scheduleItem(args: {
     };
   }
 
-  // Provider snapshot: jobs are stamped with the workspace's publishing
-  // provider AT CREATION TIME (getWorkspacePublishProvider defaults to
-  // "meta" when the settings key is absent). A later provider toggle never
-  // reroutes already-queued jobs.
-  const provider = await getWorkspacePublishProvider(args.workspaceId);
-
+  // Provider snapshot: each job is stamped with the provider of its PLATFORM's
+  // active connection (resolvePublishProviderForPlatform → connected row's
+  // provider, then workspace `publishing` setting, then "meta"). This matches
+  // what the worker will consume (`attemptPublish` filters connections by
+  // `job.provider`, so a meta-stamped job with only a Buffer connection
+  // connected used to fail with "Facebook Page is not connected" — the
+  // per-platform resolver is the single source of truth and the stamp now
+  // matches the connection the worker will actually pick up.
   for (const v of schedulable) {
+    const provider = await resolvePublishProviderForPlatform(args.workspaceId, v.platform);
     await db
       .delete(publishingJobs)
       .where(and(eq(publishingJobs.contentVariantId, v.id), eq(publishingJobs.status, "pending")));
