@@ -522,11 +522,19 @@ export const publishingJobs = pgTable(
     status: publishingJobStatusEnum("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
+    /** Platform-side post/update id returned by the provider (Buffer's
+     *  createPost `post.id` or Meta's `postId`). Used for client-side
+     *  idempotency on retry: a row already carrying a providerPostId has
+     *  been accepted by the platform and must not be re-created. */
+    providerPostId: text("provider_post_id"),
     result: jsonb("result").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("publishing_jobs_due_idx").on(t.status, t.scheduledAt)],
+  (t) => [
+    index("publishing_jobs_due_idx").on(t.status, t.scheduledAt),
+    index("publishing_jobs_provider_post_id_idx").on(t.providerPostId),
+  ],
 );
 
 export const notificationKindEnum = pgEnum("notification_kind", [

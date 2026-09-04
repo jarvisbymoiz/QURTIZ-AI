@@ -2,9 +2,9 @@
 
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
-import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
+import { contentItems, contentVariants } from "@/db/schema";
 import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
+import { schedulePost } from "@/lib/publishing/service";
 
 export type ScheduleOutcome =
   | { ok: true; scheduledAt: Date; variants: number }
@@ -21,6 +21,10 @@ const SCHEDULABLE_VARIANT_STATUSES = ["ready_for_review", "approved", "scheduled
  * Schedule a content item: creates one publishing job per variant and flips
  * statuses to scheduled. Approval gate enforced: draft items cannot be
  * scheduled (Manual-mode safety).
+ *
+ * Every variant is queued through the centralized publishing service
+ * (`schedulePost`) so provider resolution, job insertion and the
+ * published-id guard all share one code path.
  */
 export async function scheduleItem(args: {
   workspaceId: string;
@@ -61,10 +65,7 @@ export async function scheduleItem(args: {
     };
   }
 
-  const [y, mo, d] = args.dateIso.split("-").map(Number);
-  const [h, mi] = timeStr.split(":").map(Number);
   const scheduledAt = args.timeStr ? parseZonedDateTime(args.dateIso, timeStr, args.timezone) : defaultSlotFor(args.dateIso, args.timezone);
-  void h; void mi; void y; void mo; void d;
 
   const variants = await db
     .select({ id: contentVariants.id, platform: contentVariants.platform, status: contentVariants.status })
@@ -87,38 +88,28 @@ export async function scheduleItem(args: {
     };
   }
 
-  // Provider snapshot: each job is stamped with the provider of its PLATFORM's
-  // active connection (resolvePublishProviderForPlatform → connected row's
-  // provider, then workspace `publishing` setting, then "meta"). This matches
-  // what the worker will consume (`attemptPublish` filters connections by
-  // `job.provider`, so a meta-stamped job with only a Buffer connection
-  // connected used to fail with "Facebook Page is not connected" — the
-  // per-platform resolver is the single source of truth and the stamp now
-  // matches the connection the worker will actually pick up.
+  // Each variant goes through the centralized publishing service — it
+  // resolves the per-platform provider, inserts the publishing_jobs row,
+  // flips variant status to scheduled, and (if all variants land) the item
+  // status to scheduled. providerPostId/idempotency is owned there.
+  let scheduled = 0;
   for (const v of schedulable) {
-    const provider = await resolvePublishProviderForPlatform(args.workspaceId, v.platform);
-    await db
-      .delete(publishingJobs)
-      .where(and(eq(publishingJobs.contentVariantId, v.id), eq(publishingJobs.status, "pending")));
-    await db.insert(publishingJobs).values({
+    const res = await schedulePost({
       workspaceId: args.workspaceId,
       contentItemId: item.id,
       contentVariantId: v.id,
       platform: v.platform,
-      provider,
       scheduledAt,
-      status: "pending",
     });
-    await db
-      .update(contentVariants)
-      .set({ status: "scheduled", updatedAt: new Date() })
-      .where(eq(contentVariants.id, v.id));
+    if (res.ok) scheduled++;
+  }
+  if (scheduled === 0) {
+    return {
+      ok: false,
+      reason: "no_variants",
+      message: "No variants could be scheduled — check that platforms are connected.",
+    };
   }
 
-  await db
-    .update(contentItems)
-    .set({ status: "scheduled", scheduledAt, updatedAt: new Date() })
-    .where(eq(contentItems.id, item.id));
-
-  return { ok: true, scheduledAt, variants: schedulable.length };
+  return { ok: true, scheduledAt, variants: scheduled };
 }
