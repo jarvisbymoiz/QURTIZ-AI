@@ -94,6 +94,12 @@ the publishing worker refreshes the token once, persists the newest encrypted
 envelope, and retries the publish; if the refresh fails, the job fails
 permanently with a reconnection prompt.
 
+- Local development over OAuth requires HTTPS (Buffer only accepts
+  `https://` redirect URIs): run `npm run dev:https`, set
+  `NEXT_PUBLIC_APP_URL=https://localhost:3000` in `.env.local`, register
+  `https://localhost:3000/api/buffer/callback` in the Buffer app, and
+  accept the self-signed certificate warning once in the browser.
+
 1. Create an app at buffer.com/developers; copy the OAuth client id + secret
    into `.env.local` as `BUFFER_CLIENT_ID` / `BUFFER_CLIENT_SECRET`.
 2. Buffer app settings → **Redirect URI**:
