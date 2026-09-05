@@ -30,6 +30,7 @@ import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent, type GenerateContentInput } from "@/lib/ai/content";
 import { createServiceClient } from "@/lib/supabase/service";
 import { publishNow } from "@/lib/publishing/service";
+import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
 
 const MAX_PUBLISH_ATTEMPTS = 3;
 const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
@@ -43,9 +44,13 @@ const STUCK_PROCESSING_MS = 10 * 60_000; // a claim older than this is treated a
  * media handling, and idempotency all live in `lib/publishing/service.ts`.
  *
  * `attemptPublish` is the single entry point: the per-platform provider is
- * resolved inside the service via resolvePublishConnection.
+ * resolved inside the service via resolvePublishConnection, and the job row's
+ * provider stamp is re-resolved from the ACTIVE connection at fire time.
+ *
+ * Exported for the hermetic worker tests — production entry is
+ * publishDueScan/registerWorkers.
  */
-async function attemptPublish(publishingJobId: string): Promise<void> {
+export async function attemptPublish(publishingJobId: string): Promise<void> {
   const db = getDb();
 
   // Atomic claim — conditional UPDATE (status='pending') means only one
@@ -68,6 +73,20 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     .where(eq(workspaces.id, job.workspaceId));
   const recipientId = ws?.createdBy ?? job.workspaceId;
 
+  // Provider re-resolution at fire time: job.provider is a creation-time
+  // snapshot and goes stale when the workspace reconnects under a different
+  // provider (live evidence: Sept-2 rows stamped "meta" while facebook was
+  // live on Buffer). publishNow routes through the ACTIVE connection
+  // regardless — the stamp is updated here so the row tells the truth for
+  // history/reporting. An honest failure when no connection exists stays.
+  const activeProvider = await resolvePublishProviderForPlatform(job.workspaceId, job.platform);
+  if (activeProvider !== job.provider) {
+    await db
+      .update(publishingJobs)
+      .set({ provider: activeProvider, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, job.id));
+  }
+
   const result = await publishNow({
     workspaceId: job.workspaceId,
     contentItemId: job.contentItemId,
@@ -84,7 +103,7 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
       title: result.provider === "buffer" ? "Published via Buffer" : "Published successfully",
       body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} post is live${
         result.provider === "buffer" ? " — queued in Buffer, will go live within a minute." : "."
-      }`,
+      }${result.firstCommentSkipped ? "\n\nFirst Comment: Skipped (unavailable on current Buffer plan)." : ""}`,
       link: "/content-studio",
     });
     return;

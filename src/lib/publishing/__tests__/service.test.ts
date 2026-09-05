@@ -51,11 +51,20 @@ vi.mock("@/lib/meta/publish", () => ({ publishPost: vi.fn() }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: vi.fn(() => ({
     storage: {
-      from: (_bucket: string) => ({
+      from: () => ({
         createSignedUrl: async () => ({ data: { signedUrl: "https://signed.example/visual.png" }, error: null }),
       }),
     },
   })),
+}));
+
+// Request-scoped (user-JWT) client stub — the service's harmless fallback when
+// the service-role key is missing. Default behaves like the worker context
+// (no request scope → throws); individual tests override.
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: vi.fn(async () => {
+    throw new Error("cookies was called outside a request scope");
+  }),
 }));
 
 const { getDb } = await import("@/db");
@@ -64,6 +73,7 @@ const bufferClient = await import("@/lib/buffer/client");
 const mockedCreatePostForBuffer = vi.mocked(bufferClient.createPostForBuffer);
 const mockedRefreshAccessToken = vi.mocked(bufferClient.refreshAccessToken);
 const mockedListChannels = vi.mocked(bufferClient.listChannels);
+const { createServiceClient } = await import("@/lib/supabase/service");
 
 // Deterministic key so conn.encryptedToken round-trips the REAL crypto
 // helpers (same convention as the buffer client tests).
@@ -159,6 +169,7 @@ function makeFakeDb(spec: {
   visualAssets?: Row[][];
   workspaces?: Row[][];
   settings?: Row[][];
+  publishingJobs?: Row[][];
 }) {
   const updates: Array<{ table: unknown; values: Row }> = [];
   const deletes: unknown[] = [];
@@ -172,6 +183,7 @@ function makeFakeDb(spec: {
     else if (table === visualAssets) queue = spec.visualAssets;
     else if (table === workspaces) queue = spec.workspaces;
     else if (table === settings) queue = spec.settings;
+    else if (table === publishingJobs) queue = spec.publishingJobs;
     if (!queue || queue.length === 0) return [];
     return queue.length > 1 ? queue.shift()! : queue[0];
   }
@@ -676,8 +688,8 @@ describe("publishNow — Buffer lifecycle", () => {
     expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBe(true);
   });
 
-  it("fails with the real reason when a visual exists but no signed URL can be generated", async () => {
-    const conn = makeConnRow({ id: "conn-nosign" });
+  it("fails with the actionable config message when the service-role key is missing (visual present)", async () => {
+    const conn = makeConnRow({ id: "conn-nokey" });
     const fake = makeFakeDb({
       platformConnections: [[conn]],
       contentVariants: [[VARIANT_ROW]],
@@ -686,11 +698,12 @@ describe("publishNow — Buffer lifecycle", () => {
       workspaces: [[{ createdBy: "user-1" }]],
     });
     mockedGetDb.mockReturnValue(fake.db as never);
-    // Unreachable storage: make createSignedUrl throw by pointing the mock's
-    // storage.from at a throwing implementation for THIS test.
-    const { createServiceClient } = await import("@/lib/supabase/service");
+    // createServiceClient THROWS only for missing env config. The user-JWT
+    // fallback also fails here (the server-client mock throws — worker-like
+    // context), so the actionable config message must surface — not the old
+    // misleading "storage unreachable".
     vi.mocked(createServiceClient).mockImplementationOnce(() => {
-      throw new Error("storage down");
+      throw new Error("Supabase service role is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local (see SETUP.md).");
     });
     mockChannelOk();
 
@@ -704,6 +717,49 @@ describe("publishNow — Buffer lifecycle", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) {
       expect(res.reason).toBe("missing_image_url");
+      expect(res.message).toContain("SUPABASE_SERVICE_ROLE_KEY");
+      expect(res.message).toContain("restart the dev server");
+    }
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+    // Synthetic job row: inserted up-front, then failed with the real message.
+    expect(fake.inserts).toHaveLength(1);
+    const failUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "failed");
+    expect(failUpdate).toBeDefined();
+    expect(failUpdate!.values.lastError).toContain("SUPABASE_SERVICE_ROLE_KEY");
+  });
+
+  it("fails with the storage-unreachable message when signing fails on a configured client", async () => {
+    const conn = makeConnRow({ id: "conn-nosign" });
+    const fake = makeFakeDb({
+      platformConnections: [[conn]],
+      contentVariants: [[VARIANT_ROW]],
+      contentItems: [[ITEM_ROW]],
+      visualAssets: [[{ storagePath: "brand-assets/broken.png" }]],
+      workspaces: [[{ createdBy: "user-1" }]],
+    });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    // Configured client (no throw) but the signing call returns no URL — a
+    // genuine storage/network failure, distinct from the config case.
+    vi.mocked(createServiceClient).mockImplementationOnce(() => ({
+      storage: {
+        from: () => ({
+          createSignedUrl: async () => ({ data: null, error: { message: "bucket not found" } }),
+        }),
+      },
+    }) as never);
+    mockChannelOk();
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.reason).toBe("missing_image_url");
+      expect(res.message).toContain("storage unreachable");
       expect(res.message).toContain("the post was not published");
     }
     expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
@@ -900,5 +956,252 @@ describe("publishNow / schedulePost — connection guard", () => {
       message: "No connected Facebook account. Connect one on the Connections page.",
     });
     expect(fake.inserts).toHaveLength(0);
+  });
+});
+
+/* ── Fix A: first-comment paid-plan fallback ─────────────────────────── */
+
+describe("publishNow — first-comment paid-plan fallback", () => {
+  function fcDb(connId: string) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow({ id: connId })]],
+      contentVariants: [[VARIANT_ROW]], // firstComment: "First! 🚀"
+      contentItems: [[ITEM_ROW]],
+      visualAssets: [[]],
+      workspaces: [[{ createdBy: "user-1" }]],
+    });
+  }
+
+  it("retries EXACTLY ONCE without the firstComment when Buffer rejects it as a paid plan, then succeeds with firstCommentSkipped", async () => {
+    const fake = fcDb("conn-fc-ok");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer
+      .mockResolvedValueOnce({ ok: false, reason: "rejected", message: "Invalid post: First comment requires a paid plan." })
+      .mockResolvedValueOnce({ ok: true, data: { id: "post-fc", status: "sent", dueAt: null } });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    // Two calls total: the original (with firstComment) + the stripped retry.
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(2);
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.firstComment).toBe("First! 🚀");
+    // Identical payload MINUS the firstComment (no duplicate post: Buffer
+    // created nothing on the MutationError).
+    expect(mockedCreatePostForBuffer.mock.calls[1][1]).toMatchObject({
+      channelId: CHANNEL_REF,
+      text: "Item caption\n\n#tag1 #tag2",
+      mode: "shareNow",
+      contentKind: "reel",
+      service: "facebook",
+      firstComment: null,
+    });
+    expect(res).toEqual({
+      ok: true,
+      provider: "buffer",
+      mode: "shareNow",
+      providerPostId: "post-fc",
+      scheduledAt: expect.any(Date),
+      mediaAttached: false,
+      firstCommentSkipped: true,
+    });
+    // Threaded into the synthetic job row's result jsonb.
+    const jobUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.providerPostId === "post-fc");
+    expect(jobUpdate).toBeDefined();
+    expect((jobUpdate!.values.result as Record<string, unknown>).firstCommentSkipped).toBe(true);
+  });
+
+  it("does NOT retry for non-matching errors (first comment only sent untouched)", async () => {
+    const fake = fcDb("conn-fc-other");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({
+      ok: false,
+      reason: "rejected",
+      message: "Invalid post: Image dimensions not supported.",
+    });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.firstComment).toBe("First! 🚀");
+    expect(res).toMatchObject({ ok: false, reason: "rejected", message: "Invalid post: Image dimensions not supported." });
+    expect(res.ok || ("firstCommentSkipped" in res)).toBe(false);
+  });
+
+  it("fails with the ORIGINAL paid-plan message when both attempts fail", async () => {
+    const fake = fcDb("conn-fc-both");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer
+      .mockResolvedValueOnce({ ok: false, reason: "rejected", message: "Invalid post: First comment requires a paid plan." })
+      .mockResolvedValueOnce({ ok: false, reason: "rejected", message: "Invalid post: still rejected." });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(2);
+    expect(res).toMatchObject({
+      ok: false,
+      reason: "rejected",
+      message: "Invalid post: First comment requires a paid plan.", // ORIGINAL, not the retry's
+    });
+    // The synthetic job row failed with the original message.
+    const failUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "failed");
+    expect(failUpdate).toBeDefined();
+    expect(failUpdate!.values.lastError).toBe("Invalid post: First comment requires a paid plan.");
+  });
+});
+
+/* ── Fix B: publishNow synthetic job-row persistence ─────────────────── */
+
+describe("publishNow — synthetic job row persistence", () => {
+  function synDb(connId: string) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow({ id: connId })]],
+      contentVariants: [[VARIANT_ROW]],
+      contentItems: [[ITEM_ROW]],
+      visualAssets: [[]],
+      workspaces: [[{ createdBy: "user-1" }]],
+    });
+  }
+
+  it("persists a FAILED synthetic row with lastError when the publish fails (no caller jobId)", async () => {
+    const fake = synDb("conn-synfail");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({
+      ok: false,
+      reason: "rejected",
+      message: "Invalid post: Image dimensions not supported.",
+    });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(res.ok).toBe(false);
+    // Up-front row: processing, one attempt, provider + connection stamped.
+    expect(fake.inserts).toHaveLength(1);
+    expect(fake.inserts[0].values).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      provider: "buffer",
+      status: "processing",
+      attempts: 1,
+      scheduledAt: expect.any(Date),
+    });
+    expect((fake.inserts[0].values.result as Record<string, unknown>).connectionId).toBe("conn-synfail");
+    expect((fake.inserts[0].values.result as Record<string, unknown>).channelRef).toBe(CHANNEL_REF);
+    // Terminal failure with the REAL error message — no more zero-trace fails.
+    const failUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "failed");
+    expect(failUpdate).toBeDefined();
+    expect(failUpdate!.values.lastError).toBe("Invalid post: Image dimensions not supported.");
+    expect(fake.updates.some((u) => u.values.status === "published")).toBe(false);
+  });
+
+  it("transitions the synthetic row to published with providerPostId + result on success", async () => {
+    const fake = synDb("conn-synok");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: true, data: { id: "post-syn", status: "sent", dueAt: null } });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(res).toMatchObject({ ok: true, provider: "buffer", providerPostId: "post-syn" });
+    expect(fake.inserts).toHaveLength(1);
+    expect(fake.inserts[0].values).toMatchObject({ status: "processing", attempts: 1 });
+    const jobUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.providerPostId === "post-syn");
+    expect(jobUpdate).toBeDefined();
+    expect(jobUpdate!.values.status).toBe("published");
+    const resultJson = jobUpdate!.values.result as Record<string, unknown>;
+    expect(resultJson.updateId).toBe("post-syn");
+    expect(resultJson.connectionId).toBe("conn-synok");
+    expect(resultJson.channelRef).toBe(CHANNEL_REF);
+  });
+});
+
+/* ── Fix C: partial-schedule visibility (MIN scheduledAt) ────────────── */
+
+describe("schedulePost — partial-schedule visibility", () => {
+  const SLOT = new Date("2026-09-10T12:00:00.000Z");
+  const EARLIER = new Date("2026-09-10T09:00:00.000Z");
+
+  function schedDb(secondStatuses: Row[]) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow()]],
+      // select #1: variant by id (loadPublishContext); #2: statuses for the
+      // all-scheduled check after the variant flip.
+      contentVariants: [[VARIANT_ROW], secondStatuses],
+      contentItems: [[ITEM_ROW]],
+      visualAssets: [[]],
+      workspaces: [[{ createdBy: "user-1" }]],
+      // Pending publish jobs for the item (MIN source). The just-inserted job
+      // plus another variant's earlier pending job.
+      publishingJobs: [[{ scheduledAt: EARLIER }, { scheduledAt: SLOT }]],
+    });
+  }
+
+  it("sets item.scheduledAt to the MIN pending job when only SOME variants are scheduled (status NOT flipped)", async () => {
+    const fake = schedDb([{ status: "scheduled" }, { status: "approved" }]);
+    mockedGetDb.mockReturnValue(fake.db as never);
+
+    const res = await schedulePost({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      scheduledAt: SLOT,
+    });
+
+    expect(res).toMatchObject({ ok: true, jobId: "job-1", provider: "buffer" });
+    // The item update carries the EARLIEST pending slot — the calendar grid
+    // anchors on it even though one variant is still approved.
+    const itemUpdate = fake.updates.find((u) => u.table === contentItems);
+    expect(itemUpdate).toBeDefined();
+    expect((itemUpdate!.values.scheduledAt as Date).toISOString()).toBe(EARLIER.toISOString());
+    expect(itemUpdate!.values.status).toBeUndefined();
+  });
+
+  it("flips the item to scheduled with the MIN scheduledAt when ALL variants are scheduled", async () => {
+    const fake = schedDb([{ status: "scheduled" }, { status: "scheduled" }]);
+    mockedGetDb.mockReturnValue(fake.db as never);
+
+    const res = await schedulePost({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      scheduledAt: SLOT,
+    });
+
+    expect(res).toMatchObject({ ok: true, jobId: "job-1" });
+    const itemUpdate = fake.updates.find((u) => u.table === contentItems);
+    expect(itemUpdate).toBeDefined();
+    expect(itemUpdate!.values.status).toBe("scheduled");
+    expect((itemUpdate!.values.scheduledAt as Date).toISOString()).toBe(EARLIER.toISOString());
   });
 });

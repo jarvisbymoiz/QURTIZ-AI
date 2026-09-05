@@ -96,6 +96,11 @@ export type PublishResult =
        *  asset was sent with the mutation; Meta: the image URL was uploaded).
        *  A variant visual that cannot be reached fails the publish instead. */
       mediaAttached: boolean;
+      /** True when Buffer rejected the first comment as a paid-plan feature
+       *  and the publish was retried once WITHOUT it (the post itself went
+       *  out). Threaded into publishing_jobs.result so the UI can say
+       *  "First Comment: Skipped (unavailable on current Buffer plan)". */
+      firstCommentSkipped?: boolean;
     }
   | { ok: false; reason: string; message: string };
 
@@ -138,6 +143,18 @@ export function deriveContentKind(format: string | null | undefined): ContentKin
  *  "instagram" for the two services this product publishes to. */
 export function platformToBufferService(platform: ContentPlatform): BufferService {
   return platform;
+}
+
+/**
+ * Pure predicate (unit-testable): did Buffer reject the mutation because the
+ * first comment is a paid-plan feature? Buffer surfaces it as a MutationError
+ * ("Invalid post: First comment requires a paid plan.") which createPostForBuffer
+ * maps to reason "rejected" with the sanitized message. A MutationError means
+ * Buffer created NOTHING, so retrying the identical payload without the first
+ * comment cannot duplicate the post.
+ */
+export function isFirstCommentPlanError(message: string): boolean {
+  return /first comment/i.test(message);
 }
 
 /** Build the publish call's argument bag. Pure — used by tests + the
@@ -517,14 +534,79 @@ function composeMessage(item: typeof contentItems.$inferSelect, variant: typeof 
 
 /** For Meta we need a reachable URL on the visual; this is the same signed-URL
  *  helper the worker uses (Supabase service-role client; 6-day expiry). */
-async function signedUrlForVisual(storagePath: string): Promise<string | null> {
+
+/** The actionable config failure — names the exact missing env var and the
+ *  fix (verified live: SUPABASE_SERVICE_ROLE_KEY absent from .env.local made
+ *  every visual publish fail with a misleading "storage unreachable"). */
+export const VISUAL_STORAGE_CONFIG_ERROR =
+  "Visual publishing needs SUPABASE_SERVICE_ROLE_KEY in .env.local (server-side storage signing). Add it and restart the dev server.";
+
+/** The honest network/storage failure (kept for the existing reason + tests). */
+const VISUAL_STORAGE_UNREACHABLE_ERROR =
+  "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.";
+
+type SignedVisual =
+  | { ok: true; url: string }
+  | { ok: false; kind: "config" | "unreachable"; message: string };
+
+const VISUAL_SIGNED_URL_EXPIRY_SECONDS = 60 * 60 * 24 * 6; // 6 days — same as the worker
+
+/** Structural minimal Supabase storage signer — satisfied by BOTH the
+ *  service-role client and the request-scoped (user-JWT) client. */
+type VisualStorageClient = {
+  storage: {
+    from: (bucket: string) => {
+      createSignedUrl: (
+        path: string,
+        expiresInSeconds: number,
+      ) => Promise<{ data: { signedUrl: string } | null; error: unknown }>;
+    };
+  };
+};
+
+async function signVisualUrl(
+  supabase: VisualStorageClient,
+  storagePath: string,
+): Promise<{ ok: true; url: string } | { ok: false; message: string }> {
   try {
-    const supabase = createServiceClient();
-    const { data } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 60 * 60 * 24 * 6);
-    return data?.signedUrl ?? null;
-  } catch {
-    return null;
+    const { data } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, VISUAL_SIGNED_URL_EXPIRY_SECONDS);
+    if (data?.signedUrl) return { ok: true, url: data.signedUrl };
+    return { ok: false, message: "Supabase storage returned no signed URL for the visual." };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : "Supabase storage signing failed." };
   }
+}
+
+/**
+ * Resolve a reachable signed URL for the item's visual.
+ *
+ * Order: service-role client (works in request AND worker contexts) → on a
+ * CONFIG failure a harmless fallback through the request-scoped (user-JWT)
+ * server client (works on the Calendar Publish Now path where the user's
+ * session can sign the URL; throws harmlessly in the worker where no request
+ * scope exists). Never silently drops the visual: every failure returns a
+ * typed result that the publish paths turn into a failed publish —
+ * "config" names the missing env var, "unreachable" the storage/network
+ * problem.
+ */
+async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
+  let serviceClient: ReturnType<typeof createServiceClient>;
+  try {
+    serviceClient = createServiceClient();
+  } catch {
+    // createServiceClient throws ONLY for missing env config — try the
+    // user-JWT client before giving up with the actionable message.
+    try {
+      const { createClient } = await import("@/lib/supabase/server");
+      const signed = await signVisualUrl(await createClient(), storagePath);
+      if (signed.ok) return signed;
+    } catch {
+      // No request scope (worker) or user client unconfigured — fall through.
+    }
+    return { ok: false, kind: "config", message: VISUAL_STORAGE_CONFIG_ERROR };
+  }
+  const signed = await signVisualUrl(serviceClient, storagePath);
+  return signed.ok ? signed : { ok: false, kind: "unreachable", message: VISUAL_STORAGE_UNREACHABLE_ERROR };
 }
 
 /** Apply the post-accept flip: variant → published, item → published when
@@ -576,6 +658,15 @@ async function flipToPublished(args: {
  * request, and the worker's "in-firing job" path. Persists providerPostId,
  * attempts, status, and flips the variant/item to published on success.
  *
+ * Job-row persistence: the worker path supplies `jobId` and publishNow marks
+ * that row. The synthetic path (no jobId — Calendar Publish Now) inserts its
+ * own publishing_jobs row UP-FRONT (status "processing", one attempt, the
+ * resolved provider + connectionId/channelRef + scheduledAt=now) and ALWAYS
+ * transitions it to a terminal state — "published" (providerPostId + result
+ * jsonb) or "failed" (lastError = the real error message) — so a failed
+ * publish leaves an honest DB trace instead of vanishing. Both paths end
+ * with identical row shapes.
+ *
  * Never marks `published` unless the provider response is a success with a
  * real post id — typed failures come back unchanged.
  */
@@ -601,16 +692,48 @@ export async function publishNow(args: {
   const connRes = await resolvePublishConnection(args.workspaceId, ctxRes.variant.platform);
   if (!connRes.ok) return { ok: false, reason: connRes.reason, message: connRes.message };
 
+  // Synthetic job row (Calendar Publish Now / agent "post this now"): created
+  // AFTER the context + connection resolve — the FKs need a real variant, and
+  // provider/connectionId/channelRef come from the resolved connection. The
+  // worker path carries its own row and its own claim/retry classification,
+  // so only synthetic rows are transitioned here.
+  let syntheticJobId: string | undefined;
+  if (!args.jobId) {
+    const [row] = await db
+      .insert(publishingJobs)
+      .values({
+        workspaceId: args.workspaceId,
+        contentItemId: args.contentItemId,
+        contentVariantId: args.contentVariantId,
+        platform: ctxRes.variant.platform,
+        provider: connRes.provider,
+        scheduledAt: new Date(), // publish-now fires immediately
+        status: "processing",
+        attempts: 1,
+        result: { connectionId: connRes.connectionId, channelRef: connRes.channelRef },
+      })
+      .returning();
+    if (!row) return { ok: false, reason: "db_error", message: "Failed to create the publishing job." };
+    syntheticJobId = row.id;
+  }
+  /** Terminal-failure for the synthetic row (lastError = the real message);
+   *  a no-op on the worker path (attemptPublish owns that row's failure). */
+  const fail = async (reason: string, message: string): Promise<PublishResult> => {
+    if (syntheticJobId) {
+      await db
+        .update(publishingJobs)
+        .set({ status: "failed", lastError: message, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, syntheticJobId));
+    }
+    return { ok: false, reason, message };
+  };
+
   const contentKind = deriveContentKind(ctxRes.variant.format);
   const message = composeMessage(ctxRes.item, ctxRes.variant);
 
   if (connRes.provider === "buffer") {
     if (!connRes.channelRef) {
-      return {
-        ok: false,
-        reason: "missing_channel",
-        message: "Buffer connection is missing its channel reference — reconnect the Buffer account.",
-      };
+      return fail("missing_channel", "Buffer connection is missing its channel reference — reconnect the Buffer account.");
     }
     // Pre-publish channel validation (successes cached 5 min per connection
     // + channel): the channel must still exist on the Buffer account and its
@@ -622,21 +745,16 @@ export async function publishNow(args: {
       platform: connRes.platform,
       organizationId: connRes.organizationId,
     });
-    if (!validation.ok) return { ok: false, reason: "channel_invalid", message: validation.message };
+    if (!validation.ok) return fail("channel_invalid", validation.message);
 
     // Media: Buffer attaches ONE image asset (oneOf-compliant). A visual that
     // cannot get a reachable signed URL fails the publish — same honesty as
     // the Meta path; silently dropping it would change what the post IS.
     let mediaUrl: string | null = null;
     if (ctxRes.visual?.storagePath) {
-      mediaUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
-      if (!mediaUrl) {
-        return {
-          ok: false,
-          reason: "missing_image_url",
-          message: "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.",
-        };
-      }
+      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+      if (!signed.ok) return fail("missing_image_url", signed.message);
+      mediaUrl = signed.url;
     }
     // firstComment: the variant's platform-specific first comment wins; the
     // item-level one is the fallback. Sent inside the per-channel metadata
@@ -652,7 +770,8 @@ export async function publishNow(args: {
       mediaUrl,
       firstComment,
     };
-    let res = await createPostForBuffer(connRes.accessToken, argsForCall);
+    let accessToken = connRes.accessToken;
+    let res = await createPostForBuffer(accessToken, argsForCall);
     if (!res.ok && res.reason === "auth") {
       // Reactive refresh (exactly once) — serialized per connection and
       // stale-overwrite-guarded inside rotateBufferToken.
@@ -662,7 +781,8 @@ export async function publishNow(args: {
         currentEnvelope: connRes.envelope!,
       });
       if (rotated.ok) {
-        res = await createPostForBuffer(rotated.envelope.accessToken, argsForCall);
+        accessToken = rotated.envelope.accessToken;
+        res = await createPostForBuffer(accessToken, argsForCall);
       }
     }
     if (!res.ok && res.reason === "auth") {
@@ -675,9 +795,25 @@ export async function publishNow(args: {
         platform: connRes.platform,
         detail: res.message.slice(0, 120),
       });
-      return { ok: false, reason: "auth_expired", message: AUTH_EXPIRED_MESSAGE };
+      return fail("auth_expired", AUTH_EXPIRED_MESSAGE);
     }
-    if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
+    // First-comment paid-plan fallback: Buffer rejects the WHOLE mutation with
+    // "First comment requires a paid plan." and a MutationError creates
+    // NOTHING — so retry EXACTLY ONCE with the identical payload minus the
+    // firstComment (no duplicate-post risk) instead of failing the post over
+    // an optional extra. Paid plans keep receiving the comment untouched.
+    let firstCommentSkipped = false;
+    if (!res.ok && res.reason === "rejected" && firstComment !== null && isFirstCommentPlanError(res.message)) {
+      const stripped = await createPostForBuffer(accessToken, { ...argsForCall, firstComment: null });
+      if (stripped.ok) {
+        res = stripped;
+        firstCommentSkipped = true;
+      }
+      // Stripped retry failed too → keep the ORIGINAL result so the real
+      // paid-plan message surfaces below; still no duplicate (nothing was
+      // created on either attempt).
+    }
+    if (!res.ok) return fail(res.reason, res.message);
     const scheduledAt = new Date();
     if (res.data.dueAt) {
       const parsed = new Date(res.data.dueAt);
@@ -687,14 +823,17 @@ export async function publishNow(args: {
       updateId: res.data.id,
       status: res.data.status,
       scheduledAt: scheduledAt.toISOString(),
+      connectionId: connRes.connectionId,
+      channelRef: connRes.channelRef,
     };
     if (mediaUrl) result.mediaAttached = true; // image asset sent with the mutation
+    if (firstCommentSkipped) result.firstCommentSkipped = true;
     await flipToPublished({
       workspaceId: args.workspaceId,
       itemId: ctxRes.item.id,
       variantId: ctxRes.variant.id,
       providerPostId: res.data.id,
-      jobId: args.jobId,
+      jobId: args.jobId ?? syntheticJobId,
       result,
     });
     return {
@@ -704,20 +843,16 @@ export async function publishNow(args: {
       providerPostId: res.data.id,
       scheduledAt,
       mediaAttached: mediaUrl !== null,
+      ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
     };
   }
 
   // Meta path — imageUrl must be a reachable signed URL when a visual exists.
   let imageUrl: string | null = null;
   if (ctxRes.visual?.storagePath) {
-    imageUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
-    if (!imageUrl) {
-      return {
-        ok: false,
-        reason: "missing_image_url",
-        message: "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.",
-      };
-    }
+    const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+    if (!signed.ok) return fail("missing_image_url", signed.message);
+    imageUrl = signed.url;
   }
   const [conn] = await db
     .select()
@@ -736,15 +871,15 @@ export async function publishNow(args: {
     message,
     imageUrl,
   });
-  if (!result.ok) return { ok: false, reason: result.reason, message: result.message };
+  if (!result.ok) return fail(result.reason, result.message);
   const scheduledAt = new Date();
   await flipToPublished({
     workspaceId: args.workspaceId,
     itemId: ctxRes.item.id,
     variantId: ctxRes.variant.id,
     providerPostId: result.postId,
-    jobId: args.jobId,
-    result: { postId: result.postId, permalink: result.permalink },
+    jobId: args.jobId ?? syntheticJobId,
+    result: { postId: result.postId, permalink: result.permalink, connectionId: connRes.connectionId, channelRef: connRes.channelRef },
   });
   return {
     ok: true,
@@ -821,19 +956,37 @@ export async function schedulePost(args: {
     .set({ status: "scheduled", updatedAt: new Date() })
     .where(eq(contentVariants.id, args.contentVariantId));
 
-  // If every variant of this item is now scheduled, flip the item.
+  // Partial-schedule visibility: the calendar grid keys off
+  // contentItems.scheduledAt, so it must be set as soon as ANY variant of the
+  // item is scheduled — the MIN over the item's still-pending publish jobs —
+  // not only when every variant lands. (Live defect: a facebook variant
+  // `scheduled` next to an instagram `approved` left item.scheduledAt NULL
+  // and the item invisible on the grid.) item.status still flips to
+  // `scheduled` only when EVERY variant is scheduled (current rule).
   const allScheduled = (
     await db
       .select({ status: contentVariants.status })
       .from(contentVariants)
       .where(eq(contentVariants.contentItemId, args.contentItemId))
   ).every((v) => v.status === "scheduled");
-  if (allScheduled) {
-    await db
-      .update(contentItems)
-      .set({ status: "scheduled", scheduledAt: args.scheduledAt, updatedAt: new Date() })
-      .where(eq(contentItems.id, args.contentItemId));
-  }
+  const pendingJobs = await db
+    .select({ scheduledAt: publishingJobs.scheduledAt })
+    .from(publishingJobs)
+    .where(and(eq(publishingJobs.contentItemId, args.contentItemId), eq(publishingJobs.status, "pending")));
+  const pendingTimes = pendingJobs
+    .map((j) => new Date(j.scheduledAt).getTime())
+    .filter((t) => !Number.isNaN(t));
+  // The job inserted above is pending, so pendingTimes is non-empty in
+  // practice; args.scheduledAt is the honest fallback for this variant.
+  const earliestScheduledAt = pendingTimes.length > 0 ? new Date(Math.min(...pendingTimes)) : args.scheduledAt;
+  await db
+    .update(contentItems)
+    .set({
+      ...(allScheduled ? { status: "scheduled" as const } : {}),
+      scheduledAt: earliestScheduledAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(contentItems.id, args.contentItemId));
   return { ok: true, jobId: job.id, scheduledAt: args.scheduledAt, provider, channelRef: connRes.channelRef };
 }
 
@@ -947,12 +1100,12 @@ export async function retryFailedPublish(args: {
     // retry instead of silently publishing a different post.
     let mediaUrl: string | null = null;
     if (ctxRes.visual?.storagePath) {
-      mediaUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
-      if (!mediaUrl) {
-        const msg = "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.";
-        await db.update(publishingJobs).set({ status: "failed", lastError: msg, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
-        return { ok: false, reason: "missing_image_url", message: msg };
+      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+      if (!signed.ok) {
+        await db.update(publishingJobs).set({ status: "failed", lastError: signed.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+        return { ok: false, reason: "missing_image_url", message: signed.message };
       }
+      mediaUrl = signed.url;
     }
     let attempt = 0;
     let lastReason = "unknown";
@@ -984,6 +1137,18 @@ export async function retryFailedPublish(args: {
           res = await createPostForBuffer(accessToken, callArgs);
         }
       }
+      // First-comment paid-plan fallback (same contract as publishNow): a
+      // MutationError created NOTHING — retry EXACTLY ONCE without the
+      // firstComment; a failure keeps the ORIGINAL error so the real
+      // paid-plan message surfaces. Paid plans keep their comment.
+      let firstCommentSkipped = false;
+      if (!res.ok && res.reason === "rejected" && firstComment !== null && isFirstCommentPlanError(res.message)) {
+        const stripped = await createPostForBuffer(accessToken, { ...callArgs, firstComment: null });
+        if (stripped.ok) {
+          res = stripped;
+          firstCommentSkipped = true;
+        }
+      }
       if (res.ok) {
         const scheduledAt = new Date();
         if (res.data.dueAt) {
@@ -994,8 +1159,11 @@ export async function retryFailedPublish(args: {
           updateId: res.data.id,
           status: res.data.status,
           scheduledAt: scheduledAt.toISOString(),
+          connectionId: connRes.connectionId,
+          channelRef: connRes.channelRef,
         };
         if (mediaUrl) result.mediaAttached = true;
+        if (firstCommentSkipped) result.firstCommentSkipped = true;
         await flipToPublished({
           workspaceId: args.workspaceId,
           itemId: ctxRes.item.id,
@@ -1011,6 +1179,7 @@ export async function retryFailedPublish(args: {
           providerPostId: res.data.id,
           scheduledAt,
           mediaAttached: mediaUrl !== null,
+          ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
         };
       }
       lastReason = res.reason;
@@ -1050,12 +1219,12 @@ export async function retryFailedPublish(args: {
   // Meta retry path
   let imageUrl: string | null = null;
   if (ctxRes.visual?.storagePath) {
-    imageUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
-    if (!imageUrl) {
-      const msg = "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.";
-      await db.update(publishingJobs).set({ status: "failed", lastError: msg, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
-      return { ok: false, reason: "missing_image_url", message: msg };
+    const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+    if (!signed.ok) {
+      await db.update(publishingJobs).set({ status: "failed", lastError: signed.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+      return { ok: false, reason: "missing_image_url", message: signed.message };
     }
+    imageUrl = signed.url;
   }
   const [conn] = await db
     .select()

@@ -15,6 +15,12 @@ export type ScheduleOutcome =
       /** Per-variant job truth (provider snapshot + Buffer channelRef) so
        *  callers — the AI agent, toasts — can state WHERE each post went. */
       jobs: Array<{ jobId: string; platform: ContentPlatform; provider: PublishProvider; channelRef: string | null }>;
+      /** Variants that could NOT be scheduled (no connection, channel
+       *  invalid…). The item is still visible on the calendar via the
+       *  MIN(scheduledAt) rule in schedulePost, but these platforms have no
+       *  publish job — surfaced so partial scheduling is never mistaken for
+       *  a blanket success. */
+      failedVariants: Array<{ platform: ContentPlatform; message: string }>;
     }
   | { ok: false; reason: string; message: string };
 
@@ -98,11 +104,12 @@ export async function scheduleItem(args: {
 
   // Each variant goes through the centralized publishing service — it
   // resolves the per-platform provider, inserts the publishing_jobs row,
-  // flips variant status to scheduled, and (if all variants land) the item
-  // status to scheduled. providerPostId/idempotency is owned there.
+  // flips variant status to scheduled, and keeps the item's scheduledAt on
+  // the MIN over still-pending jobs (so a partially scheduled item stays
+  // visible on the calendar grid). providerPostId/idempotency is owned there.
   let scheduled = 0;
   const jobs: Array<{ jobId: string; platform: ContentPlatform; provider: PublishProvider; channelRef: string | null }> = [];
-  let firstError: string | null = null;
+  const failedVariants: Array<{ platform: ContentPlatform; message: string }> = [];
   for (const v of schedulable) {
     const res = await schedulePost({
       workspaceId: args.workspaceId,
@@ -114,20 +121,20 @@ export async function scheduleItem(args: {
     if (res.ok) {
       scheduled++;
       jobs.push({ jobId: res.jobId, platform: v.platform, provider: res.provider, channelRef: res.channelRef });
-    } else if (firstError === null) {
+    } else {
       // Surface the service's failure verbatim (e.g. the exact "No connected
       // … account. Connect one on the Connections page." message) instead of
       // a generic aggregate that hides the real reason.
-      firstError = res.message;
+      failedVariants.push({ platform: v.platform, message: res.message });
     }
   }
   if (scheduled === 0) {
     return {
       ok: false,
       reason: "no_variants",
-      message: firstError ?? "No variants could be scheduled — check that platforms are connected.",
+      message: failedVariants[0]?.message ?? "No variants could be scheduled — check that platforms are connected.",
     };
   }
 
-  return { ok: true, scheduledAt, variants: scheduled, jobs };
+  return { ok: true, scheduledAt, variants: scheduled, jobs, failedVariants };
 }

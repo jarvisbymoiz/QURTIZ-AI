@@ -124,8 +124,12 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
   const variantIds = unscheduled.map((v) => v.id);
 
   if (variantIds.length > 0) {
+    // Cancel (NOT delete) the pending jobs so publish history persists; the
+    // worker claims only status='pending' rows and retryFailedPublish refuses
+    // cancelled ones, so a cancelled job can never fire.
     await db
-      .delete(publishingJobs)
+      .update(publishingJobs)
+      .set({ status: "cancelled", updatedAt: new Date() })
       .where(and(
         eq(publishingJobs.contentItemId, itemId),
         eq(publishingJobs.workspaceId, ctx.workspaceId),
@@ -136,12 +140,20 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
       .update(contentVariants)
       .set({ status: "approved", updatedAt: new Date() })
       .where(inArray(contentVariants.id, variantIds));
-  }
 
-  if (item.status === "scheduled" && variantIds.length > 0) {
+    // Every schedulable variant was just returned to approved, so no pending
+    // job remains for this item: clear the grid anchor unconditionally. (With
+    // the MIN(scheduledAt) rule in schedulePost, a partially scheduled item
+    // can carry scheduledAt while its status is still "approved" — clearing
+    // only on status === "scheduled" would leave a ghost on the calendar.)
+    // Status flips only scheduled → approved; published items are untouched.
     await db
       .update(contentItems)
-      .set({ status: "approved", scheduledAt: null, updatedAt: new Date() })
+      .set({
+        ...(item.status === "scheduled" ? { status: "approved" as const } : {}),
+        scheduledAt: null,
+        updatedAt: new Date(),
+      })
       .where(eq(contentItems.id, itemId));
   }
 
