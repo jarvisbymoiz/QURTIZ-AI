@@ -7,6 +7,7 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs, jobs } from "@/db/schema";
 
 import { scheduleItem } from "@/lib/scheduling/engine";
+import { publishNow } from "@/lib/publishing/service";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { getActiveContext } from "@/lib/workspace";
@@ -147,6 +148,73 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
   return { ok: true };
+}
+
+const publishNowSchema = z.object({
+  itemId: z.uuid("Invalid content item id."),
+  variantId: z.uuid("Invalid content variant id."),
+  platform: z.enum(["facebook", "instagram"]),
+});
+
+/**
+ * Publish ONE approved/scheduled variant immediately (Calendar "Publish now").
+ * Zod-validated, workspace-scoped + rate-limited; the actual publish funnels
+ * through the centralized publishing service (`publishNow`), so provider
+ * routing, token refresh and honest failure surfacing are identical to the
+ * scheduled path. On failure the service's real error message is returned
+ * verbatim.
+ */
+export async function publishNowAction(input: {
+  itemId: string;
+  variantId: string;
+  platform: "facebook" | "instagram";
+}): Promise<ActionResult & { providerPostId?: string }> {
+  const parsed = publishNowSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid publish request." };
+  }
+
+  const ctx = await getActiveContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const rl = rateLimit("publish-now:" + ctx.workspaceId, 10, 60_000);
+  if (!rl.allowed) return { ok: false, error: "Too many publish attempts. Try again in a minute." };
+
+  const db = getDb();
+  const [variant] = await db
+    .select({
+      id: contentVariants.id,
+      status: contentVariants.status,
+      platform: contentVariants.platform,
+    })
+    .from(contentVariants)
+    .where(
+      and(
+        eq(contentVariants.id, parsed.data.variantId),
+        eq(contentVariants.contentItemId, parsed.data.itemId),
+        eq(contentVariants.workspaceId, ctx.workspaceId),
+      ),
+    );
+  if (!variant) return { ok: false, error: "Content variant not found." };
+  if (variant.status !== "approved" && variant.status !== "scheduled") {
+    return { ok: false, error: `Only approved or scheduled content can be published now (this variant is ${variant.status.replaceAll("_", " ")}).` };
+  }
+  if (variant.platform !== parsed.data.platform) {
+    return { ok: false, error: "Variant platform mismatch." };
+  }
+
+  const result = await publishNow({
+    workspaceId: ctx.workspaceId,
+    contentItemId: parsed.data.itemId,
+    contentVariantId: parsed.data.variantId,
+    platform: parsed.data.platform,
+  });
+  if (!result.ok) return { ok: false, error: result.message };
+
+  revalidatePath("/calendar");
+  revalidatePath("/content-studio");
+  revalidatePath("/");
+  return { ok: true, providerPostId: result.providerPostId };
 }
 
 /** Bulk approve everything currently Ready for Review. */

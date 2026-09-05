@@ -3,9 +3,10 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, ListChecks } from "lucide-react";
-import type { contentItems, publishingJobs } from "@/db/schema";
+import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, ListChecks, Zap } from "lucide-react";
+import type { contentItems, contentVariants, publishingJobs } from "@/db/schema";
 import {
+  publishNowAction,
   rescheduleContentAction,
   scheduleContentAction,
   unscheduleContentAction,
@@ -19,6 +20,8 @@ import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
 type PJob = typeof publishingJobs.$inferSelect;
+/** Minimal variant shape the page passes down (id + item + platform + status). */
+type Variant = Pick<typeof contentVariants.$inferSelect, "id" | "contentItemId" | "platform" | "status">;
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -47,11 +50,13 @@ function fmtTime(d: Date, timezone: string): string {
 export function CalendarClient({
   items,
   pJobs,
+  variants,
   timezone,
   editable,
 }: {
   items: Item[];
   pJobs: PJob[];
+  variants: Variant[];
   timezone: string;
   editable: boolean;
 }) {
@@ -67,6 +72,9 @@ export function CalendarClient({
   // empty for new bookings (the user must pick one — no silent default slot)
   // and prefilled with the current time when rescheduling an existing post.
   const [scheduleDraft, setScheduleDraft] = useState<{ item: Item; dateIso: string; time: string } | null>(null);
+  // Variant currently being published via "Publish now" (per-button busy
+  // state; all publish buttons disable while one is in flight).
+  const [publishingVariantId, setPublishingVariantId] = useState<string | null>(null);
 
   const monthView = useMemo(() => {
     const base = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
@@ -120,11 +128,51 @@ export function CalendarClient({
     return map;
   }, [pJobs]);
 
+  // Publishable variants per item (approved/scheduled only) — one
+  // "Publish now" button per platform variant in the item dialog.
+  const publishableVariantsByItem = useMemo(() => {
+    const map = new Map<string, Variant[]>();
+    for (const v of variants) {
+      if (v.status !== "approved" && v.status !== "scheduled") continue;
+      const list = map.get(v.contentItemId) ?? [];
+      list.push(v);
+      map.set(v.contentItemId, list);
+    }
+    return map;
+  }, [variants]);
+
   /** Open the schedule picker for a drop/click — never books anything itself. */
   function openScheduleDraft(item: Item, dateIso: string) {
     if (!editable) return;
     const time = item.scheduledAt ? fmtTime(new Date(item.scheduledAt), timezone) : "";
     setScheduleDraft({ item, dateIso, time });
+  }
+
+  /** Publish ONE approved/scheduled variant immediately. The server action
+   *  funnels through the centralized publishing service, so the toast shows
+   *  the real outcome: success confirms the provider post id; failure shows
+   *  the service's actual error verbatim (reconnect hints included). */
+  function handlePublishNow(item: Item, variant: Variant) {
+    if (publishingVariantId !== null) return;
+    setPublishingVariantId(variant.id);
+    void (async () => {
+      try {
+        const r = await publishNowAction({ itemId: item.id, variantId: variant.id, platform: variant.platform });
+        if (r.ok) {
+          toast.success(
+            `Published to ${variant.platform === "facebook" ? "Facebook" : "Instagram"} — post id ${r.providerPostId}.`,
+          );
+          setSelected(null);
+          router.refresh();
+        } else {
+          toast.error(r.error);
+        }
+      } catch {
+        toast.error("Publish failed — the request did not complete. Check your connection and try again.");
+      } finally {
+        setPublishingVariantId(null);
+      }
+    })();
   }
 
   function handleDrop(e: React.DragEvent, dateIso: string) {
@@ -419,6 +467,28 @@ export function CalendarClient({
                     <p className="mt-1">{j.lastError}</p>
                   </div>
                 ))}
+                {editable && (publishableVariantsByItem.get(selected.id) ?? []).length > 0 ? (
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">Publish now</p>
+                    {(publishableVariantsByItem.get(selected.id) ?? []).map((v) => (
+                      <div key={v.id} className="flex items-center justify-between gap-2 rounded-lg border p-2">
+                        <div className="min-w-0 text-xs">
+                          <span className="font-medium capitalize">{v.platform}</span>
+                          <span className="text-muted-foreground"> · {v.status.replaceAll("_", " ")}</span>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={publishingVariantId !== null}
+                          onClick={() => handlePublishNow(selected, v)}
+                        >
+                          <Zap className="size-3.5" aria-hidden />
+                          {publishingVariantId === v.id ? "Publishing…" : "Publish now"}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   {selected.status === "scheduled" && editable ? (
                     <Button size="sm" variant="outline" disabled={pending}

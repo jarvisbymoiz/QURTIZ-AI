@@ -22,15 +22,40 @@
  * has already been accepted by the platform and stored that id must NEVER
  * be re-fired — `retryFailedPublish` and the worker's claim guard against
  * that.
+ *
+ * Buffer token lifecycle (all inside this module + lib/buffer/client):
+ *   - PROACTIVE refresh in `resolvePublishConnection` when the stored expiry
+ *     is < 5 min away (shared in-flight promise per connection — Buffer
+ *     refresh tokens are single-use).
+ *   - REACTIVE refresh-once-then-retry on a 401; if the retry still 401s the
+ *     connection row is marked `expired` (ONLY on that real failure — never
+ *     at boot) and the caller receives reason `auth_expired`.
+ *   - Stale-overwrite guard: a refreshed envelope persists only if the DB
+ *     row still holds the token the refresh started from.
+ *   - Pre-publish channel validation (5-min success cache): the Buffer
+ *     channel must still exist and match the platform → `channel_invalid`.
+ *   - schedulePost refuses to create a job when NO connected connection
+ *     exists for the platform in either provider (no doomed jobs, no silent
+ *     Meta routing).
  */
 
 import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, platformConnections, publishingJobs } from "@/db/schema";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
-import { resolvePublishProviderForPlatform, type ContentPlatform } from "@/lib/publish/provider";
-import { decodeBufferTokenEnvelope, createPostForBuffer, type BufferPostMode, type BufferPostType, type BufferService } from "@/lib/buffer/client";
-import { applyRefreshedToken, refreshAccessToken } from "@/lib/buffer/client";
+import { resolvePublishProviderForPlatform, type ContentPlatform, type PublishProvider } from "@/lib/publish/provider";
+import {
+  applyRefreshedToken,
+  createPostForBuffer,
+  decodeBufferTokenEnvelope,
+  listChannels,
+  logBufferOAuthDiagnostic,
+  refreshAccessToken,
+  type BufferPostMode,
+  type BufferPostType,
+  type BufferService,
+  type BufferTokenEnvelope,
+} from "@/lib/buffer/client";
 import { publishPost } from "@/lib/meta/publish";
 import { createServiceClient } from "@/lib/supabase/service";
 import { desc } from "drizzle-orm";
@@ -47,7 +72,12 @@ export type ResolvedConnection =
       ok: true;
       provider: "meta" | "buffer";
       platform: ContentPlatform;
+      /** platformConnections row id — cache/lock key for refresh + channel
+       *  validation (NOT the provider's channel id; that is channelRef). */
+      connectionId: string;
       channelRef: string | null; // Buffer channel id (null for meta)
+      /** Buffer org id from the connection meta (null for meta / absent). */
+      organizationId: string | null;
       encryptedToken: string;
       accessToken: string; // decrypted Buffer access token OR Meta page token
       refreshToken: string | null; // Buffer envelope refresh token (null for meta)
@@ -62,14 +92,25 @@ export type PublishResult =
       mode: PublishMode;
       providerPostId: string;
       scheduledAt: Date;
-      /** True when a variant visual was attached to the row but Buffer
-       *  could not accept media on the documented createPost call. */
+      /** True when the published post carries its media (Buffer: the image
+       *  asset was sent with the mutation; Meta: the image URL was uploaded).
+       *  A variant visual that cannot be reached fails the publish instead. */
       mediaAttached: boolean;
     }
   | { ok: false; reason: string; message: string };
 
 export type ScheduleResult =
-  | { ok: true; jobId: string; scheduledAt: Date }
+  | {
+      ok: true;
+      jobId: string;
+      scheduledAt: Date;
+      /** Provider snapshot stamped on the job (matches the resolved
+       *  connection — the worker routes through exactly this adapter). */
+      provider: "meta" | "buffer";
+      /** Buffer channel id (null for meta) so callers (AI agent, UI) can
+       *  state the destination truthfully. */
+      channelRef: string | null;
+    }
   | { ok: false; reason: string; message: string };
 
 export type RetryResult = PublishResult;
@@ -120,13 +161,24 @@ export function buildBufferPayload(args: {
   dueAt?: Date;
 } {
   if (args.mode === "customScheduled" && !args.dueAt) {
-    // The mutation builder requires dueAt for customScheduled; surface the
+    // The variables builder requires dueAt for customScheduled; surface the
     // invariant violation here so callers fail fast (instead of receiving a
     // Buffer MutationError with an opaque JSON-shaped message).
     throw new Error("buildBufferPayload: customScheduled requires dueAt");
   }
   if (args.mode === "shareNow" && args.dueAt) {
     throw new Error("buildBufferPayload: shareNow forbids dueAt");
+  }
+  // Runtime contentKind guard: TypeScript unions are compile-time only, so a
+  // stale caller (or JS consumer) must fail here — with a typed
+  // PublishingError — rather than producing an opaque Buffer enum error.
+  if (args.contentKind !== "post" && args.contentKind !== "reel" && args.contentKind !== "story") {
+    throw new PublishingError({
+      code: "invalid_content_kind",
+      message: `Invalid content kind ${JSON.stringify(String(args.contentKind))} — must be exactly "post", "reel" or "story".`,
+      provider: "buffer",
+      step: "create_post",
+    });
   }
   return {
     channelId: args.channelId,
@@ -140,10 +192,170 @@ export function buildBufferPayload(args: {
 
 /* ── DB helpers ───────────────────────────────────────────────────── */
 
+/** Refresh a token whose expiry is under 5 minutes away (Buffer returns
+ *  expires_in on connect/refresh; envelopes without expiresAt can't be
+ *  probed and rely on the reactive 401 path). */
+const PROACTIVE_REFRESH_MARGIN_MS = 5 * 60_000;
+
+/** Pure predicate (unit-testable): proactive-refresh decision for a decoded
+ *  Buffer envelope. Requires BOTH an expiry AND a refresh token — without a
+ *  refresh token there is nothing to rotate. */
+export function shouldProactivelyRefresh(envelope: BufferTokenEnvelope | null, nowMs: number): boolean {
+  if (!envelope) return false;
+  if (typeof envelope.expiresAt !== "number") return false;
+  if (!envelope.refreshToken) return false;
+  return envelope.expiresAt - nowMs < PROACTIVE_REFRESH_MARGIN_MS;
+}
+
+/** Outcome of a locked token rotation. */
+type RefreshOutcome =
+  | { ok: true; envelope: BufferTokenEnvelope }
+  | { ok: false; message: string };
+
+/**
+ * Module-level in-flight refresh lock keyed by connection row id: concurrent
+ * publishes on the same connection share ONE refresh promise (Buffer refresh
+ * tokens are SINGLE-USE — two parallel refreshes would rotate the token
+ * twice and strand the loser's refresh_token).
+ */
+const refreshInFlight = new Map<string, Promise<RefreshOutcome>>();
+
+/**
+ * Rotate a Buffer access token (refresh once, persist with a stale-overwrite
+ * guard) and return the envelope the caller MUST use afterwards.
+ *
+ * Stale-overwrite guard: the refreshed envelope is persisted ONLY if the DB
+ * row's access token still equals the one the refresh started from (compared
+ * via decrypt). If another process already rotated the token, its newer
+ * envelope is returned untouched instead of overwriting it with ours.
+ */
+async function rotateBufferToken(args: {
+  connectionId: string;
+  startedFromAccessToken: string;
+  currentEnvelope: BufferTokenEnvelope;
+}): Promise<RefreshOutcome> {
+  const existing = refreshInFlight.get(args.connectionId);
+  if (existing) return existing;
+  const promise = (async (): Promise<RefreshOutcome> => {
+    const db = getDb();
+    if (!args.currentEnvelope.refreshToken) {
+      return { ok: false, message: "No refresh token stored — reconnect the Buffer account." };
+    }
+    const refreshed = await refreshAccessToken({ refreshToken: args.currentEnvelope.refreshToken });
+    if (!refreshed.ok) {
+      return { ok: false, message: refreshed.message };
+    }
+    const next = applyRefreshedToken(args.currentEnvelope, refreshed.data);
+    // Stale-overwrite guard: re-read the row and compare via decrypt.
+    const [row] = await db
+      .select()
+      .from(platformConnections)
+      .where(eq(platformConnections.id, args.connectionId));
+    const dbPlain = row?.encryptedToken ? decryptToken(row.encryptedToken) : null;
+    const dbEnvelope = dbPlain ? decodeBufferTokenEnvelope(dbPlain) : null;
+    if (dbEnvelope && dbEnvelope.accessToken !== args.startedFromAccessToken) {
+      // Another writer (different server instance) already rotated the token —
+      // keep THEIR envelope; ours (and its single-use refresh token) are dead.
+      return { ok: true, envelope: dbEnvelope };
+    }
+    await db
+      .update(platformConnections)
+      .set({
+        encryptedToken: encryptToken(JSON.stringify(next)),
+        updatedAt: new Date(),
+      })
+      .where(eq(platformConnections.id, args.connectionId));
+    return { ok: true, envelope: next };
+  })().finally(() => refreshInFlight.delete(args.connectionId));
+  refreshInFlight.set(args.connectionId, promise);
+  return promise;
+}
+
+/** Mark a connection expired after a hard auth failure (a REAL 401 during a
+ *  publish/refresh — never at boot or on a timer). */
+async function markConnectionExpired(connectionId: string): Promise<void> {
+  const db = getDb();
+  await db
+    .update(platformConnections)
+    .set({ status: "expired", updatedAt: new Date() })
+    .where(eq(platformConnections.id, connectionId));
+}
+
+/** The honest user-facing auth-expired failure (exact message reused by the
+ *  Connections page hint). */
+const AUTH_EXPIRED_MESSAGE = "Buffer session expired — reconnect on the Connections page.";
+
+/* ── Pre-publish channel validation ──────────────────────────────────── */
+
+/** Successful channel validations are cached per connectionId+channelRef for
+ *  5 minutes so a publish never pays the extra channels query more than once
+ *  per TTL. Failures are deliberately NOT cached — a reconnect re-enables
+ *  publishing immediately (the reconnect itself swaps token/channel on the
+ *  same row id). */
+const CHANNEL_VALIDATION_TTL_MS = 5 * 60_000;
+const channelValidationCache = new Map<string, { expiresAt: number; ok: true }>();
+
+/**
+ * Verify the Buffer channel right before createPost: it must still exist on
+ * the account, its `service` must match the publishing platform, and the
+ * query itself must succeed with the current token. One authenticated
+ * channels query per publish (cache-hit: zero).
+ *
+ * Buffer's Channel object may expose locked/paused flags, but those fields
+ * were auth-gated at introspection time and are NOT requested here — we only
+ * select the verified { id name service } shape, so unavailability checks
+ * beyond existence/service skip silently rather than risk failing every
+ * publish on an unverified field.
+ */
+async function validateBufferChannel(args: {
+  connectionId: string;
+  accessToken: string;
+  channelRef: string;
+  platform: ContentPlatform;
+  organizationId: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const cacheKey = `${args.connectionId}:${args.channelRef}`;
+  const cached = channelValidationCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return { ok: true };
+
+  if (!args.organizationId) {
+    return {
+      ok: false,
+      message: "Buffer connection is missing its organization reference — reconnect the Buffer account.",
+    };
+  }
+  const listed = await listChannels(args.accessToken, args.organizationId);
+  if (!listed.ok) {
+    return { ok: false, message: `Buffer channel check failed: ${listed.message}` };
+  }
+  const channel = listed.data.find((c) => c.id === args.channelRef);
+  if (!channel) {
+    return {
+      ok: false,
+      message: "The connected Buffer channel is no longer available on the account — reconnect the Buffer account.",
+    };
+  }
+  if (channel.service !== args.platform) {
+    return {
+      ok: false,
+      message: `Buffer channel service mismatch (expected ${args.platform}, got ${channel.service}) — reconnect the Buffer account.`,
+    };
+  }
+  channelValidationCache.set(cacheKey, { expiresAt: Date.now() + CHANNEL_VALIDATION_TTL_MS, ok: true });
+  return { ok: true };
+}
+
 /** Resolve the workspace's active publish connection for (workspaceId,
  *  platform) and return the decrypted token envelope (Buffer) or the page
  *  token (Meta). The caller uses the same shape for both providers —
- *  Meta just leaves refreshToken/envelope as null. */
+ *  Meta just leaves refreshToken/envelope as null.
+ *
+ * Buffer tokens are proactively refreshed here when the stored expiry is
+ * under 5 minutes away (shared in-flight promise per connection) — the
+ * reactive 401 path below remains the fallback for envelopes without an
+ * expiry. A failed PROACTIVE refresh never fails the resolve: the current
+ * token may still be valid, and a real 401 downstream is handled (and marks
+ * the connection expired) there. */
 export async function resolvePublishConnection(
   workspaceId: string,
   platform: ContentPlatform,
@@ -164,7 +376,7 @@ export async function resolvePublishConnection(
     return {
       ok: false,
       reason: "not_connected",
-      message: `${platform === "facebook" ? "Facebook" : "Instagram"} is not connected${provider === "buffer" ? " on Buffer" : ""}. Connect it on the Connections page.`,
+      message: `No connected ${platform === "facebook" ? "Facebook" : "Instagram"} account. Connect one on the Connections page.`,
     };
   }
   const plain = decryptToken(conn.encryptedToken);
@@ -176,7 +388,7 @@ export async function resolvePublishConnection(
     };
   }
   if (provider === "buffer") {
-    const envelope = decodeBufferTokenEnvelope(plain);
+    let envelope = decodeBufferTokenEnvelope(plain);
     if (!envelope) {
       return {
         ok: false,
@@ -184,14 +396,42 @@ export async function resolvePublishConnection(
         message: "Stored Buffer token could not be decrypted — reconnect the account.",
       };
     }
+    let accessToken = envelope.accessToken;
+    let refreshToken = envelope.refreshToken ?? null;
+    const meta = (conn.meta ?? {}) as Record<string, unknown>;
+    const organizationId = typeof meta.organizationId === "string" ? meta.organizationId : null;
+    // Proactive refresh: expiring soon + refresh token present → rotate BEFORE
+    // the call. Serialized per connection via rotateBufferToken's in-flight map.
+    if (shouldProactivelyRefresh(envelope, Date.now())) {
+      const rotated = await rotateBufferToken({
+        connectionId: conn.id,
+        startedFromAccessToken: envelope.accessToken,
+        currentEnvelope: envelope,
+      });
+      if (rotated.ok) {
+        envelope = rotated.envelope;
+        accessToken = envelope.accessToken;
+        refreshToken = envelope.refreshToken ?? null;
+      } else {
+        // Honest + resilient: keep publishing with the current token; a real
+        // 401 downstream takes the reactive path (retry → mark expired).
+        logBufferOAuthDiagnostic("proactive_refresh_skipped", {
+          connectionId: conn.id,
+          platform,
+          reason: rotated.message.slice(0, 120),
+        });
+      }
+    }
     return {
       ok: true,
       provider,
       platform,
+      connectionId: conn.id,
       channelRef: conn.channelRef ?? null,
+      organizationId,
       encryptedToken: conn.encryptedToken,
-      accessToken: envelope.accessToken,
-      refreshToken: envelope.refreshToken ?? null,
+      accessToken,
+      refreshToken,
       envelope,
     };
   }
@@ -200,7 +440,9 @@ export async function resolvePublishConnection(
     ok: true,
     provider,
     platform,
+    connectionId: conn.id,
     channelRef: null,
+    organizationId: null,
     encryptedToken: conn.encryptedToken,
     accessToken: plain,
     refreshToken: null,
@@ -370,9 +612,36 @@ export async function publishNow(args: {
         message: "Buffer connection is missing its channel reference — reconnect the Buffer account.",
       };
     }
-    // Buffer: try once, refresh-once on auth, persist the newest envelope if
-    // we refreshed. No documented media on createPost — visuals stay
-    // unattached; we record that honestly on the result.
+    // Pre-publish channel validation (successes cached 5 min per connection
+    // + channel): the channel must still exist on the Buffer account and its
+    // service must match the platform being published to.
+    const validation = await validateBufferChannel({
+      connectionId: connRes.connectionId,
+      accessToken: connRes.accessToken,
+      channelRef: connRes.channelRef,
+      platform: connRes.platform,
+      organizationId: connRes.organizationId,
+    });
+    if (!validation.ok) return { ok: false, reason: "channel_invalid", message: validation.message };
+
+    // Media: Buffer attaches ONE image asset (oneOf-compliant). A visual that
+    // cannot get a reachable signed URL fails the publish — same honesty as
+    // the Meta path; silently dropping it would change what the post IS.
+    let mediaUrl: string | null = null;
+    if (ctxRes.visual?.storagePath) {
+      mediaUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
+      if (!mediaUrl) {
+        return {
+          ok: false,
+          reason: "missing_image_url",
+          message: "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.",
+        };
+      }
+    }
+    // firstComment: the variant's platform-specific first comment wins; the
+    // item-level one is the fallback. Sent inside the per-channel metadata
+    // (metadata.<service>.firstComment) — never as a separate top-level field.
+    const firstComment = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
     const bufferService = platformToBufferService(connRes.platform);
     const argsForCall = {
       channelId: connRes.channelRef,
@@ -380,18 +649,33 @@ export async function publishNow(args: {
       mode: "shareNow" as PublishMode,
       contentKind,
       service: bufferService,
+      mediaUrl,
+      firstComment,
     };
     let res = await createPostForBuffer(connRes.accessToken, argsForCall);
-    if (!res.ok && res.reason === "auth" && connRes.refreshToken) {
-      const refreshed = await refreshAccessToken({ refreshToken: connRes.refreshToken });
-      if (refreshed.ok) {
-        const next = applyRefreshedToken(connRes.envelope!, refreshed.data);
-        await db
-          .update(platformConnections)
-          .set({ encryptedToken: encryptToken(JSON.stringify(next)), updatedAt: new Date() })
-          .where(and(eq(platformConnections.workspaceId, args.workspaceId), eq(platformConnections.platform, ctxRes.variant.platform), eq(platformConnections.provider, "buffer")));
-        res = await createPostForBuffer(next.accessToken, argsForCall);
+    if (!res.ok && res.reason === "auth") {
+      // Reactive refresh (exactly once) — serialized per connection and
+      // stale-overwrite-guarded inside rotateBufferToken.
+      const rotated = await rotateBufferToken({
+        connectionId: connRes.connectionId,
+        startedFromAccessToken: connRes.accessToken,
+        currentEnvelope: connRes.envelope!,
+      });
+      if (rotated.ok) {
+        res = await createPostForBuffer(rotated.envelope.accessToken, argsForCall);
       }
+    }
+    if (!res.ok && res.reason === "auth") {
+      // The refresh failed or the retry still 401'd: the session is dead.
+      // Mark the connection expired on this REAL failure (never at boot) and
+      // surface the reconnect message.
+      await markConnectionExpired(connRes.connectionId);
+      logBufferOAuthDiagnostic("publish_auth_expired", {
+        workspaceId: args.workspaceId,
+        platform: connRes.platform,
+        detail: res.message.slice(0, 120),
+      });
+      return { ok: false, reason: "auth_expired", message: AUTH_EXPIRED_MESSAGE };
     }
     if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
     const scheduledAt = new Date();
@@ -399,13 +683,12 @@ export async function publishNow(args: {
       const parsed = new Date(res.data.dueAt);
       if (!Number.isNaN(parsed.getTime())) scheduledAt.setTime(parsed.getTime());
     }
-    const hasVisual = Boolean(ctxRes.visual?.storagePath);
     const result: Record<string, unknown> = {
       updateId: res.data.id,
       status: res.data.status,
       scheduledAt: scheduledAt.toISOString(),
     };
-    if (hasVisual) result.mediaAttached = false; // honest: Buffer has no documented media input yet
+    if (mediaUrl) result.mediaAttached = true; // image asset sent with the mutation
     await flipToPublished({
       workspaceId: args.workspaceId,
       itemId: ctxRes.item.id,
@@ -420,7 +703,7 @@ export async function publishNow(args: {
       mode: "shareNow",
       providerPostId: res.data.id,
       scheduledAt,
-      mediaAttached: hasVisual ? false : true,
+      mediaAttached: mediaUrl !== null,
     };
   }
 
@@ -503,9 +786,15 @@ export async function schedulePost(args: {
   });
   if (!ctxRes.ok) return { ok: false, reason: ctxRes.reason, message: ctxRes.message };
 
-  // Resolve provider snapshot for the job (per-platform connection first,
-  // then workspace setting, then "meta").
-  const provider = await resolvePublishProviderForPlatform(args.workspaceId, args.platform);
+  // Connection guard (BEFORE the job row exists): when NO connected
+  // connection exists for (workspaceId, platform) in EITHER provider, do not
+  // create a doomed job — fail with the reconnect message instead. On
+  // success the resolved connection IS the provider snapshot (its row is
+  // exactly what the worker will pick up), so job.provider and channelRef
+  // are stamped from it verbatim.
+  const connRes = await resolvePublishConnection(args.workspaceId, args.platform);
+  if (!connRes.ok) return { ok: false, reason: connRes.reason, message: connRes.message };
+  const provider: PublishProvider = connRes.provider;
 
   // Cancel any pre-existing pending job for this variant — reschedule
   // semantics, matching scheduleItem.
@@ -545,7 +834,7 @@ export async function schedulePost(args: {
       .set({ status: "scheduled", scheduledAt: args.scheduledAt, updatedAt: new Date() })
       .where(eq(contentItems.id, args.contentItemId));
   }
-  return { ok: true, jobId: job.id, scheduledAt: args.scheduledAt };
+  return { ok: true, jobId: job.id, scheduledAt: args.scheduledAt, provider, channelRef: connRes.channelRef };
 }
 
 /**
@@ -642,10 +931,35 @@ export async function retryFailedPublish(args: {
       await db.update(publishingJobs).set({ status: "failed", lastError: msg, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
       return { ok: false, reason: "missing_channel", message: msg };
     }
+    // Pre-publish channel validation (same 5-min success cache as publishNow).
+    const validation = await validateBufferChannel({
+      connectionId: connRes.connectionId,
+      accessToken: connRes.accessToken,
+      channelRef: connRes.channelRef,
+      platform: connRes.platform,
+      organizationId: connRes.organizationId,
+    });
+    if (!validation.ok) {
+      await db.update(publishingJobs).set({ status: "failed", lastError: validation.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+      return { ok: false, reason: "channel_invalid", message: validation.message };
+    }
+    // Media: same honesty as publishNow — an unreachable visual fails the
+    // retry instead of silently publishing a different post.
+    let mediaUrl: string | null = null;
+    if (ctxRes.visual?.storagePath) {
+      mediaUrl = await signedUrlForVisual(ctxRes.visual.storagePath);
+      if (!mediaUrl) {
+        const msg = "Could not generate a public URL for the attached visual (Supabase storage unreachable) — the post was not published.";
+        await db.update(publishingJobs).set({ status: "failed", lastError: msg, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+        return { ok: false, reason: "missing_image_url", message: msg };
+      }
+    }
     let attempt = 0;
     let lastReason = "unknown";
     let lastMessage = "";
     const bufferService = platformToBufferService(connRes.platform);
+    let accessToken = connRes.accessToken;
+    const firstComment = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
     while (attempt < Math.max(1, maxAttempts - currentAttempt + 1)) {
       attempt++;
       const callArgs = {
@@ -654,17 +968,20 @@ export async function retryFailedPublish(args: {
         mode: "shareNow" as PublishMode, // retry fires NOW
         contentKind,
         service: bufferService,
+        mediaUrl,
+        firstComment,
       };
-      let res = await createPostForBuffer(connRes.accessToken, callArgs);
-      if (!res.ok && res.reason === "auth" && connRes.refreshToken) {
-        const refreshed = await refreshAccessToken({ refreshToken: connRes.refreshToken });
-        if (refreshed.ok) {
-          const next = applyRefreshedToken(connRes.envelope!, refreshed.data);
-          await db
-            .update(platformConnections)
-            .set({ encryptedToken: encryptToken(JSON.stringify(next)), updatedAt: new Date() })
-            .where(and(eq(platformConnections.workspaceId, args.workspaceId), eq(platformConnections.platform, ctxRes.variant.platform), eq(platformConnections.provider, "buffer")));
-          res = await createPostForBuffer(next.accessToken, callArgs);
+      let res = await createPostForBuffer(accessToken, callArgs);
+      if (!res.ok && res.reason === "auth") {
+        // Reactive refresh (once per publish) — locked + stale-guarded.
+        const rotated = await rotateBufferToken({
+          connectionId: connRes.connectionId,
+          startedFromAccessToken: accessToken,
+          currentEnvelope: connRes.envelope!,
+        });
+        if (rotated.ok) {
+          accessToken = rotated.envelope.accessToken;
+          res = await createPostForBuffer(accessToken, callArgs);
         }
       }
       if (res.ok) {
@@ -673,13 +990,12 @@ export async function retryFailedPublish(args: {
           const parsed = new Date(res.data.dueAt);
           if (!Number.isNaN(parsed.getTime())) scheduledAt.setTime(parsed.getTime());
         }
-        const hasVisual = Boolean(ctxRes.visual?.storagePath);
         const result: Record<string, unknown> = {
           updateId: res.data.id,
           status: res.data.status,
           scheduledAt: scheduledAt.toISOString(),
         };
-        if (hasVisual) result.mediaAttached = false;
+        if (mediaUrl) result.mediaAttached = true;
         await flipToPublished({
           workspaceId: args.workspaceId,
           itemId: ctxRes.item.id,
@@ -694,23 +1010,36 @@ export async function retryFailedPublish(args: {
           mode: "shareNow",
           providerPostId: res.data.id,
           scheduledAt,
-          mediaAttached: hasVisual ? false : true,
+          mediaAttached: mediaUrl !== null,
         };
       }
       lastReason = res.reason;
       lastMessage = res.message;
+      if (res.reason === "auth") break; // permanent: refresh+retry already exhausted
       const retryable = res.reason === "network" || res.reason === "rate_limited" || res.reason === "invalid_response";
       if (!retryable) break;
       // Backoff: exponential (base * 2^(attempt-1)).
       const sleepMs = baseBackoffMs * Math.pow(2, attempt - 1);
       await new Promise((r) => setTimeout(r, Math.min(sleepMs, 60_000))); // cap single-retry sleep to 60s
     }
+    if (lastReason === "auth") {
+      // Real auth failure after refresh+retry: mark expired + reconnect message.
+      await markConnectionExpired(connRes.connectionId);
+      logBufferOAuthDiagnostic("publish_auth_expired", {
+        workspaceId: args.workspaceId,
+        platform: connRes.platform,
+        detail: lastMessage.slice(0, 120),
+      });
+      await db
+        .update(publishingJobs)
+        .set({ status: "failed", lastError: AUTH_EXPIRED_MESSAGE, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, job.id));
+      return { ok: false, reason: "auth_expired", message: AUTH_EXPIRED_MESSAGE };
+    }
     const reason =
       currentAttempt >= maxAttempts
         ? "attempts_exhausted"
-        : lastReason === "auth"
-          ? "auth"
-          : "rejected";
+        : "rejected";
     await db
       .update(publishingJobs)
       .set({ status: "failed", lastError: lastMessage, updatedAt: new Date() })

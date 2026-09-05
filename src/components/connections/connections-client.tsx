@@ -295,6 +295,10 @@ function ProviderSection({
 }) {
   const status = conn?.status ?? "not_connected";
   const connected = status === "connected";
+  // A REAL auth failure during a publish/refresh marks the row "expired"
+  // (never at boot) — surface it like the error badge and point at the
+  // reconnect button below.
+  const expired = status === "expired";
   const platformName = platform === "facebook" ? "Facebook" : "Instagram";
   const envReady = provider === "meta" ? metaConfigured : bufferConfigured;
   const connectDisabled = !envReady;
@@ -304,7 +308,7 @@ function ProviderSection({
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="secondary">{PROVIDER_LABEL[provider]}</Badge>
         <Badge
-          variant={connected ? "default" : status === "error" ? "destructive" : "secondary"}
+          variant={connected ? "default" : status === "error" || expired ? "destructive" : "secondary"}
           className={cnDefault(status)}
         >
           {connected ? "Connected" : status.replaceAll("_", " ")}
@@ -325,6 +329,11 @@ function ProviderSection({
         </div>
       ) : (
         <div className="mt-2.5 space-y-2">
+          {expired ? (
+            <p className="flex items-center gap-1.5 text-xs text-destructive">
+              <CircleAlert className="size-3.5" aria-hidden /> Session expired — reconnect to publish again.
+            </p>
+          ) : null}
           <p className="text-xs text-muted-foreground">
             {provider === "meta"
               ? "Official Graph API publishing — no browser automation."

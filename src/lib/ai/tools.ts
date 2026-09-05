@@ -339,12 +339,25 @@ export function buildAgentTools(ctx: AgentToolContext) {
         await logStep("schedule_content", input, { ok: result.ok, scheduledAt: result.ok ? result.scheduledAt.toISOString() : undefined });
         if (!result.ok) return { scheduled: false, message: result.message };
 
+        // Structured truth for the agent: provider, channel, job id and the
+        // queued slot per scheduled variant — so the agent can state WHERE
+        // and WHEN each post will go without guessing. `channel` is null for
+        // Meta (its routing is page-based, not a Buffer channel id).
         const wallClock = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(result.scheduledAt);
+        const destinations = result.jobs
+          .map((j) => `${j.platform} via ${j.provider}${j.channelRef ? ` (channel ${j.channelRef})` : ""}`)
+          .join(", ");
         return {
           scheduled: true,
+          provider: result.jobs[0]?.provider,
+          platform: result.jobs[0]?.platform,
+          channel: result.jobs[0]?.channelRef ?? null,
+          jobId: result.jobs[0]?.jobId,
+          jobs: result.jobs,
           scheduledAt: result.scheduledAt.toISOString(),
+          status: "queued" as const,
           variants: result.variants,
-          message: `Scheduled "${item.topic}" for ${dateIso} ${wallClock} (${tz}) across ${result.variants} platform variant${result.variants === 1 ? "" : "s"}.`,
+          message: `Scheduled "${item.topic}" for ${dateIso} ${wallClock} (${tz}) — ${destinations}. Publish job${result.jobs.length === 1 ? "" : "s"} status: queued.`,
         };
       } catch (error) {
         const message = formatAgentToolError(error);

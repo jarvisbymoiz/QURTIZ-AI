@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { contentItems, contentVariants } from "@/db/schema";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { contentItems, contentVariants, platformConnections } from "@/db/schema";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { dateIsoInTz, parseZonedDateTime } from "@/lib/scheduling/time";
+import { encryptToken } from "@/lib/crypto/tokens";
 
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
 
@@ -9,6 +10,20 @@ const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
 
 const TZ = "Asia/Karachi";
+
+// Deterministic ENCRYPTION_KEY (same convention as the buffer client tests):
+// the centralized publishing service decrypts the connection's stored token
+// during resolvePublishConnection, so the fake rows carry a real encrypted
+// Meta page token that round-trips through the actual crypto helpers.
+const ENCRYPTION_KEY = "ab".repeat(32);
+
+beforeAll(() => {
+  process.env.ENCRYPTION_KEY = ENCRYPTION_KEY;
+});
+
+afterAll(() => {
+  delete process.env.ENCRYPTION_KEY;
+});
 
 /**
  * YYYY-MM-DD `days` away from TODAY in the test timezone. The engine now
@@ -67,19 +82,37 @@ function extractEqForColumn(condition: unknown, wantedColumn: string): string | 
  *  engine now delegates to the centralized publishing service, so the mock
  *  has to support extra queries the service runs:
  *    - `select().from(visualAssets).where().orderBy().limit(1)`
+ *    - `select().from(platformConnections).where(...)` (connection guard +
+ *      provider resolution inside resolvePublishConnection)
  *    - `insert(publishingJobs).values(...).returning()`
  *  Plus the service's variant ownership check requires the variant row to
  *  carry `contentItemId` and `workspaceId` (matched against the args). The
  *  mock DOES filter by id when the where condition is `eq(id, X)` so the
  *  service's variant-by-id lookup returns the right row even when the test
- *  seeds multiple variants. */
-function makeDb(overrides: { item?: Row; variants?: Row[] }) {
+ *  seeds multiple variants, and by `platform` for platformConnections. */
+function makeDb(overrides: { item?: Row; variants?: Row[]; connections?: Row[] }) {
   const calls: Call[] = [];
+
+  /** Connected Meta connection per platform (the service's connection guard
+   *  runs before any job insert — without these rows schedulePost refuses
+   *  with not_connected). encryptedToken round-trips the real helpers. */
+  const connections: Row[] =
+    overrides.connections ??
+    (["facebook", "instagram"] as const).map((platform) => ({
+      id: `conn-${platform}`,
+      workspaceId: "ws-1",
+      platform,
+      provider: "meta",
+      status: "connected",
+      channelRef: null,
+      encryptedToken: encryptToken(`${platform}-page-token`),
+    }));
 
   function rowsFor(table: unknown, whereCondition?: unknown): Row[] {
     const rows = (() => {
       if (table === contentItems) return overrides.item ? [overrides.item] : [];
       if (table === contentVariants) return overrides.variants ?? [];
+      if (table === platformConnections) return connections;
       return [];
     })();
     // Filter variant rows ONLY when the where condition compares `id` (the
@@ -88,6 +121,12 @@ function makeDb(overrides: { item?: Row; variants?: Row[] }) {
     if (table === contentVariants && whereCondition) {
       const id = extractEqForColumn(whereCondition, "id");
       if (id) return rows.filter((r) => r.id === id);
+    }
+    // platformConnections lookups compare `platform` (both the provider
+    // resolution and the connection load inside resolvePublishConnection).
+    if (table === platformConnections && whereCondition) {
+      const platform = extractEqForColumn(whereCondition, "platform");
+      if (platform) return rows.filter((r) => r.platform === platform);
     }
     return rows;
   }

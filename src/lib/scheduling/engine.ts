@@ -5,9 +5,17 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants } from "@/db/schema";
 import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
 import { schedulePost } from "@/lib/publishing/service";
+import type { ContentPlatform, PublishProvider } from "@/lib/publish/provider";
 
 export type ScheduleOutcome =
-  | { ok: true; scheduledAt: Date; variants: number }
+  | {
+      ok: true;
+      scheduledAt: Date;
+      variants: number;
+      /** Per-variant job truth (provider snapshot + Buffer channelRef) so
+       *  callers — the AI agent, toasts — can state WHERE each post went. */
+      jobs: Array<{ jobId: string; platform: ContentPlatform; provider: PublishProvider; channelRef: string | null }>;
+    }
   | { ok: false; reason: string; message: string };
 
 /**
@@ -93,6 +101,8 @@ export async function scheduleItem(args: {
   // flips variant status to scheduled, and (if all variants land) the item
   // status to scheduled. providerPostId/idempotency is owned there.
   let scheduled = 0;
+  const jobs: Array<{ jobId: string; platform: ContentPlatform; provider: PublishProvider; channelRef: string | null }> = [];
+  let firstError: string | null = null;
   for (const v of schedulable) {
     const res = await schedulePost({
       workspaceId: args.workspaceId,
@@ -101,15 +111,23 @@ export async function scheduleItem(args: {
       platform: v.platform,
       scheduledAt,
     });
-    if (res.ok) scheduled++;
+    if (res.ok) {
+      scheduled++;
+      jobs.push({ jobId: res.jobId, platform: v.platform, provider: res.provider, channelRef: res.channelRef });
+    } else if (firstError === null) {
+      // Surface the service's failure verbatim (e.g. the exact "No connected
+      // … account. Connect one on the Connections page." message) instead of
+      // a generic aggregate that hides the real reason.
+      firstError = res.message;
+    }
   }
   if (scheduled === 0) {
     return {
       ok: false,
       reason: "no_variants",
-      message: "No variants could be scheduled — check that platforms are connected.",
+      message: firstError ?? "No variants could be scheduled — check that platforms are connected.",
     };
   }
 
-  return { ok: true, scheduledAt, variants: scheduled };
+  return { ok: true, scheduledAt, variants: scheduled, jobs };
 }

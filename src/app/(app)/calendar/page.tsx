@@ -1,6 +1,6 @@
 ﻿import { and, desc, eq, gte, inArray, isNotNull, lte, or } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contentItems, publishingJobs } from "@/db/schema";
+import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
 import { requireWorkspace } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
@@ -50,15 +50,35 @@ export default async function CalendarPage() {
         )
     : [];
 
+  // Per-item variants (minimal columns) so the item dialog can offer
+  // "Publish now" per publishable (approved/scheduled) platform variant.
+  const variants = itemIds.length
+    ? await db
+        .select({
+          id: contentVariants.id,
+          contentItemId: contentVariants.contentItemId,
+          platform: contentVariants.platform,
+          status: contentVariants.status,
+        })
+        .from(contentVariants)
+        .where(
+          and(
+            eq(contentVariants.workspaceId, ctx.workspace.id),
+            inArray(contentVariants.contentItemId, itemIds),
+          ),
+        )
+    : [];
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Content Calendar"
-        description="Drag an approved post onto a day and pick its publish time (workspace timezone). Publishing runs through your connected Meta accounts — failed publishes show honestly."
+        description="Drag an approved post onto a day and pick its publish time (workspace timezone). Publishing runs through your connected accounts — failed publishes show honestly."
       />
       <CalendarClient
         items={items}
         pJobs={pJobs}
+        variants={variants}
         timezone={ctx.workspace.timezone}
         editable={can(ctx.role, "brand:write")}
       />

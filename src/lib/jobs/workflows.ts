@@ -114,8 +114,15 @@ async function attemptPublish(publishingJobId: string): Promise<void> {
     .where(eq(publishingJobs.id, job.id));
 
   // Auth-class failures deserve a distinct notification kind so the user is
-  // asked to reconnect (matches the pre-refactor Buffer behavior).
-  if (result.reason === "auth" || result.reason === "decrypt_failed" || result.reason === "missing_channel") {
+  // asked to reconnect (matches the pre-refactor Buffer behavior). The
+  // service surfaces a dead Buffer session as `auth_expired` — it already
+  // refreshed + retried once and marked the connection expired.
+  if (
+    result.reason === "auth" ||
+    result.reason === "auth_expired" ||
+    result.reason === "decrypt_failed" ||
+    result.reason === "missing_channel"
+  ) {
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
       userId: recipientId,

@@ -24,13 +24,23 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  * - API transport is Buffer's GraphQL API: EVERY call is a POST to the ROOT of
  *   api.buffer.com (no /graphql path — this replaced the legacy REST
  *   profiles.json / updates endpoints and their access_token= query-param
- *   auth) with a Bearer access token and a { query } JSON body. GraphQL-level
- *   failures arrive inside a 200 response's errors array, so HTTP 200 never
- *   implies success.
- * - createPost has NO documented media input yet — visuals are NOT attached
- *   (media attach is pending documented API support; callers record
- *   mediaAttached: false). Status polling returns later via a documented
- *   getPost query.
+ *   auth) with a Bearer access token and a { query, variables } JSON body.
+ *   GraphQL-level failures arrive inside a 200 response's errors array, so
+ *   HTTP 200 never implies success. HTTP 429 gets a bounded retry (2 attempts,
+ *   fixed 2s/5s delays or a capped Retry-After) — a 429 means Buffer did not
+ *   process the single mutation at all, so re-sending is safe.
+ * - createPost is sent VARIABLES-BASED: enums (ShareMode, SchedulingType,
+ *   PostType*) travel as JSON strings inside `variables` — Buffer's server
+ *   rejects quoted enum literals inside an inline mutation string
+ *   (`Enum "PostTypeFacebook" cannot represent non-enum value: "post"`).
+ *   Assets honor the AssetInput @oneOf contract (exactly ONE key per asset):
+ *   text-only posts send `assets: []`, media posts send
+ *   `assets: [{ image: { url } }]`. NEVER `assets: {}` — that produced
+ *   "OneOf Input Object AssetInput must specify exactly one key".
+ *   The `image.url` subshape is the one unverified detail (the full
+ *   AssetInputImage fields are auth-gated); Buffer's field errors surface
+ *   verbatim if it complains. linkAttachment is NOT wired (link-attachment
+ *   posts only, and never combined with non-empty assets).
  * - HTTP failures map to typed results ({ ok: false, reason, message }).
  *   Raw tokens never appear in errors or logs.
  * - The OAuth `state` marker is a stateless HMAC-signed
@@ -264,74 +274,106 @@ type GraphQLResponse<T> = { data?: T | null; errors?: Array<{ message?: unknown 
 
 /**
  * POST one GraphQL operation to the ROOT of api.buffer.com (no /graphql path)
- * with a Bearer access token and a { query } JSON body.
+ * with a Bearer access token and a { query, variables } JSON body.
  *
  * Failures are typed: non-2xx maps through reasonForStatus; a 2xx body with a
  * non-empty errors array is a GraphQL application error → "rejected" with the
  * first two sanitized messages (HTTP 200 never implies success). Every call
  * logs one safe diagnostic line ({ operation, endpoint, status, hasErrors }) —
  * never tokens or secrets.
+ *
+ * Rate limits: HTTP 429 gets a bounded retry — max 2 retries after 2s then 5s
+ * (a present Retry-After header wins, capped at 10s). A 429 means Buffer did
+ * not process the single mutation at all, so re-sending is safe; after the
+ * retries are exhausted the failure surfaces as "rate_limited".
  */
+const RATE_LIMIT_MAX_RETRIES = 2;
+const RATE_LIMIT_RETRY_DELAYS_MS = [2_000, 5_000] as const;
+const RATE_LIMIT_MAX_DELAY_MS = 10_000;
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) into a delay cap;
+ *  null when absent/unparseable. Never throws. */
+function retryAfterMs(headerValue: string | null): number | null {
+  if (!headerValue) return null;
+  const trimmed = headerValue.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) return Math.max(0, asDate - Date.now());
+  return null;
+}
+
 async function bufferGraphQL<T>(
   accessToken: string,
   operation: string,
   query: string,
+  variables?: unknown,
 ): Promise<BufferApiResult<T>> {
   const endpoint = BUFFER_API_BASE.replace(/\/+$/, "");
-  let res: Response;
-  try {
-    res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    logBufferOAuthDiagnostic("api", { operation, endpoint, status: null, hasErrors: false });
-    return {
-      ok: false,
-      reason: "network",
-      message: error instanceof Error ? error.message : "Buffer API request failed",
-    };
-  }
-  const text = await res.text();
-  let body: GraphQLResponse<T> | null = null;
-  try {
-    body = text ? (JSON.parse(text) as GraphQLResponse<T>) : null;
-  } catch {
-    body = null;
-  }
-  if (!res.ok) {
-    logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
-    return {
-      ok: false,
-      reason: reasonForStatus(res.status),
-      message: messageOf(body) ?? `Buffer API error (HTTP ${res.status}).`,
-    };
-  }
-  const errors = body && Array.isArray(body.errors) ? body.errors : [];
-  if (errors.length > 0) {
-    logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
-    const joined = errors
-      .slice(0, 2)
-      .map((e) => (e && typeof e.message === "string" ? sanitizeMessage(e.message) : ""))
-      .filter(Boolean)
-      .join("; ");
-    return {
-      ok: false,
-      reason: "rejected",
-      message: joined.length > 0 ? joined : `Buffer ${operation} failed (GraphQL errors).`,
-    };
-  }
-  if (!body || body.data === undefined || body.data === null) {
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(variables === undefined ? { query } : { query, variables }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      logBufferOAuthDiagnostic("api", { operation, endpoint, status: null, hasErrors: false });
+      return {
+        ok: false,
+        reason: "network",
+        message: error instanceof Error ? error.message : "Buffer API request failed",
+      };
+    }
+    if (res.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+      const delay = Math.min(
+        retryAfterMs(res.headers.get("retry-after")) ?? RATE_LIMIT_RETRY_DELAYS_MS[attempt],
+        RATE_LIMIT_MAX_DELAY_MS,
+      );
+      logBufferOAuthDiagnostic("api-rate-limited", { operation, attempt: attempt + 1, delayMs: delay });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      continue;
+    }
+    const text = await res.text();
+    let body: GraphQLResponse<T> | null = null;
+    try {
+      body = text ? (JSON.parse(text) as GraphQLResponse<T>) : null;
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
+      return {
+        ok: false,
+        reason: reasonForStatus(res.status),
+        message: messageOf(body) ?? `Buffer API error (HTTP ${res.status}).`,
+      };
+    }
+    const errors = body && Array.isArray(body.errors) ? body.errors : [];
+    if (errors.length > 0) {
+      logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: true });
+      const joined = errors
+        .slice(0, 2)
+        .map((e) => (e && typeof e.message === "string" ? sanitizeMessage(e.message) : ""))
+        .filter(Boolean)
+        .join("; ");
+      return {
+        ok: false,
+        reason: "rejected",
+        message: joined.length > 0 ? joined : `Buffer ${operation} failed (GraphQL errors).`,
+      };
+    }
+    if (!body || body.data === undefined || body.data === null) {
+      logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: false });
+      return { ok: false, reason: "invalid_response", message: `Buffer ${operation} returned no data.` };
+    }
     logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: false });
-    return { ok: false, reason: "invalid_response", message: `Buffer ${operation} returned no data.` };
+    return { ok: true, data: body.data };
   }
-  logBufferOAuthDiagnostic("api", { operation, endpoint, status: res.status, hasErrors: false });
-  return { ok: true, data: body.data };
 }
 
 /* ── PKCE (OAuth2 Authorization Code + PKCE) ─────────────────────── */
@@ -513,62 +555,113 @@ export type BufferPostTypeInstagramValue =
  *  names match Buffer's channel.service string (facebook/instagram). */
 export type BufferService = "facebook" | "instagram";
 
+/* ── createPost mutation contract (variables-based) ───────────────── */
+
+/** The two ShareMode values this product sends. */
+export type BufferPostMode = "shareNow" | "customScheduled";
+/** The per-service metadata `type` values this product sends. */
+export type BufferPostType = "post" | "story" | "reel";
+
 /**
- * Build the documented createPost GraphQL mutation.
+ * Documented createPost mutation — VARIABLES-BASED (the definitive fix).
  *
- * Aligned to Buffer's CURRENT GraphQL schema (live introspection
- * 2026-09-05): the `createPost` mutation takes a `CreatePostInput` whose
- * REQUIRED fields are `assets: AssetsInput`, `channelId: ChannelId!`,
- * `mode: ShareMode!`, `needsApproval: Boolean!`, `schedulingType:
- * SchedulingType!`. The per-channel metadata (Buffer's `PostInputMetaData`
- * input) is an object map keyed by the channel's service — the legacy
- * top-level `metadata: { type }` shape is INVALID against the current
- * schema and Buffer rejects it. We build `metadata.<service>.type` (where
- * `<service>` ∈ {facebook, instagram}) so each channel is stamped with the
- * Buffer-documented `PostTypeFacebook` / `PostType` enum value for the
- * variant's format.
+ * Aligned to Buffer's CURRENT GraphQL schema (live introspection 2026-09-05):
+ * `createPost(input: CreatePostInput!)` with REQUIRED `assets`, `channelId`,
+ * `mode: ShareMode`, `needsApproval`, `schedulingType: SchedulingType`. ALL
+ * enums and values travel inside `variables` as plain JSON — Buffer's server
+ * rejects quoted enum literals inside an inline mutation string (`Enum
+ * "PostTypeFacebook" cannot represent non-enum value: "post"`), so the query
+ * string below contains NO literal values at all (no ids, no text, no enums).
+ * The per-channel metadata is `metadata.<service>.type` (Buffer's
+ * `PostInputMetaData` is a per-channel map keyed by the channel's service —
+ * the legacy top-level `metadata: { type }` shape is INVALID).
+ */
+export const CREATE_POST_MUTATION =
+  "mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }";
+
+/**
+ * The exact variables JSON sent with CREATE_POST_MUTATION. Enums are JSON
+ * strings (valid in variables). AssetInput is @oneOf: exactly ONE key per
+ * asset — text-only posts send an empty ARRAY, media posts send exactly
+ * one `image: { url }` asset. `linkAttachment` is deliberately never sent
+ * (it is only valid for link-attachment posts and must never be combined
+ * with non-empty assets — this product does not publish bare links).
+ */
+export type CreatePostInputVariables = {
+  input: {
+    channelId: string;
+    text: string;
+    mode: BufferShareModeValue;
+    schedulingType: BufferSchedulingTypeValue;
+    needsApproval: boolean;
+    assets: Array<{ image: { url: string } }>;
+    metadata:
+      | { facebook: { type: BufferPostTypeFacebookValue; firstComment?: string } }
+      | { instagram: { type: BufferPostTypeInstagramValue; firstComment?: string } };
+    /** ONLY present for customScheduled — NEVER for shareNow. */
+    dueAt?: string;
+    aiAssisted?: boolean;
+  };
+};
+
+/**
+ * Build the createPost variables (pure — unit-testable).
  *
  * Mode semantics:
  *   - `shareNow` → Buffer publishes immediately. `dueAt` MUST NOT appear.
  *   - `customScheduled` → Buffer queues the post for `dueAt`. `dueAt` is
  *     required (ISO-8601 UTC).
  *
- * `needsApproval: false` and `schedulingType: automatic` are constants for
- * this product. `assets: {}` is required by the schema (non-null) — we
- * send an empty object because Buffer's documented `createPost` has no
- * media input yet (visual attach is pending documented API support).
+ * `needsApproval: false` and `schedulingType: "automatic"` are constants for
+ * this product. contentKind is runtime-validated: it must be exactly
+ * "post" | "reel" | "story" (TypeScript unions are compile-time only — a
+ * stale caller or JS consumer must fail HERE, before the wire, not with an
+ * opaque Buffer enum error).
  */
-export type BufferPostMode = "shareNow" | "customScheduled";
-export type BufferPostType = "post" | "story" | "reel";
-
-export function createPostMutation(args: {
+export function buildCreatePostVariables(args: {
   channelId: string;
   text: string;
   mode: BufferPostMode;
   contentKind: BufferPostType;
   service: BufferService;
   dueAt?: string;
-}): string {
-  // Per-channel metadata: `metadata.<service>.type` is required for
-  // facebook/instagram — Buffer returns "Facebook posts require a type"
-  // (or the Instagram equivalent) when the field is absent.
-  const metadata = `metadata: { ${args.service}: { type: ${JSON.stringify(args.contentKind)} } }`;
-  // `assets: {}` satisfies the non-null `assets: AssetsInput` input. Visual
-  // attach is pending documented Buffer API support — do not invent fields.
-  const assets = "assets: {}";
-  const needsApproval = "needsApproval: false";
-  const schedulingType = `schedulingType: ${BufferSchedulingType.automatic}`;
-  if (args.mode === "customScheduled") {
-    // dueAt is required for customScheduled — the caller MUST supply a
-    // non-empty ISO string. We build the literal defensively here so an
-    // accidental omit surfaces as a JSON.parse-shaped GraphQL error rather
-    // than silently publishing with no schedule.
-    const dueAt = JSON.stringify(args.dueAt ?? "");
-    return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, mode: ${BufferShareMode.customScheduled}, ${schedulingType}, ${needsApproval}, dueAt: ${dueAt}, ${assets}, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
+  firstComment?: string | null;
+  mediaUrl?: string | null;
+  aiAssisted?: boolean;
+}): CreatePostInputVariables {
+  if (args.contentKind !== "post" && args.contentKind !== "reel" && args.contentKind !== "story") {
+    throw new Error(
+      `Invalid Buffer contentKind ${JSON.stringify(String(args.contentKind))} — must be exactly "post", "reel" or "story".`,
+    );
   }
-  // shareNow: Buffer publishes immediately. dueAt MUST NOT be present (the
-  // server rejects it on shareNow per documented createPost behavior).
-  return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, mode: ${BufferShareMode.shareNow}, ${schedulingType}, ${needsApproval}, ${assets}, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
+  const firstComment =
+    typeof args.firstComment === "string" && args.firstComment.length > 0
+      ? { firstComment: args.firstComment }
+      : {};
+  const metadata: CreatePostInputVariables["input"]["metadata"] =
+    args.service === "facebook"
+      ? { facebook: { type: args.contentKind, ...firstComment } }
+      : { instagram: { type: args.contentKind, ...firstComment } };
+  const input: CreatePostInputVariables["input"] = {
+    channelId: args.channelId,
+    text: args.text,
+    mode: args.mode,
+    schedulingType: BufferSchedulingType.automatic,
+    needsApproval: false,
+    // oneOf AssetInput: exactly one key per asset. Text-only → []; a visual
+    // attaches as a single image asset keyed by url (the one unverified
+    // subshape — Buffer field errors surface verbatim if it complains).
+    assets: args.mediaUrl ? [{ image: { url: args.mediaUrl } }] : [],
+    metadata,
+  };
+  if (args.mode === "customScheduled") {
+    if (!args.dueAt) {
+      throw new Error("buildCreatePostVariables: customScheduled requires dueAt (ISO-8601 string).");
+    }
+    input.dueAt = args.dueAt;
+  }
+  if (args.aiAssisted) input.aiAssisted = true;
+  return { input };
 }
 
 export type BufferOrganization = { id: string; name: string };
@@ -647,20 +740,25 @@ export type BufferUpdateRef = { id: string; status: string; dueAt?: string | nul
  *  customScheduled (queue for dueAt) modes via the documented `mode` enum.
  *
  *  - The caller MUST pass `service: "facebook" | "instagram"` so the
- *    mutation builder can stamp `metadata.<service>.type` — Buffer's
+ *    variables builder can stamp `metadata.<service>.type` — Buffer's
  *    current `PostInputMetaData` input is keyed by service, and the legacy
  *    top-level `metadata: { type }` shape is no longer accepted. The
  *    centralized publishing service (lib/publishing/service.ts) is the
  *    only caller that knows the platform; it plumbs `service` from
  *    `ResolvedConnection.platform`.
- *  - `contentKind` maps to the per-service enum: BufferPostTypeFacebook
- *    (post/reel/story) on Facebook; BufferPostTypeInstagram (post/reel/
- *    story/carousel/short) on Instagram.
+ *  - `contentKind` maps to the per-service enum (post/reel/story) and is
+ *    runtime-validated in buildCreatePostVariables — an invalid value throws
+ *    BEFORE the wire instead of returning an opaque Buffer enum error.
  *  - dueAt is REQUIRED when mode=customScheduled and FORBIDDEN when
- *    mode=shareNow; the call site enforces this before reaching the helper.
- *  - Media has NO documented input yet on createPost; visual attach is
- *    pending documented API support (see module header). The schema still
- *    requires the non-null `assets: AssetsInput`, so we send `assets: {}`.
+ *    mode=shareNow; the variables builder enforces this too.
+ *  - `mediaUrl` attaches ONE image asset (`assets: [{ image: { url } }]` —
+ *    oneOf-compliant); text-only posts send `assets: []`. The `image.url`
+ *    subshape is the one unverified detail (AssetInputImage's full shape is
+ *    auth-gated) — Buffer field errors surface verbatim. `firstComment`
+ *    rides inside the per-channel metadata (metadata.<service>.firstComment)
+ *    — the centralized publishing service plumbs it from the variant (with
+ *    the item-level comment as fallback). `aiAssisted` is supported by the
+ *    contract but not wired by the service yet.
  */
 export async function createPostForBuffer(
   accessToken: string,
@@ -671,23 +769,26 @@ export async function createPostForBuffer(
     contentKind: BufferPostType;
     service: BufferService;
     dueAt?: Date;
+    mediaUrl?: string | null;
+    firstComment?: string | null;
+    aiAssisted?: boolean;
   },
 ): Promise<BufferApiResult<BufferUpdateRef>> {
   const dueAtIso = args.dueAt ? args.dueAt.toISOString() : undefined;
+  const variables = buildCreatePostVariables({
+    channelId: args.channelId,
+    text: args.text,
+    mode: args.mode,
+    contentKind: args.contentKind,
+    service: args.service,
+    dueAt: dueAtIso,
+    firstComment: args.firstComment ?? null,
+    mediaUrl: args.mediaUrl ?? null,
+    aiAssisted: args.aiAssisted,
+  });
   const res = await bufferGraphQL<{
     createPost?: { post?: { id?: unknown; dueAt?: unknown } | null; message?: unknown } | null;
-  }>(
-    accessToken,
-    "CreatePost",
-    createPostMutation({
-      channelId: args.channelId,
-      text: args.text,
-      mode: args.mode,
-      contentKind: args.contentKind,
-      service: args.service,
-      dueAt: dueAtIso,
-    }),
-  );
+  }>(accessToken, "CreatePost", CREATE_POST_MUTATION, variables);
   if (!res.ok) return res;
   const payload = res.data.createPost;
   if (payload && typeof payload.message === "string" && payload.message.length > 0) {
