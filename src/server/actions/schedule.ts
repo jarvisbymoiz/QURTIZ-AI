@@ -1,10 +1,10 @@
 ﻿"use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs, jobs } from "@/db/schema";
+import { contentItems, contentVariants, publishingJobs, jobs, visualAssets } from "@/db/schema";
 
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { publishNow } from "@/lib/publishing/service";
@@ -169,6 +169,41 @@ const publishNowSchema = z.object({
 });
 
 /**
+ * Pre-mint a 6-day signed URL for the item's latest visual using the USER'S
+ * session (request scope). Mirrors getAssetSignedUrl (src/server/actions/
+ * visuals.ts): server Supabase client + workspace-scoped storage-path guard,
+ * but with the service's 6-day visual expiry. The query matches
+ * loadPublishContext's (latest visual by createdAt) so the override targets
+ * exactly the visual the service will attach.
+ *
+ * Returns undefined on ANY failure — the publishing service then runs its own
+ * signing chain (service key → user-JWT → public-URL HEAD) and fails honestly
+ * if none works. This pre-mint is what lets Calendar "Publish now" attach
+ * visuals WITHOUT SUPABASE_SERVICE_ROLE_KEY: the action runs with the user's
+ * cookies, the worker/retry paths never do.
+ */
+async function premintVisualSignedUrl(workspaceId: string, contentItemId: string): Promise<string | undefined> {
+  try {
+    const db = getDb();
+    const [visual] = await db
+      .select({ storagePath: visualAssets.storagePath })
+      .from(visualAssets)
+      .where(eq(visualAssets.contentItemId, contentItemId))
+      .orderBy(desc(visualAssets.createdAt))
+      .limit(1);
+    if (!visual?.storagePath || !visual.storagePath.startsWith(`${workspaceId}/`)) return undefined;
+    const { createClient } = await import("@/lib/supabase/server");
+    const supabase = await createClient();
+    const { data } = await supabase.storage.from("brand-assets").createSignedUrl(visual.storagePath, 60 * 60 * 24 * 6);
+    return data?.signedUrl ?? undefined;
+  } catch {
+    // No session, storage misconfigured, or the mint failed — degrade to the
+    // service's own chain instead of blocking the publish here.
+    return undefined;
+  }
+}
+
+/**
  * Publish ONE approved/scheduled variant immediately (Calendar "Publish now").
  * Zod-validated, workspace-scoped + rate-limited; the actual publish funnels
  * through the centralized publishing service (`publishNow`), so provider
@@ -176,6 +211,9 @@ const publishNowSchema = z.object({
  * scheduled path. On failure the service's real error message is returned
  * verbatim. `firstCommentSkipped` threads the Buffer paid-plan fallback
  * (post live, first comment dropped) so the client can disclose it.
+ * The visual's signed URL is pre-minted HERE with the user's session and
+ * passed as `mediaUrlOverride` — the interactive path never depends on the
+ * service key.
  */
 export async function publishNowAction(input: {
   itemId: string;
@@ -216,11 +254,17 @@ export async function publishNowAction(input: {
     return { ok: false, error: "Variant platform mismatch." };
   }
 
+  // Pre-mint the visual's signed URL with the user's session (request scope)
+  // BEFORE publishing — the interactive path must not depend on the service
+  // key. undefined → the service's own signing chain decides.
+  const mediaUrlOverride = await premintVisualSignedUrl(ctx.workspaceId, parsed.data.itemId);
+
   const result = await publishNow({
     workspaceId: ctx.workspaceId,
     contentItemId: parsed.data.itemId,
     contentVariantId: parsed.data.variantId,
     platform: parsed.data.platform,
+    ...(mediaUrlOverride ? { mediaUrlOverride } : {}),
   });
   if (!result.ok) return { ok: false, error: result.message };
 

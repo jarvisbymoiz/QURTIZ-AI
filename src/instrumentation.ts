@@ -25,4 +25,22 @@ export async function register() {
     // Do not crash the server if the queue is unavailable (e.g. no DATABASE_URL yet).
     console.error("[qurtiz] scheduler init skipped:", e instanceof Error ? e.message : e);
   }
+
+  // Server storage configuration check — visual publishing signs image URLs
+  // through it. Exactly ONE status line, whatever the outcome; the key, the
+  // URL's querystring and any header are never logged. Wrapped like the
+  // scheduler above so a failure can never crash boot.
+  try {
+    const { getServerStorageConfigStatus } = await import("@/lib/supabase/storage-status");
+    const status = await getServerStorageConfigStatus();
+    if (!status.configured) {
+      console.log("[qurtiz] Supabase server storage: Missing configuration");
+    } else if (status.connected) {
+      console.log("[qurtiz] Supabase server storage: Connected");
+    } else {
+      console.log(`[qurtiz] Supabase server storage: Unreachable (${status.error ?? "unknown error"})`);
+    }
+  } catch (e) {
+    console.error("[qurtiz] storage check skipped:", e instanceof Error ? e.message : e);
+  }
 }

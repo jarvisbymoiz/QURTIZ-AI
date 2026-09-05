@@ -6,9 +6,12 @@ import { platformConnections } from "@/db/schema";
 import { bufferConfigured } from "@/lib/buffer/client";
 import { metaConfigured } from "@/lib/meta/oauth";
 import { getWorkspacePublishProvider, isPublishProvider } from "@/lib/publish/provider";
+import { getServerStorageConfigStatus } from "@/lib/supabase/storage-status";
 import { requireWorkspace } from "@/lib/workspace";
+import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { ConnectionsClient } from "@/components/connections/connections-client";
+import { Badge } from "@/components/ui/badge";
 
 export const metadata = { title: "Connections" };
 
@@ -28,12 +31,22 @@ export default async function ConnectionsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
-  const [connections, publishingProvider] = await Promise.all([
+  const [connections, publishingProvider, serverStorage] = await Promise.all([
     db.select().from(platformConnections).where(eq(platformConnections.workspaceId, ctx.workspace.id)),
     getWorkspacePublishProvider(ctx.workspace.id),
+    getServerStorageConfigStatus(),
   ]);
 
   const requirements = publishingProvider === "buffer" ? BUFFER_REQUIREMENTS : META_REQUIREMENTS;
+
+  // Server-side storage status (visual publishing signs URLs through it).
+  // Plain text + a colored dot — no secret, no client fetch. Probed server-side
+  // via getServerStorageConfigStatus().
+  const storageChip = !serverStorage.configured
+    ? { label: "Missing configuration", dot: "bg-amber-500" }
+    : serverStorage.connected
+      ? { label: "Connected", dot: "bg-emerald-500" }
+      : { label: "Unreachable", dot: "bg-destructive" };
 
   return (
     <div className="space-y-6">
@@ -41,6 +54,12 @@ export default async function ConnectionsPage() {
         title="Connections"
         description="Official Meta and Buffer integrations. Tokens are encrypted at rest and never exposed to the browser."
       />
+      <div>
+        <Badge variant="secondary" className="gap-1.5">
+          <span className={cn("size-1.5 shrink-0 rounded-full", storageChip.dot)} aria-hidden />
+          Supabase server storage: {storageChip.label}
+        </Badge>
+      </div>
       <Suspense>
         <ConnectionsClient
           connections={connections.map((c) => ({

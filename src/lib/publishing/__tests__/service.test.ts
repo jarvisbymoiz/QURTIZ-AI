@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CREATE_POST_MUTATION,
   buildCreatePostVariables,
@@ -1203,5 +1203,160 @@ describe("schedulePost — partial-schedule visibility", () => {
     expect(itemUpdate).toBeDefined();
     expect(itemUpdate!.values.status).toBe("scheduled");
     expect((itemUpdate!.values.scheduledAt as Date).toISOString()).toBe(EARLIER.toISOString());
+  });
+});
+
+/* ── Third fallback: public-URL HEAD (no-key background path) ─────────── */
+
+describe("signedUrlForVisual — public-URL fallback", () => {
+  /** DB with a visual present (the signing chain is exercised). */
+  function visualDb(connId: string) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow({ id: connId })]],
+      contentVariants: [[VARIANT_ROW]],
+      contentItems: [[ITEM_ROW]],
+      visualAssets: [[{ storagePath: "brand-assets/visual.png" }]],
+      workspaces: [[{ createdBy: "user-1" }]],
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the bucket's public URL when BOTH signed attempts fail and the HEAD 200s", async () => {
+    const fake = visualDb("conn-pub-ok");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    // Config failure (service-role key missing) + the request-scoped fallback
+    // throws (worker-like context) → the third fallback must kick in.
+    vi.mocked(createServiceClient).mockImplementationOnce(() => {
+      throw new Error("Supabase service role is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local (see SETUP.md).");
+    });
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: true, data: { id: "post-pub", status: "sent", dueAt: null } });
+    // Trailing slash exercises the join-trim; HEAD 200 → reachable public object.
+    process.env.SUPABASE_URL = "https://supa.example.co/";
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.mediaAttached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://supa.example.co/storage/v1/object/public/brand-assets/brand-assets/visual.png",
+      { method: "HEAD" },
+    );
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBe(
+      "https://supa.example.co/storage/v1/object/public/brand-assets/brand-assets/visual.png",
+    );
+    // Honest mediaAttached in the job-row result jsonb (worker path).
+    const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-pub");
+    expect(jobUpdate).toBeDefined();
+    expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBe(true);
+  });
+
+  it("keeps the actionable config error when the public-URL HEAD 404s (private/missing object)", async () => {
+    const fake = visualDb("conn-pub-404");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(createServiceClient).mockImplementationOnce(() => {
+      throw new Error("Supabase service role is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local (see SETUP.md).");
+    });
+    mockChannelOk();
+    process.env.SUPABASE_URL = "https://supa.example.co";
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 404 })));
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+    });
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.reason).toBe("missing_image_url");
+      expect(res.message).toContain("SUPABASE_SERVICE_ROLE_KEY");
+      expect(res.message).toContain("restart the dev server");
+    }
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+});
+
+/* ── mediaUrlOverride: interactive path pre-mints with the user session ── */
+
+describe("publishNow — mediaUrlOverride (Calendar Publish Now pre-mint)", () => {
+  function visualDb(connId: string, visualRows?: Row[][]) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow({ id: connId })]],
+      contentVariants: [[VARIANT_ROW]],
+      contentItems: [[ITEM_ROW]],
+      visualAssets: visualRows ?? [[{ storagePath: "ws-1/visuals/visual.png" }]],
+      workspaces: [[{ createdBy: "user-1" }]],
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    vi.unstubAllGlobals();
+  });
+
+  it("uses the override verbatim and SKIPS minting entirely (works with no service key)", async () => {
+    const fake = visualDb("conn-override");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    // Any minting attempt would fail loudly here — the override must mean the
+    // signer is never constructed (this is exactly the no-service-key live case).
+    vi.mocked(createServiceClient).mockImplementationOnce(() => {
+      throw new Error("Supabase service role is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local (see SETUP.md).");
+    });
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: true, data: { id: "post-override", status: "sent", dueAt: null } });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      mediaUrlOverride: "https://signed.example/preminted-by-session.png",
+    });
+
+    expect(res).toMatchObject({ ok: true, providerPostId: "post-override", mediaAttached: true });
+    // Minting was skipped entirely — the signer was never constructed.
+    expect(vi.mocked(createServiceClient)).not.toHaveBeenCalled();
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBe("https://signed.example/preminted-by-session.png");
+    // Honest mediaAttached in the job-row result jsonb.
+    const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-override");
+    expect(jobUpdate).toBeDefined();
+    expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBe(true);
+  });
+
+  it("ignores the override when the variant has NO visual — mediaAttached stays false", async () => {
+    const fake = visualDb("conn-override-novisual", [[]]);
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: true, data: { id: "post-noviz", status: "sent", dueAt: null } });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      mediaUrlOverride: "https://signed.example/preminted-by-session.png",
+    });
+
+    expect(res).toMatchObject({ ok: true, providerPostId: "post-noviz", mediaAttached: false });
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBeNull();
+    const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-noviz");
+    expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBeUndefined();
   });
 });

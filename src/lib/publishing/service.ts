@@ -578,16 +578,38 @@ async function signVisualUrl(
 }
 
 /**
+ * The no-key LAST resort: the bucket's public-object URL, verified reachable
+ * with a HEAD request. Only tried after BOTH signing paths failed — it works
+ * only if the workspace owner made the brand-assets bucket public (their
+ * choice), and it gives background publishing (worker, retry) a path that
+ * needs neither SUPABASE_SERVICE_ROLE_KEY nor a request scope. Any non-2xx
+ * (private bucket → 400/404, missing object) or network failure → null, and
+ * the caller returns the actionable config error. The anon key is NEVER used
+ * for signing (it 400s on private buckets).
+ */
+async function publicVisualUrl(storagePath: string): Promise<string | null> {
+  const baseUrl = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!baseUrl) return null;
+  const url = `${baseUrl.replace(/\/+$/, "")}/storage/v1/object/public/brand-assets/${storagePath}`;
+  try {
+    const res = await fetch(url, { method: "HEAD" });
+    return res.ok ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve a reachable signed URL for the item's visual.
  *
  * Order: service-role client (works in request AND worker contexts) → on a
  * CONFIG failure a harmless fallback through the request-scoped (user-JWT)
  * server client (works on the Calendar Publish Now path where the user's
  * session can sign the URL; throws harmlessly in the worker where no request
- * scope exists). Never silently drops the visual: every failure returns a
- * typed result that the publish paths turn into a failed publish —
- * "config" names the missing env var, "unreachable" the storage/network
- * problem.
+ * scope exists) → the bucket's public URL if a HEAD proves it reachable.
+ * Never silently drops the visual: every failure returns a typed result that
+ * the publish paths turn into a failed publish — "config" names the missing
+ * env var, "unreachable" the storage/network problem.
  */
 async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
   let serviceClient: ReturnType<typeof createServiceClient>;
@@ -595,7 +617,8 @@ async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
     serviceClient = createServiceClient();
   } catch {
     // createServiceClient throws ONLY for missing env config — try the
-    // user-JWT client before giving up with the actionable message.
+    // user-JWT client, then the public-URL HEAD, before giving up with the
+    // actionable message.
     try {
       const { createClient } = await import("@/lib/supabase/server");
       const signed = await signVisualUrl(await createClient(), storagePath);
@@ -603,6 +626,8 @@ async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
     } catch {
       // No request scope (worker) or user client unconfigured — fall through.
     }
+    const publicUrl = await publicVisualUrl(storagePath);
+    if (publicUrl) return { ok: true, url: publicUrl };
     return { ok: false, kind: "config", message: VISUAL_STORAGE_CONFIG_ERROR };
   }
   const signed = await signVisualUrl(serviceClient, storagePath);
@@ -679,6 +704,13 @@ export async function publishNow(args: {
    *  (worker path); publishNow creates a synthetic job when omitted
    *  (Calendar Publish Now path). */
   jobId?: string;
+  /** Visual signed URL pre-minted by the calling server action with the
+   *  USER'S session (Calendar Publish Now). When provided AND a visual is
+   *  attached, signedUrlForVisual is skipped entirely and this URL is used
+   *  verbatim — the interactive path then works without the service key.
+   *  Worker + retry paths never pass it (no session there); without it the
+   *  service's own signing chain runs unchanged. */
+  mediaUrlOverride?: string;
 }): Promise<PublishResult> {
   const db = getDb();
 
@@ -752,9 +784,15 @@ export async function publishNow(args: {
     // the Meta path; silently dropping it would change what the post IS.
     let mediaUrl: string | null = null;
     if (ctxRes.visual?.storagePath) {
-      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-      if (!signed.ok) return fail("missing_image_url", signed.message);
-      mediaUrl = signed.url;
+      if (args.mediaUrlOverride) {
+        // Pre-minted by the calling server action (user session) — use it
+        // verbatim; mediaAttached stays honest (it IS the variant's visual).
+        mediaUrl = args.mediaUrlOverride;
+      } else {
+        const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+        if (!signed.ok) return fail("missing_image_url", signed.message);
+        mediaUrl = signed.url;
+      }
     }
     // firstComment: the variant's platform-specific first comment wins; the
     // item-level one is the fallback. Sent inside the per-channel metadata
@@ -850,9 +888,14 @@ export async function publishNow(args: {
   // Meta path — imageUrl must be a reachable signed URL when a visual exists.
   let imageUrl: string | null = null;
   if (ctxRes.visual?.storagePath) {
-    const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-    if (!signed.ok) return fail("missing_image_url", signed.message);
-    imageUrl = signed.url;
+    if (args.mediaUrlOverride) {
+      // Same pre-minted override as the Buffer path — skip minting entirely.
+      imageUrl = args.mediaUrlOverride;
+    } else {
+      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
+      if (!signed.ok) return fail("missing_image_url", signed.message);
+      imageUrl = signed.url;
+    }
   }
   const [conn] = await db
     .select()
