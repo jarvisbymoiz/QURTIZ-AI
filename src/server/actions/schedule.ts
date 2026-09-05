@@ -174,13 +174,14 @@ const publishNowSchema = z.object({
  * through the centralized publishing service (`publishNow`), so provider
  * routing, token refresh and honest failure surfacing are identical to the
  * scheduled path. On failure the service's real error message is returned
- * verbatim.
+ * verbatim. `firstCommentSkipped` threads the Buffer paid-plan fallback
+ * (post live, first comment dropped) so the client can disclose it.
  */
 export async function publishNowAction(input: {
   itemId: string;
   variantId: string;
   platform: "facebook" | "instagram";
-}): Promise<ActionResult & { providerPostId?: string }> {
+}): Promise<ActionResult & { providerPostId?: string; firstCommentSkipped?: boolean }> {
   const parsed = publishNowSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid publish request." };
@@ -226,7 +227,11 @@ export async function publishNowAction(input: {
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
   revalidatePath("/");
-  return { ok: true, providerPostId: result.providerPostId };
+  return {
+    ok: true,
+    providerPostId: result.providerPostId,
+    ...(result.firstCommentSkipped ? { firstCommentSkipped: true } : {}),
+  };
 }
 
 /** Bulk approve everything currently Ready for Review. */

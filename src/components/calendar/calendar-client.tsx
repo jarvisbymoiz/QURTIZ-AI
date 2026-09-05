@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, ListChecks, Zap } from "lucide-react";
@@ -76,6 +76,16 @@ export function CalendarClient({
   // state; all publish buttons disable while one is in flight).
   const [publishingVariantId, setPublishingVariantId] = useState<string | null>(null);
 
+  // Keep the grid honest without manual reloads: re-fetch the server data
+  // every 60s. The tick checks document.visibilityState itself, so a
+  // background tab never queues refreshes — no visibility listener needed.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") router.refresh();
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [router]);
+
   const monthView = useMemo(() => {
     const base = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
     const year = base.getFullYear();
@@ -94,6 +104,9 @@ export function CalendarClient({
   const weekDates = useMemo(() => {
     const s = new Date(today.getFullYear(), today.getMonth(), today.getDate() + weekOffset * 7 - ((today.getDay() + 6) % 7));
     return Array.from({ length: 7 }, (_, i) => new Date(s.getFullYear(), s.getMonth(), s.getDate() + i));
+    // Same intentional keying as monthView above: recompute on week change,
+    // not on every render's fresh `new Date()`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekOffset]);
 
   const scheduledByDay = useMemo(() => {
@@ -150,7 +163,8 @@ export function CalendarClient({
 
   /** Publish ONE approved/scheduled variant immediately. The server action
    *  funnels through the centralized publishing service, so the toast shows
-   *  the real outcome: success confirms the provider post id; failure shows
+   *  the real outcome: success confirms the provider post id (disclosing the
+   *  Buffer paid-plan first-comment fallback when it fired); failure shows
    *  the service's actual error verbatim (reconnect hints included). */
   function handlePublishNow(item: Item, variant: Variant) {
     if (publishingVariantId !== null) return;
@@ -159,14 +173,30 @@ export function CalendarClient({
       try {
         const r = await publishNowAction({ itemId: item.id, variantId: variant.id, platform: variant.platform });
         if (r.ok) {
-          toast.success(
-            `Published to ${variant.platform === "facebook" ? "Facebook" : "Instagram"} — post id ${r.providerPostId}.`,
-          );
+          if (r.firstCommentSkipped) {
+            // The post IS live — only its optional first comment was dropped
+            // (Buffer paid-plan feature). Disclose both parts, never a plain
+            // success that hides the fallback.
+            toast.success("Post Published", {
+              description: (
+                <div className="flex flex-col gap-1">
+                  <span>First Comment: Skipped — unavailable on current Buffer plan.</span>
+                  {r.providerPostId ? <span>Post id {r.providerPostId}.</span> : null}
+                </div>
+              ),
+            });
+          } else {
+            toast.success(
+              `Published to ${variant.platform === "facebook" ? "Facebook" : "Instagram"} — post id ${r.providerPostId}.`,
+            );
+          }
           setSelected(null);
-          router.refresh();
         } else {
           toast.error(r.error);
         }
+        // Success or failure, the server state moved (published/failed rows
+        // persist) — refresh so the day cell + this dialog reflect it.
+        router.refresh();
       } catch {
         toast.error("Publish failed — the request did not complete. Check your connection and try again.");
       } finally {

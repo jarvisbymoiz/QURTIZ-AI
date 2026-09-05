@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeftRight, CheckCircle2, CircleAlert, LogOut } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, CircleAlert, LogOut, X } from "lucide-react";
 import { disconnectPlatformAction, updatePublishingProviderAction } from "@/server/actions/connections";
 import type { PublishProvider } from "@/lib/publish/provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -93,6 +93,19 @@ export function ConnectionsClient({
   const [provider, setProvider] = useState<PublishProvider>(publishingProvider);
   const [busy, setBusy] = useState(false);
 
+  // Stale-origin guard (client-only): OAuth callbacks and publishing expect
+  // the canonical NEXT_PUBLIC_APP_URL origin — a tab left open on a retired
+  // http:// origin fails silently. Gated behind state so the server render
+  // and the first client render agree (no hydration mismatch); null until the
+  // effect confirms the mismatch, and reused as the banner's link target.
+  const [staleOriginUrl, setStaleOriginUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+    if (window.location.protocol === "http:" && typeof appUrl === "string" && appUrl.startsWith("https://")) {
+      setStaleOriginUrl(appUrl);
+    }
+  }, []);
+
   const error = searchParams.get("error");
   const connected = searchParams.get("connected") === "1";
   const rawError = error && !ERROR_TEXT[error] ? decodeURIComponent(error) : null;
@@ -156,6 +169,28 @@ export function ConnectionsClient({
 
   return (
     <div className="space-y-4">
+      {staleOriginUrl ? (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+          <p className="text-sm text-amber-500">
+            You&apos;re viewing this page on a retired origin. Open{" "}
+            <a
+              href={`${staleOriginUrl}/connections`}
+              className="font-medium underline underline-offset-2 hover:text-foreground"
+            >
+              {staleOriginUrl}/connections
+            </a>{" "}
+            — connections and publishing fail silently from stale tabs.
+          </p>
+          <button
+            type="button"
+            aria-label="Dismiss stale-origin warning"
+            onClick={() => setStaleOriginUrl(null)}
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
