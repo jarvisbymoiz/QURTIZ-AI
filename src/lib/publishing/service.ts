@@ -29,7 +29,7 @@ import { getDb } from "@/db";
 import { contentItems, contentVariants, platformConnections, publishingJobs } from "@/db/schema";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import { resolvePublishProviderForPlatform, type ContentPlatform } from "@/lib/publish/provider";
-import { decodeBufferTokenEnvelope, createPostForBuffer, type BufferPostMode, type BufferPostType } from "@/lib/buffer/client";
+import { decodeBufferTokenEnvelope, createPostForBuffer, type BufferPostMode, type BufferPostType, type BufferService } from "@/lib/buffer/client";
 import { applyRefreshedToken, refreshAccessToken } from "@/lib/buffer/client";
 import { publishPost } from "@/lib/meta/publish";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -77,15 +77,26 @@ export type RetryResult = PublishResult;
 /* ── Pure helpers (unit-testable, no DB) ──────────────────────────── */
 
 /**
- * Map a content variant's format to Buffer's documented `metadata.type`.
+ * Map a content variant's format to Buffer's documented metadata `type`.
  * Single-image/carousel/text-post are all "post"; only explicit "story" /
  * "reel" formats become their own kind. Default is "post" — Buffer REQUIRES
- * the field on facebook/instagram, so it must always be set.
+ * the per-channel `metadata[service].type` field on facebook/instagram, so
+ * it must always be set. The variant's platform maps directly to the
+ * Buffer service identifier (facebook / instagram) and is plumbed through
+ * `buildBufferPayload` so the mutation builder can stamp
+ * `metadata.<service>.type` against Buffer's current GraphQL schema.
  */
 export function deriveContentKind(format: string | null | undefined): ContentKind {
   if (format === "story") return "story";
   if (format === "reel") return "reel";
   return "post";
+}
+
+/** Map a workspace `ContentPlatform` to Buffer's per-channel service
+ *  identifier. Buffer's channel.service string is exactly "facebook" /
+ *  "instagram" for the two services this product publishes to. */
+export function platformToBufferService(platform: ContentPlatform): BufferService {
+  return platform;
 }
 
 /** Build the publish call's argument bag. Pure — used by tests + the
@@ -98,12 +109,14 @@ export function buildBufferPayload(args: {
   text: string;
   mode: PublishMode;
   contentKind: ContentKind;
+  service: BufferService;
   dueAt?: Date;
 }): {
   channelId: string;
   text: string;
   mode: PublishMode;
   contentKind: ContentKind;
+  service: BufferService;
   dueAt?: Date;
 } {
   if (args.mode === "customScheduled" && !args.dueAt) {
@@ -120,6 +133,7 @@ export function buildBufferPayload(args: {
     text: args.text,
     mode: args.mode,
     contentKind: args.contentKind,
+    service: args.service,
     dueAt: args.dueAt,
   };
 }
@@ -359,11 +373,13 @@ export async function publishNow(args: {
     // Buffer: try once, refresh-once on auth, persist the newest envelope if
     // we refreshed. No documented media on createPost — visuals stay
     // unattached; we record that honestly on the result.
+    const bufferService = platformToBufferService(connRes.platform);
     const argsForCall = {
       channelId: connRes.channelRef,
       text: message,
       mode: "shareNow" as PublishMode,
       contentKind,
+      service: bufferService,
     };
     let res = await createPostForBuffer(connRes.accessToken, argsForCall);
     if (!res.ok && res.reason === "auth" && connRes.refreshToken) {
@@ -629,6 +645,7 @@ export async function retryFailedPublish(args: {
     let attempt = 0;
     let lastReason = "unknown";
     let lastMessage = "";
+    const bufferService = platformToBufferService(connRes.platform);
     while (attempt < Math.max(1, maxAttempts - currentAttempt + 1)) {
       attempt++;
       const callArgs = {
@@ -636,6 +653,7 @@ export async function retryFailedPublish(args: {
         text: message,
         mode: "shareNow" as PublishMode, // retry fires NOW
         contentKind,
+        service: bufferService,
       };
       let res = await createPostForBuffer(connRes.accessToken, callArgs);
       if (!res.ok && res.reason === "auth" && connRes.refreshToken) {

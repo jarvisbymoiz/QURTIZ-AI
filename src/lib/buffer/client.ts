@@ -464,18 +464,79 @@ function channelsQuery(organizationId: string): string {
   return `query GetChannels { channels(input: { organizationId: ${JSON.stringify(organizationId)} }) { id name service } }`;
 }
 
-/** Build the documented createPost GraphQL mutation.
+/* ── GraphQL enums (live introspection 2026-09-05) ───────────────── */
+
+/** Buffer `ShareMode` enum — the per-channel scheduling intent. The two
+ *  values this product currently sends are `shareNow` and `customScheduled`;
+ *  the other two are exported for completeness. */
+export const BufferShareMode = {
+  shareNow: "shareNow",
+  customScheduled: "customScheduled",
+  addToQueue: "addToQueue",
+  shareNext: "shareNext",
+} as const;
+export type BufferShareModeValue = (typeof BufferShareMode)[keyof typeof BufferShareMode];
+
+/** Buffer `SchedulingType` enum — the time-handling strategy. We always send
+ *  `automatic` (Buffer schedules the post itself); `notification` is
+ *  exported for completeness. */
+export const BufferSchedulingType = {
+  automatic: "automatic",
+  notification: "notification",
+} as const;
+export type BufferSchedulingTypeValue =
+  (typeof BufferSchedulingType)[keyof typeof BufferSchedulingType];
+
+/** Buffer `PostTypeFacebook` enum (Facebook metadata `type`). */
+export const BufferPostTypeFacebook = {
+  post: "post",
+  reel: "reel",
+  story: "story",
+} as const;
+export type BufferPostTypeFacebookValue =
+  (typeof BufferPostTypeFacebook)[keyof typeof BufferPostTypeFacebook];
+
+/** Buffer `PostType` (Instagram) enum — subset this product actually uses
+ *  (post/reel/story/carousel/short). The full enum also includes event,
+ *  ghost_post, offer, thread, whats_new. */
+export const BufferPostTypeInstagram = {
+  post: "post",
+  reel: "reel",
+  story: "story",
+  carousel: "carousel",
+  short: "short",
+} as const;
+export type BufferPostTypeInstagramValue =
+  (typeof BufferPostTypeInstagram)[keyof typeof BufferPostTypeInstagram];
+
+/** Per-channel service identifiers this product publishes to. The service
+ *  names match Buffer's channel.service string (facebook/instagram). */
+export type BufferService = "facebook" | "instagram";
+
+/**
+ * Build the documented createPost GraphQL mutation.
  *
- * Buffer's documented createPost requires `metadata: { type: "post"|"story"|"reel" }`
- * for facebook/instagram channels — Buffer rejects with the exact user-facing
- * "Facebook posts require a type" message when the field is absent. The
- * scheduling mode is `customScheduled` (Buffer queues the post for dueAt) or
- * `shareNow` (Buffer publishes it immediately). dueAt MUST be omitted when
- * mode is shareNow.
+ * Aligned to Buffer's CURRENT GraphQL schema (live introspection
+ * 2026-09-05): the `createPost` mutation takes a `CreatePostInput` whose
+ * REQUIRED fields are `assets: AssetsInput`, `channelId: ChannelId!`,
+ * `mode: ShareMode!`, `needsApproval: Boolean!`, `schedulingType:
+ * SchedulingType!`. The per-channel metadata (Buffer's `PostInputMetaData`
+ * input) is an object map keyed by the channel's service — the legacy
+ * top-level `metadata: { type }` shape is INVALID against the current
+ * schema and Buffer rejects it. We build `metadata.<service>.type` (where
+ * `<service>` ∈ {facebook, instagram}) so each channel is stamped with the
+ * Buffer-documented `PostTypeFacebook` / `PostType` enum value for the
+ * variant's format.
  *
- * Media: Buffer has no documented media input on createPost yet — the
- * documented call only accepts text + scheduling. Visual attach is pending
- * documented API support; do not invent a media field.
+ * Mode semantics:
+ *   - `shareNow` → Buffer publishes immediately. `dueAt` MUST NOT appear.
+ *   - `customScheduled` → Buffer queues the post for `dueAt`. `dueAt` is
+ *     required (ISO-8601 UTC).
+ *
+ * `needsApproval: false` and `schedulingType: automatic` are constants for
+ * this product. `assets: {}` is required by the schema (non-null) — we
+ * send an empty object because Buffer's documented `createPost` has no
+ * media input yet (visual attach is pending documented API support).
  */
 export type BufferPostMode = "shareNow" | "customScheduled";
 export type BufferPostType = "post" | "story" | "reel";
@@ -485,23 +546,29 @@ export function createPostMutation(args: {
   text: string;
   mode: BufferPostMode;
   contentKind: BufferPostType;
+  service: BufferService;
   dueAt?: string;
 }): string {
-  // The metadata object is REQUIRED for facebook/instagram — Buffer's GraphQL
-  // server returns a MutationError with "Facebook posts require a type" (or
-  // the Instagram equivalent) when it is omitted.
-  const metadata = `metadata: { type: ${JSON.stringify(args.contentKind)} }`;
+  // Per-channel metadata: `metadata.<service>.type` is required for
+  // facebook/instagram — Buffer returns "Facebook posts require a type"
+  // (or the Instagram equivalent) when the field is absent.
+  const metadata = `metadata: { ${args.service}: { type: ${JSON.stringify(args.contentKind)} } }`;
+  // `assets: {}` satisfies the non-null `assets: AssetsInput` input. Visual
+  // attach is pending documented Buffer API support — do not invent fields.
+  const assets = "assets: {}";
+  const needsApproval = "needsApproval: false";
+  const schedulingType = `schedulingType: ${BufferSchedulingType.automatic}`;
   if (args.mode === "customScheduled") {
     // dueAt is required for customScheduled — the caller MUST supply a
     // non-empty ISO string. We build the literal defensively here so an
     // accidental omit surfaces as a JSON.parse-shaped GraphQL error rather
     // than silently publishing with no schedule.
     const dueAt = JSON.stringify(args.dueAt ?? "");
-    return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, schedulingType: automatic, mode: customScheduled, dueAt: ${dueAt}, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
+    return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, mode: ${BufferShareMode.customScheduled}, ${schedulingType}, ${needsApproval}, dueAt: ${dueAt}, ${assets}, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
   }
   // shareNow: Buffer publishes immediately. dueAt MUST NOT be present (the
   // server rejects it on shareNow per documented createPost behavior).
-  return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, schedulingType: automatic, mode: shareNow, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
+  return `mutation CreatePost { createPost(input: { text: ${JSON.stringify(args.text)}, channelId: ${JSON.stringify(args.channelId)}, mode: ${BufferShareMode.shareNow}, ${schedulingType}, ${needsApproval}, ${assets}, ${metadata} }) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }`;
 }
 
 export type BufferOrganization = { id: string; name: string };
@@ -579,14 +646,21 @@ export type BufferUpdateRef = { id: string; status: string; dueAt?: string | nul
  *  the codebase uses. Supports both shareNow (publish immediately) and
  *  customScheduled (queue for dueAt) modes via the documented `mode` enum.
  *
- *  - For facebook/instagram the mutation REQUIRES `metadata: { type: <kind> }`
- *    — Buffer rejects with "Facebook posts require a type" (or the Instagram
- *    equivalent) when it is omitted. The call site passes `contentKind` from
- *    the publishing service so every platform post is stamped with a kind.
+ *  - The caller MUST pass `service: "facebook" | "instagram"` so the
+ *    mutation builder can stamp `metadata.<service>.type` — Buffer's
+ *    current `PostInputMetaData` input is keyed by service, and the legacy
+ *    top-level `metadata: { type }` shape is no longer accepted. The
+ *    centralized publishing service (lib/publishing/service.ts) is the
+ *    only caller that knows the platform; it plumbs `service` from
+ *    `ResolvedConnection.platform`.
+ *  - `contentKind` maps to the per-service enum: BufferPostTypeFacebook
+ *    (post/reel/story) on Facebook; BufferPostTypeInstagram (post/reel/
+ *    story/carousel/short) on Instagram.
  *  - dueAt is REQUIRED when mode=customScheduled and FORBIDDEN when
  *    mode=shareNow; the call site enforces this before reaching the helper.
  *  - Media has NO documented input yet on createPost; visual attach is
- *    pending documented API support (see module header).
+ *    pending documented API support (see module header). The schema still
+ *    requires the non-null `assets: AssetsInput`, so we send `assets: {}`.
  */
 export async function createPostForBuffer(
   accessToken: string,
@@ -595,6 +669,7 @@ export async function createPostForBuffer(
     text: string;
     mode: BufferPostMode;
     contentKind: BufferPostType;
+    service: BufferService;
     dueAt?: Date;
   },
 ): Promise<BufferApiResult<BufferUpdateRef>> {
@@ -609,6 +684,7 @@ export async function createPostForBuffer(
       text: args.text,
       mode: args.mode,
       contentKind: args.contentKind,
+      service: args.service,
       dueAt: dueAtIso,
     }),
   );
@@ -630,16 +706,20 @@ export async function createPostForBuffer(
 
 /** Backwards-compatible scheduled-only alias for legacy callers. New code
  *  MUST use createPostForBuffer directly — it is the source of truth. Kept
- *  exported so existing tests / imports do not need to be rewired. */
+ *  exported so existing tests / imports do not need to be rewired. The
+ *  `service` parameter is REQUIRED — it is the channel's Buffer service
+ *  (facebook/instagram); default is facebook so the legacy test path keeps
+ *  working, but production callers must pass the platform's service. */
 export async function createPost(
   accessToken: string,
-  args: { channelId: string; text: string; dueAt: Date },
+  args: { channelId: string; text: string; dueAt: Date; service?: BufferService },
 ): Promise<BufferApiResult<BufferUpdateRef>> {
   return createPostForBuffer(accessToken, {
     channelId: args.channelId,
     text: args.text,
     mode: "customScheduled",
     contentKind: "post",
+    service: args.service ?? "facebook",
     dueAt: args.dueAt,
   });
 }

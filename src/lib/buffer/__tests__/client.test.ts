@@ -5,6 +5,10 @@ import {
   BUFFER_OAUTH_SCOPES,
   BUFFER_OAUTH_STATE_TTL_SECONDS,
   BUFFER_TOKEN_URL,
+  BufferPostTypeFacebook,
+  BufferPostTypeInstagram,
+  BufferSchedulingType,
+  BufferShareMode,
   applyRefreshedToken,
   buildAuthorizeUrl,
   buildBufferTokenEnvelope,
@@ -520,7 +524,7 @@ describe("listChannels", () => {
 describe("createPost", () => {
   const DUE_AT = new Date("2026-09-04T09:59:00.000Z");
 
-  it("POSTs the documented createPost mutation with schedulingType automatic, mode customScheduled, dueAt, and metadata.type=post", async () => {
+  it("POSTs the documented createPost mutation with schedulingType automatic, mode customScheduled, dueAt, assets:{}, needsApproval:false and metadata.facebook.type=post", async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
       void _url;
       void _init;
@@ -549,10 +553,27 @@ describe("createPost", () => {
     expect(body.query).toContain('"ch-1"');
     expect(body.query).toContain("schedulingType: automatic");
     expect(body.query).toContain("mode: customScheduled");
+    expect(body.query).toContain("needsApproval: false");
+    expect(body.query).toContain("assets: {}");
     expect(body.query).toContain('"2026-09-04T09:59:00.000Z"');
-    expect(body.query).toContain('metadata: { type: "post" }');
+    expect(body.query).toContain('metadata: { facebook: { type: "post" } }');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
     expect(body.query).toContain("... on PostActionSuccess { post { id text dueAt } }");
     expect(body.query).toContain("... on MutationError { message }");
+  });
+
+  it("stamps metadata.instagram.type=post when service=instagram is passed to the legacy alias", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-ig" } } } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await createPost("tok-1", { channelId: "ch-ig", text: "IG", dueAt: DUE_AT, service: "instagram" });
+    expect(res.ok).toBe(true);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.query).toContain('metadata: { instagram: { type: "post" } }');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
   });
 
   it("maps a MutationError payload (HTTP 200) to a rejected failure with its message", async () => {
@@ -586,10 +607,12 @@ describe("createPost", () => {
 describe("createPostForBuffer", () => {
   const DUE_AT = new Date("2026-09-04T09:59:00.000Z");
 
-  it("stamps metadata.type=post in shareNow mode and omits dueAt", async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      new Response(JSON.stringify({ data: { createPost: { post: { id: "post-now", text: "Hi" } } } }), { status: 200 }),
-    );
+  it("stamps metadata.facebook.type=post in shareNow mode and omits dueAt", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-now", text: "Hi" } } } }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { createPostForBuffer } = await import("@/lib/buffer/client");
     const res = await createPostForBuffer("tok-1", {
@@ -597,22 +620,30 @@ describe("createPostForBuffer", () => {
       text: "Hi",
       mode: "shareNow",
       contentKind: "post",
+      service: "facebook",
     });
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data.status).toBe("sent");
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(init.body as string);
     expect(body.query).toContain("mode: shareNow");
-    expect(body.query).toContain('metadata: { type: "post" }');
+    expect(body.query).toContain("schedulingType: automatic");
+    expect(body.query).toContain("needsApproval: false");
+    expect(body.query).toContain("assets: {}");
+    expect(body.query).toContain('metadata: { facebook: { type: "post" } }');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
     expect(body.query).not.toContain("dueAt:");
   });
 
-  it("stamps metadata.type=reel in customScheduled mode with dueAt", async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      new Response(JSON.stringify({ data: { createPost: { post: { id: "post-reel", text: "Reel", dueAt: "2026-09-04T10:00:00.000Z" } } } }), {
-        status: 200,
-      }),
-    );
+  it("stamps metadata.facebook.type=reel in customScheduled mode with dueAt", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(
+        JSON.stringify({ data: { createPost: { post: { id: "post-reel", text: "Reel", dueAt: "2026-09-04T10:00:00.000Z" } } } }),
+        { status: 200 },
+      );
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { createPostForBuffer } = await import("@/lib/buffer/client");
     await createPostForBuffer("tok-1", {
@@ -620,19 +651,25 @@ describe("createPostForBuffer", () => {
       text: "Reel",
       mode: "customScheduled",
       contentKind: "reel",
+      service: "facebook",
       dueAt: DUE_AT,
     });
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(init.body as string);
     expect(body.query).toContain("mode: customScheduled");
-    expect(body.query).toContain('metadata: { type: "reel" }');
+    expect(body.query).toContain("assets: {}");
+    expect(body.query).toContain("needsApproval: false");
+    expect(body.query).toContain('metadata: { facebook: { type: "reel" } }');
     expect(body.query).toContain('"2026-09-04T09:59:00.000Z"');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
   });
 
-  it("stamps metadata.type=story for story variants", async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      new Response(JSON.stringify({ data: { createPost: { post: { id: "post-story" } } } }), { status: 200 }),
-    );
+  it("stamps metadata.facebook.type=story for story variants", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-story" } } } }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { createPostForBuffer } = await import("@/lib/buffer/client");
     await createPostForBuffer("tok-1", {
@@ -640,10 +677,120 @@ describe("createPostForBuffer", () => {
       text: "Story",
       mode: "shareNow",
       contentKind: "story",
+      service: "facebook",
     });
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(init.body as string);
-    expect(body.query).toContain('metadata: { type: "story" }');
+    expect(body.query).toContain('metadata: { facebook: { type: "story" } }');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
+  });
+
+  it("stamps metadata.instagram.type=post for Instagram channels (per-channel metadata object)", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-ig" } } } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { createPostForBuffer } = await import("@/lib/buffer/client");
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-ig",
+      text: "IG",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "instagram",
+    });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.query).toContain('metadata: { instagram: { type: "post" } }');
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
+    expect(body.query).toContain("mode: shareNow");
+    expect(body.query).toContain("schedulingType: automatic");
+    expect(body.query).toContain("needsApproval: false");
+    expect(body.query).toContain("assets: {}");
+  });
+
+  it("includes assets: {} and needsApproval: false and omits dueAt in shareNow mode (full payload contract)", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-x" } } } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { createPostForBuffer } = await import("@/lib/buffer/client");
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-1",
+      text: "Hello",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "facebook",
+    });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    // Required fields present.
+    expect(body.query).toContain("assets: {}");
+    expect(body.query).toContain("needsApproval: false");
+    expect(body.query).toContain("schedulingType: automatic");
+    expect(body.query).toContain("mode: shareNow");
+    // No top-level metadata.type (legacy shape).
+    expect(body.query).not.toMatch(/metadata:\s*\{\s*type:/);
+    // dueAt must NOT appear for shareNow.
+    expect(body.query).not.toContain("dueAt:");
+  });
+
+  it("omits dueAt for shareNow and includes it for customScheduled (mode contract)", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return new Response(JSON.stringify({ data: { createPost: { post: { id: "post-mode" } } } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { createPostForBuffer } = await import("@/lib/buffer/client");
+    // shareNow — no dueAt
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-1",
+      text: "Now",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "facebook",
+    });
+    const shareNowBody = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string);
+    expect(shareNowBody.query).not.toContain("dueAt:");
+    // customScheduled — dueAt present
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-1",
+      text: "Later",
+      mode: "customScheduled",
+      contentKind: "post",
+      service: "facebook",
+      dueAt: DUE_AT,
+    });
+    const scheduledBody = JSON.parse(fetchMock.mock.calls[1]![1]!.body as string);
+    expect(scheduledBody.query).toContain("dueAt:");
+    expect(scheduledBody.query).toContain('"2026-09-04T09:59:00.000Z"');
+  });
+});
+
+describe("Buffer enums (GraphQL schema constants)", () => {
+  it("PostTypeFacebook matches Buffer's documented enum", () => {
+    expect(BufferPostTypeFacebook).toEqual({ post: "post", reel: "reel", story: "story" });
+  });
+  it("PostTypeInstagram exposes the subset this product publishes", () => {
+    expect(BufferPostTypeInstagram.post).toBe("post");
+    expect(BufferPostTypeInstagram.reel).toBe("reel");
+    expect(BufferPostTypeInstagram.story).toBe("story");
+    expect(BufferPostTypeInstagram.carousel).toBe("carousel");
+    expect(BufferPostTypeInstagram.short).toBe("short");
+  });
+  it("ShareMode includes shareNow and customScheduled (the two modes this product sends)", () => {
+    expect(BufferShareMode.shareNow).toBe("shareNow");
+    expect(BufferShareMode.customScheduled).toBe("customScheduled");
+    expect(BufferShareMode.addToQueue).toBe("addToQueue");
+    expect(BufferShareMode.shareNext).toBe("shareNext");
+  });
+  it("SchedulingType includes automatic and notification", () => {
+    expect(BufferSchedulingType.automatic).toBe("automatic");
+    expect(BufferSchedulingType.notification).toBe("notification");
   });
 });
 

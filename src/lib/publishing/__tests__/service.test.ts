@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBufferPayload,
   deriveContentKind,
+  platformToBufferService,
   PublishingError,
   type ContentKind,
   type PublishMode,
@@ -28,10 +29,20 @@ describe("deriveContentKind", () => {
   });
 });
 
-describe("buildBufferPayload", () => {
-  const baseArgs = { channelId: "ch-1", text: "Hello", contentKind: "post" as ContentKind };
+describe("platformToBufferService", () => {
+  it("maps facebook → facebook (Buffer channel.service)", () => {
+    expect(platformToBufferService("facebook")).toBe("facebook");
+  });
 
-  it("returns a payload shaped for createPostForBuffer", () => {
+  it("maps instagram → instagram (Buffer channel.service)", () => {
+    expect(platformToBufferService("instagram")).toBe("instagram");
+  });
+});
+
+describe("buildBufferPayload", () => {
+  const baseArgs = { channelId: "ch-1", text: "Hello", contentKind: "post" as ContentKind, service: "facebook" as const };
+
+  it("returns a payload shaped for createPostForBuffer (incl. service)", () => {
     const dueAt = new Date("2026-09-04T10:00:00.000Z");
     const payload = buildBufferPayload({ ...baseArgs, mode: "customScheduled", dueAt });
     expect(payload).toEqual({
@@ -39,6 +50,7 @@ describe("buildBufferPayload", () => {
       text: "Hello",
       contentKind: "post",
       mode: "customScheduled",
+      service: "facebook",
       dueAt,
     });
   });
@@ -65,35 +77,71 @@ describe("buildBufferPayload", () => {
       expect(payload.contentKind).toBe(k);
     }
   });
+
+  it("passes service through verbatim (facebook/instagram)", () => {
+    for (const s of ["facebook", "instagram"] as const) {
+      const payload = buildBufferPayload({ ...baseArgs, service: s, mode: "shareNow" });
+      expect(payload.service).toBe(s);
+    }
+  });
 });
 
-describe("createPostMutation integration with buildBufferPayload", () => {
-  it("includes metadata.type='post' for shareNow mode (the Buffer 'Facebook posts require a type' guard)", () => {
-    const args = buildBufferPayload({ channelId: "ch-1", text: "Hi", contentKind: "post", mode: "shareNow" });
+describe("createPostMutation integration with buildBufferPayload (current GraphQL schema)", () => {
+  it("emits metadata.facebook.type='post' for shareNow facebook — the Buffer 'Facebook posts require a type' guard", () => {
+    const args = buildBufferPayload({ channelId: "ch-1", text: "Hi", contentKind: "post", mode: "shareNow", service: "facebook" });
     const q = createPostMutation({
       channelId: args.channelId,
       text: args.text,
       mode: args.mode,
       contentKind: args.contentKind,
+      service: args.service,
     });
-    expect(q).toContain('metadata: { type: "post" }');
+    expect(q).toContain('metadata: { facebook: { type: "post" } }');
     expect(q).toContain("mode: shareNow");
+    expect(q).toContain("schedulingType: automatic");
+    expect(q).toContain("needsApproval: false");
+    expect(q).toContain("assets: {}");
     expect(q).not.toContain("dueAt:");
+    // No legacy top-level metadata.type
+    expect(q).not.toMatch(/metadata:\s*\{\s*type:/);
   });
 
-  it("includes metadata.type='reel' for customScheduled mode", () => {
+  it("emits metadata.facebook.type='reel' for customScheduled facebook with dueAt", () => {
     const dueAt = new Date("2026-09-04T10:00:00.000Z");
-    const args = buildBufferPayload({ channelId: "ch-1", text: "Reel", contentKind: "reel", mode: "customScheduled", dueAt });
+    const args = buildBufferPayload({ channelId: "ch-1", text: "Reel", contentKind: "reel", mode: "customScheduled", service: "facebook", dueAt });
     const q = createPostMutation({
       channelId: args.channelId,
       text: args.text,
       mode: args.mode,
       contentKind: args.contentKind,
+      service: args.service,
       dueAt: dueAt.toISOString(),
     });
-    expect(q).toContain('metadata: { type: "reel" }');
+    expect(q).toContain('metadata: { facebook: { type: "reel" } }');
     expect(q).toContain("mode: customScheduled");
+    expect(q).toContain("schedulingType: automatic");
+    expect(q).toContain("needsApproval: false");
+    expect(q).toContain("assets: {}");
     expect(q).toContain('"2026-09-04T10:00:00.000Z"');
+    expect(q).not.toMatch(/metadata:\s*\{\s*type:/);
+  });
+
+  it("emits metadata.instagram.type='post' for shareNow instagram", () => {
+    const args = buildBufferPayload({ channelId: "ch-ig", text: "Hi", contentKind: "post", mode: "shareNow", service: "instagram" });
+    const q = createPostMutation({
+      channelId: args.channelId,
+      text: args.text,
+      mode: args.mode,
+      contentKind: args.contentKind,
+      service: args.service,
+    });
+    expect(q).toContain('metadata: { instagram: { type: "post" } }');
+    expect(q).toContain("mode: shareNow");
+    expect(q).toContain("assets: {}");
+    expect(q).toContain("needsApproval: false");
+    expect(q).toContain("schedulingType: automatic");
+    expect(q).not.toMatch(/metadata:\s*\{\s*type:/);
+    expect(q).not.toContain("dueAt:");
   });
 });
 
