@@ -1,5 +1,5 @@
 ﻿import { notFound } from "next/navigation";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import type { UIMessage } from "ai";
 
 import { getDb } from "@/db";
@@ -10,6 +10,10 @@ import { ChatPanel } from "@/components/chat/chat-panel";
 import { ThreadList } from "@/components/chat/thread-list";
 import { MobileThreads } from "@/components/chat/mobile-threads";
 import { PageHeader } from "@/components/layout/page-header";
+import {
+  filterEmptyAssistantPlaceholders,
+  resolveStaleAssistantMetadata,
+} from "@/lib/ai/chat-persistence";
 
 export const metadata = { title: "AI Chat" };
 
@@ -33,9 +37,18 @@ export default async function ThreadPage({
         eq(chatThreads.id, threadId),
         eq(chatThreads.workspaceId, ctx.workspace.id),
         eq(chatThreads.userId, ctx.user.id),
+        isNull(chatThreads.deletedAt),
       ),
     );
   if (!thread) notFound();
+
+  // Resolve any assistant message whose metadata still says "running"
+  // against the real agent_runs state (rows are updated in place). A
+  // reloaded thread must never render a phantom "running" bubble when the
+  // run is actually terminal — server restarts and dropped SSE connections
+  // used to leave these stuck. Best-effort; the loader also filters empty
+  // placeholders.
+  await resolveStaleAssistantMetadata(threadId);
 
   const rows = await db
     .select({ message: chatMessages.message })
@@ -43,9 +56,11 @@ export default async function ThreadPage({
     .where(eq(chatMessages.threadId, threadId))
     .orderBy(asc(chatMessages.createdAt));
 
-  const initialMessages = rows
-    .map((r) => r.message as unknown as UIMessage)
-    .filter((m) => m && typeof m.role === "string" && Array.isArray(m.parts));
+  const initialMessages = filterEmptyAssistantPlaceholders(
+    rows
+      .map((r) => r.message as unknown as UIMessage)
+      .filter((m) => m && typeof m.role === "string" && Array.isArray(m.parts)),
+  );
 
 
 

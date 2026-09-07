@@ -19,6 +19,24 @@ export async function register() {
     // lastRunKey, so a per-minute firing is a cheap no-op elsewhere.
     // schedule() upserts the cron definition on every restart.
     await boss.schedule(QUEUES.autopilotLoop, "* * * * *");
+    // Chat run sweep: every minute, recover stuck chat-kind runs (server
+    // restart, dropped SSE, dead workers). The chat route's onFinish
+    // never fires for those, so the sweep is the only path to a clean
+    // terminal state.
+    await boss.schedule(QUEUES.chatRunSweep, "* * * * *");
+    // Boot sweep: every chat run still marked "running" belonged to the
+    // previous process (the controller registry starts empty) — recover
+    // them BEFORE the cron fires. Best-effort; a failure never blocks the
+    // scheduler.
+    try {
+      const { failInterruptedChatRuns } = await import("@/lib/ai/chat-persistence");
+      const recovered = await failInterruptedChatRuns();
+      if (recovered > 0) {
+        console.log(`[qurtiz] boot sweep recovered ${recovered} interrupted chat run(s)`);
+      }
+    } catch (e) {
+      console.error("[qurtiz] boot sweep skipped:", e instanceof Error ? e.message : e);
+    }
     g.__qurtizSchedulerReady = true;
     console.log("[qurtiz] background scheduler started");
   } catch (e) {

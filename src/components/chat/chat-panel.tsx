@@ -434,9 +434,25 @@ export function ChatPanel({
   // Persist new messages after a terminal turn — success ("ready") AND
   // failure ("error"): the complete UIMessage (all parts incl. tool
   // inputs/outputs and the runId/runStatus metadata) is sent as-is, so
-  // reloaded threads re-render tools in their real states.
+  // reloaded threads re-render tools in their real states. Assistant rows
+  // are ALSO persisted server-side (the route's terminal callback) — the
+  // upsert key (thread_id + message->>'id') makes the two writers converge
+  // on one row instead of duplicating it.
   useEffect(() => {
     if ((status !== "ready" && status !== "error") || persisting.current) return;
+
+    // Drop an empty assistant tail (a stream that died before any output):
+    // it renders as a blank bubble, must not reach the model context on the
+    // next send (an assistant message with no content breaks several
+    // providers), and the persist route drops it anyway. The cursor is
+    // clamped in the same pass so the index math below stays consistent.
+    const last = messages[messages.length - 1];
+    if (last && last.role === "assistant" && (last.parts ?? []).length === 0) {
+      setMessages(messages.slice(0, -1));
+      persistedCount.current = Math.min(persistedCount.current, messages.length - 1);
+      return; // effect re-runs after the state update
+    }
+
     const newMessages = messages.slice(persistedCount.current);
     if (newMessages.length === 0) return;
 
@@ -467,7 +483,7 @@ export function ChatPanel({
         persisting.current = false;
       }
     })();
-  }, [status, messages, workspaceId, router]);
+  }, [status, messages, workspaceId, router, setMessages]);
 
   // Reconnect-to-truth: whenever the panel is idle (stream ended, errored,
   // or a reloaded thread), resolve any message whose run metadata is still
@@ -575,18 +591,20 @@ export function ChatPanel({
     stop();
   }
 
-  // Retry a failed run: re-submits the original user text via regenerate.
-  // The tail is replaced, so roll the persisted cursor back to the retried
-  // message and bump the generation so an in-flight persist of the failed
-  // turn cannot clobber the rollback. Failed runs insert no content_items,
-  // so re-running cannot duplicate anything.
+  // Retry a failed run. The server derives the assistant row key from the
+  // retried user message id (thread_id + message->>'id' upsert), so the
+  // retry's stream REPLACES the failed assistant row — never a second row
+  // for the same turn. Empty placeholder tails are already dropped by the
+  // persist effect above, so `regenerate()` here sees a clean history that
+  // ends with the (already persisted) user message.
   function retryLast() {
     if (busy) return;
     const last = messages[messages.length - 1];
     if (!last) return;
     persistGen.current += 1;
+
     if (last.role === "assistant") {
-      // The failed assistant message is replaced by the retry's response.
+      // The failed assistant tail is replaced by the retry's response.
       persistedCount.current = messages.length - 1;
       void regenerate({ messageId: last.id });
     } else {

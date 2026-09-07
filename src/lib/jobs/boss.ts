@@ -15,6 +15,7 @@ export const QUEUES = {
   campaignGenerate: "campaign-generate",
   syncInsights: "sync-insights",
   autopilotLoop: "autopilot-loop",
+  chatRunSweep: "chat-run-sweep",
 } as const;
 
 export async function getBoss(): Promise<PgBoss> {

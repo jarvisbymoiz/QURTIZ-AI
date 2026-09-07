@@ -1,12 +1,18 @@
 ﻿import { NextResponse, type NextRequest } from "next/server";
 import type { UIMessage } from "ai";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, param, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { chatMessages, chatThreads } from "@/db/schema";
 import { can } from "@/lib/permissions";
 import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
+import {
+  filterEmptyAssistantPlaceholders,
+  maybeAutoTitleThread,
+  resolveStaleAssistantMetadata,
+  textOf,
+} from "@/lib/ai/chat-persistence";
 
 export const dynamic = "force-dynamic";
 
@@ -28,13 +34,6 @@ const persistBodySchema = z.object({
   workspaceId: z.string().uuid().optional(),
   messages: z.array(persistedMessageSchema).min(1).max(100),
 });
-
-function textOf(message: UIMessage): string {
-  return (message.parts ?? [])
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("");
-}
 
 // body size guard: attachments inflate message payloads
 export async function POST(request: NextRequest) {
@@ -72,9 +71,16 @@ export async function POST(request: NextRequest) {
   }
 
   const db = getDb();
-  const incoming = body.messages;
+  const incoming = filterEmptyAssistantPlaceholders(body.messages);
 
   let threadId = body.threadId ?? null;
+  let createdThread = false;
+
+  if (incoming.length === 0) {
+    // Nothing but empty assistant placeholders (a dead stream's leftovers) —
+    // never persist them, and never create a thread for them.
+    return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
+  }
 
   if (threadId) {
     const [thread] = await db
@@ -85,12 +91,17 @@ export async function POST(request: NextRequest) {
           eq(chatThreads.id, threadId),
           eq(chatThreads.workspaceId, workspaceId),
           eq(chatThreads.userId, user.id),
+          isNull(chatThreads.deletedAt),
         ),
       );
     if (!thread) {
       return NextResponse.json({ error: "THREAD_NOT_FOUND" }, { status: 404 });
     }
   } else {
+    // First-exchange path: the chat route skips server-side persistence when
+    // no threadId exists, so THIS route owns thread creation for the first
+    // message (truncated first-message title; the auto-title pass upgrades
+    // it after the first successful exchange).
     const firstUser = incoming.find((m) => m.role === "user");
     const rawTitle = firstUser ? textOf(firstUser).trim() : "New chat";
     const title = (rawTitle.length > 0 ? rawTitle : "New chat").slice(0, 60);
@@ -99,22 +110,60 @@ export async function POST(request: NextRequest) {
       .values({ workspaceId, userId: user.id, title })
       .returning();
     threadId = thread.id;
+    createdThread = true;
   }
 
-  await db.insert(chatMessages).values(
-    incoming.map((m) => ({
-      threadId: threadId as string,
+  // Upsert per-message by (thread_id, message->>'id'). The chat route also
+  // persists assistant rows server-side (backend = source of truth); a client
+  // persist that re-posts such a row overwrites the same key cleanly — never
+  // a duplicate. Empty assistant placeholders were already dropped above so a
+  // client that lost its stream mid-flight cannot reintroduce them.
+  for (const m of incoming) {
+    await db
+      .delete(chatMessages)
+      .where(
+        and(
+          eq(chatMessages.threadId, threadId),
+          // param(): plain strings in sql`` are interpolated as RAW SQL — the
+          // message id is client-supplied and must be a bound parameter.
+          sql`${chatMessages.message} ->> 'id' = ${param(m.id)}`,
+        ),
+      );
+    await db.insert(chatMessages).values({
+      threadId,
       workspaceId,
       role: m.role,
       content: textOf(m),
       message: m as unknown as Record<string, unknown>,
-    })),
-  );
+    });
+  }
 
   await db
     .update(chatThreads)
     .set({ updatedAt: new Date() })
     .where(eq(chatThreads.id, threadId));
+
+  // Resolve any assistant metadata that still claims "running" against the
+  // real agent_runs state. Cheap, idempotent (only selects rows whose jsonb
+  // metadata says "running") — a re-loaded tab posting its messages surfaces
+  // the terminal truth immediately.
+  await resolveStaleAssistantMetadata(threadId);
+
+  // First successful exchange on a thread created here → auto-title it.
+  // Bounded, fire-and-forget, silent on failure; user renames always win.
+  if (createdThread) {
+    const completedAssistant = incoming.find(
+      (m) =>
+        m.role === "assistant" &&
+        (m.parts ?? []).length > 0 &&
+        (m.metadata as { runStatus?: string } | undefined)?.runStatus === "completed",
+    );
+    const firstUser = incoming.find((m) => m.role === "user");
+    const firstUserText = firstUser ? textOf(firstUser) : "";
+    if (completedAssistant && firstUserText) {
+      maybeAutoTitleThread({ threadId, workspaceId, firstUserText });
+    }
+  }
 
   return NextResponse.json({ threadId });
 }

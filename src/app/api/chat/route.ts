@@ -7,7 +7,7 @@ import {
 } from "ai";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandMemory, brands, workspaces } from "@/db/schema";
+import { agentRuns, brandMemory, brands, chatThreads, workspaces } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
@@ -15,9 +15,17 @@ import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
 import { isRunRegistered, registerRunController, unregisterRunController } from "@/lib/ai/run-registry";
-import { and, desc } from "drizzle-orm";
+import { and, desc, isNull } from "drizzle-orm";
 import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
+import {
+  assistantMessageIdForTurn,
+  filterEmptyAssistantPlaceholders,
+  maybeAutoTitleThread,
+  persistAssistantMessage,
+  resolveTerminalRunState,
+  textOf,
+} from "@/lib/ai/chat-persistence";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +44,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = (await request.json().catch(() => null)) as
-    | { messages?: UIMessage[]; workspaceId?: string }
+    | { messages?: UIMessage[]; workspaceId?: string; threadId?: string | null }
     | null;
   if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
@@ -62,6 +70,15 @@ export async function POST(request: NextRequest) {
   }
   const model = textModel.model;
 
+  // Empty assistant placeholders (parts=[]) from a dead earlier stream must
+  // never reach the model context — several providers reject an assistant
+  // message with no content, which is exactly how the "second message always
+  // fails" loop used to sustain itself.
+  const sanitized = filterEmptyAssistantPlaceholders(body.messages);
+  if (sanitized.length === 0) {
+    return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
+  }
+
   const db = getDb();
   const [brandRow] = await db.select().from(brands).where(eq(brands.workspaceId, workspaceId));
   const [workspaceRow] = await db
@@ -84,7 +101,7 @@ export async function POST(request: NextRequest) {
   const ALLOWED_MEDIA = new Set(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
   const MAX_PART_CHARS = 12_000_000; // ~9MB binary per part when base64
   let totalChars = 0;
-  for (const msg of body.messages) {
+  for (const msg of sanitized) {
     for (const part of msg.parts ?? []) {
       if (part.type === "file") {
         const fp = part as { mediaType?: string; url?: string };
@@ -102,6 +119,42 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "TOO_MANY_ATTACHMENTS", message: "Total attachments exceed 22MB." }, { status: 400 });
   }
 
+  // Resolve the thread: when the client passed one, confirm it belongs to
+  // this user/workspace. When it didn't (first exchange), thread creation
+  // stays with /api/chat/persist exactly as before — server-side assistant
+  // persistence simply skips below until the thread exists (the spec guard:
+  // no threadId → keep current behavior).
+  const threadId = typeof body.threadId === "string" && body.threadId.length > 0 ? body.threadId : null;
+  if (threadId) {
+    const [existing] = await db
+      .select({ id: chatThreads.id })
+      .from(chatThreads)
+      .where(
+        and(
+          eq(chatThreads.id, threadId),
+          eq(chatThreads.workspaceId, workspaceId),
+          eq(chatThreads.userId, user.id),
+          isNull(chatThreads.deletedAt),
+        ),
+      );
+    if (!existing) {
+      return NextResponse.json({ error: "THREAD_NOT_FOUND" }, { status: 404 });
+    }
+  }
+
+  // The first user message drives auto-titling. When the request contains
+  // exactly one user message this IS the first exchange (or its retry) —
+  // the only moment a still-default title may be upgraded.
+  const firstUserMessage = sanitized.find((m) => m.role === "user");
+  const firstUserText = firstUserMessage ? textOf(firstUserMessage) : "";
+  const isFirstExchange = sanitized.filter((m) => m.role === "user").length === 1;
+
+  // Deterministic assistant message id: derived from the request's last
+  // message (after the SDK's regenerate() slicing that is the user message
+  // being answered). A retry of the same turn therefore upserts the SAME
+  // row key instead of appending a second assistant row. Computed at
+  // response time (assistantMessageIdForTurn below) when the run id exists.
+
   const [run] = await db
     .insert(agentRuns)
     .values({ workspaceId, userId: user.id, kind: "chat", model: textModel.modelId })
@@ -111,6 +164,9 @@ export async function POST(request: NextRequest) {
   // the combined abort signal below (user cancel OR the 600s safety cap).
   const cancelController = new AbortController();
   registerRunController(run.id, cancelController);
+  // Distinguishes WHY the combined abort signal tripped — the message
+  // metadata and the agent_runs row must always tell the same story.
+  let abortOutcome: "user" | "timeout" | null = null;
 
   const system = buildSystemPrompt({
     brandSummary: summarizeBrandBrain(brandRow ?? null),
@@ -120,7 +176,7 @@ export async function POST(request: NextRequest) {
     publishProvider,
   });
 
-  const recent = body.messages.slice(-MAX_RECENT_MESSAGES);
+  const recent = sanitized.slice(-MAX_RECENT_MESSAGES);
 
   try {
     // M6: AI SDK v5 streamText() returns synchronously — provider errors
@@ -130,6 +186,7 @@ export async function POST(request: NextRequest) {
     // phase internally; stream errors are captured via onError and surfaced
     // as an honest failure below instead of a silent truncated stream.
     let streamError: string | null = null;
+
     const result = streamText({
       model,
       system,
@@ -155,6 +212,7 @@ export async function POST(request: NextRequest) {
       onAbort: () => {
         const userCancelled = !isRunRegistered(run.id);
         unregisterRunController(run.id);
+        abortOutcome = userCancelled ? "user" : "timeout";
         void db
           .update(agentRuns)
           .set({
@@ -172,8 +230,8 @@ export async function POST(request: NextRequest) {
       },
       onFinish: async ({ usage, finishReason }) => {
         unregisterRunController(run.id);
+        const failed = finishReason === "error" || streamError !== null;
         try {
-          const failed = finishReason === "error" || streamError !== null;
           await db
             .update(agentRuns)
             .set({
@@ -215,6 +273,54 @@ export async function POST(request: NextRequest) {
         }
         return undefined;
       },
+      // Persistence-mode inputs. originalMessages MUST end with the USER
+      // message (the SDK reuses/continues the id of a trailing assistant
+      // message — with DB rows that would merge this response into the
+      // previous turn's row). The sanitized client history ends with the
+      // user message by construction, so the generated responseMessage id
+      // comes from generateMessageId below. Server-persisted parts remain
+      // verbatim; originalMessages only shapes id/continuation logic.
+      originalMessages: recent,
+      generateMessageId: () => assistantMessageIdForTurn(recent[recent.length - 1], run.id),
+      // Terminal persistence — the backend is the source of truth. Fired on
+      // the stream flush for BOTH successful and failed streams, and on
+      // cancel() (client disconnect) with no finishReason — the
+      // interrupted case resolves to "failed" instead of a phantom row.
+      onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+        const terminal = resolveTerminalRunState({
+          isAborted,
+          abortOutcome,
+          finishReason,
+          streamError,
+        });
+
+        // Server-side assistant persistence (skip on the very first
+        // exchange, where the thread does not exist yet — /api/chat/persist
+        // creates it and upserts the same message id there).
+        if (threadId) {
+          try {
+            await persistAssistantMessage({
+              threadId,
+              workspaceId,
+              userId: user.id,
+              message: { ...responseMessage, id: assistantMessageIdForTurn(recent[recent.length - 1], run.id) },
+              runStatus: terminal.status,
+              runError: terminal.error,
+            });
+          } catch {
+            // Persisting the row is best-effort: a failure here never
+            // breaks the stream, the client can still save on its own
+            // (it will be deduped by the persist route).
+          }
+          // First successful exchange → auto-title the thread (bounded,
+          // fire-and-forget, user renames always win).
+          if (terminal.status === "completed" && isFirstExchange && firstUserText) {
+            maybeAutoTitleThread({ threadId, workspaceId, firstUserText });
+          }
+        }
+      },
+      sendFinish: true,
+      sendStart: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown provider error";

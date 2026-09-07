@@ -791,6 +791,17 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.publishScan, async () => {
     await publishDueScan();
   });
+  await boss.work(QUEUES.chatRunSweep, async () => {
+    // Recover chat-kind agent_runs that are stuck in `running` (server
+    // restart, dropped SSE, dead worker). The route's onFinish/onAbort
+    // never ran for those — without this sweep the DB would carry
+    // phantom "running" rows forever.
+    const { recoverStaleChatRuns } = await import("@/lib/ai/chat-persistence");
+    const recovered = await recoverStaleChatRuns();
+    if (recovered > 0) {
+      console.log(`[chat-run-sweep] recovered ${recovered} stale chat run(s)`);
+    }
+  });
   await boss.work(QUEUES.bulkGenerate, async () => {
     // Payload-independent: process every queued bulk_plan row (oldest first).
     // This survives any handler-payload shape differences across pg-boss versions.
