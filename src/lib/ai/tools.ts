@@ -1,10 +1,11 @@
-﻿import { tool } from "ai";
+﻿import { tool, type Tool, type ToolCallOptions } from "ai";
 import { z } from "zod";
 import { and, desc, eq, ilike, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentSteps, brandMemory, brands, contentItems, contentVariants, platformConnections } from "@/db/schema";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
+import { appendRateLimitHint, capMessage, normalizeToolOutput, scrubCredentials } from "@/lib/ai/stream-errors";
 import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
@@ -35,23 +36,15 @@ export type AgentToolContext = {
  * an actionable hint instead of a dead end.
  */
 function formatAgentToolError(error: unknown): string {
-  let message =
+  const message =
     error instanceof AIConfigError
       ? error.detail
       : error instanceof Error
         ? error.message
         : "The operation failed.";
-  // Defensive scrub: never surface anything resembling a credential.
-  message = message.replace(
-    /\b(?:sk|rk|pk|ghp|gho)-[A-Za-z0-9_-]{8,}\b|Bearer\s+\S+|api[_-]?key\s*[=:]\s*\S+/gi,
-    "[redacted]",
-  );
-  if (message.length > 300) message = message.slice(0, 300) + "…";
-  if (/\b429\b|rate[\s-]?limit|time[\s-]?out|timed out|abort/i.test(message)) {
-    message +=
-      " (The configured AI model is rate-limited or stalled — try again or switch to a non-free model in AI Configuration.)";
-  }
-  return message;
+  // Defensive scrub + cap + hint come from the shared stream-error helpers
+  // (same sanitization the chat route applies to provider errors).
+  return appendRateLimitHint(capMessage(scrubCredentials(message)));
 }
 
 /**
@@ -61,16 +54,31 @@ function formatAgentToolError(error: unknown): string {
  * JSON. Same defensive scrub as formatAgentToolError.
  */
 function formatContentParseError(error: AIContentParseError): string {
-  let message =
+  const message =
     "The AI model's response could not be parsed into a valid post even after retries " +
     `(details: ${error.diagnostics.issues.slice(0, 120)}). ` +
     "Report this error to the user and STOP — do not retry automatically or invent a caption.";
-  message = message.replace(
-    /\b(?:sk|rk|pk|ghp|gho)-[A-Za-z0-9_-]{8,}\b|Bearer\s+\S+|api[_-]?key\s*[=:]\s*\S+/gi,
-    "[redacted]",
-  );
-  if (message.length > 300) message = message.slice(0, 300) + "…";
-  return message;
+  // Same defensive scrub + cap as formatAgentToolError (no rate-limit hint —
+  // a parse failure is not a rate limit).
+  return capMessage(scrubCredentials(message));
+}
+
+/**
+ * Wrap a tool's execute so its return value is normalized (serializability +
+ * 24KB cap) before the SDK turns it into a tool-result part. Passthrough for
+ * normal outputs — existing tools are untouched; a future tool that returns
+ * a circular, BigInt-bearing or oversized value degrades to an honest note
+ * instead of breaking the agent stream mid-step. The wrapper mutates the
+ * tool object in place (rather than rebuilding it) so the SDK's Tool type
+ * stays intact.
+ */
+function withNormalizedOutput(t: Tool): Tool {
+  const execute = t.execute;
+  if (!execute) return t;
+  const original = execute.bind(t);
+  t.execute = (input: unknown, options: ToolCallOptions) =>
+    normalizeToolOutput(original(input, options));
+  return t;
 }
 
 /**
@@ -505,7 +513,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     },
   });
 
-  return {
+  const tools: Record<string, Tool> = {
     get_brand_brain: getBrandBrain,
     research_niche: researchNiche,
     create_content: createContent,
@@ -520,6 +528,14 @@ export function buildAgentTools(ctx: AgentToolContext) {
     list_workspace_facts: listWorkspaceFacts,
     update_brand_memory: updateBrandMemory,
   };
+
+  // Tool-core insurance: every tool result is normalized (plain-JSON safe,
+  // size-capped) regardless of what the tool returns or which provider the
+  // agent runs on.
+  for (const name of Object.keys(tools)) {
+    tools[name] = withNormalizedOutput(tools[name]);
+  }
+  return tools;
 }
 
 

@@ -15,6 +15,7 @@ import {
   type LanguageModelV2Usage,
 } from "@ai-sdk/provider";
 import { convertUint8ArrayToBase64, generateId } from "@ai-sdk/provider-utils";
+import { safeToolResultJson } from "./stream-errors";
 
 /**
  * Minimal OpenAI Chat Completions-compatible LanguageModelV2.
@@ -122,7 +123,9 @@ function toChatMessages(prompt: LanguageModelV2Prompt): ChatMessage[] {
           return {
             id: tc.toolCallId,
             type: "function" as const,
-            function: { name: tc.toolName, arguments: JSON.stringify(tc.input) },
+            // Safe serialization: never let an exotic input value throw out
+            // of doStream and kill the whole agent stream.
+            function: { name: tc.toolName, arguments: safeToolResultJson(tc.input) },
           };
         });
       const out: ChatMessage = { role: "assistant", content: toolCalls.length > 0 ? text || null : text };
@@ -135,7 +138,11 @@ function toChatMessages(prompt: LanguageModelV2Prompt): ChatMessage[] {
         | { type: "tool-result"; toolCallId: string; output: { type: "text" | "json"; value: unknown } }
         | undefined;
       if (!part) continue;
-      const value = part.output.type === "json" ? JSON.stringify(part.output.value) : String(part.output.value);
+      // Safe serialization for json outputs (BigInt/circular values must
+      // degrade to a parseable string, never throw inside doStream); text
+      // outputs stay stringified as before.
+      const value =
+        part.output.type === "json" ? safeToolResultJson(part.output.value) : String(part.output.value);
       messages.push({ role: "tool", tool_call_id: part.toolCallId, content: value });
     }
   }
@@ -316,7 +323,10 @@ export function createOpenAICompatibleModel(opts: {
 /**
  * Parse an SSE byte stream from /chat/completions into V2 stream parts.
  * Honest terminal behavior: a truncated stream ends with finishReason
- * "error" instead of pretending success.
+ * "error" instead of pretending success, and a mid-stream provider error
+ * chunk (`{"error": {"message", "code"}}` — how OpenRouter reports 429s and
+ * upstream drops mid-stream) becomes an error part + finish(error) instead
+ * of being silently ignored.
  *
  * Tool calls: tool-input-start/delta are streamed for the UI, and a terminal
  * `tool-call` part (with the accumulated arguments) is emitted for every tool
@@ -339,6 +349,7 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
   let finishReason: string | null = null;
   let sawDone = false;
   let streamError: string | null = null;
+  let terminatedByError = false;
 
   function push(controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>, part: LanguageModelV2StreamPart) {
     try {
@@ -407,12 +418,43 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
               let chunk: {
                 choices?: { delta?: Record<string, unknown>; finish_reason?: string }[];
                 usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+                error?: { message?: string; code?: string | number } | string | null;
               };
               try {
                 chunk = JSON.parse(data) as typeof chunk;
               } catch {
                 continue;
               }
+
+              // Mid-stream provider error (OpenRouter shape:
+              // data: {"error": {"message": ..., "code": ...}}). Surface it
+              // honestly instead of silently swallowing the chunk and ending
+              // with a bogus finish reason — and never wait for [DONE] after
+              // an error chunk.
+              const chunkError = chunk.error;
+              if (chunkError != null) {
+                let detail: string;
+                let code: string | null = null;
+                if (typeof chunkError === "string") {
+                  detail = chunkError;
+                } else if (typeof chunkError === "object") {
+                  const err = chunkError as { message?: unknown; code?: unknown };
+                  code = err.code == null ? null : String(err.code);
+                  detail =
+                    typeof err.message === "string" && err.message.length > 0
+                      ? err.message
+                      : "Provider stream error (no detail)";
+                } else {
+                  detail = "Provider stream error (no detail)";
+                }
+                streamError = code ? `${detail} (code: ${code})` : detail;
+                push(controller, { type: "error", error: streamError });
+                push(controller, { type: "finish", finishReason: "error", usage });
+                terminatedByError = true;
+                void reader.cancel().catch(() => undefined);
+                break;
+              }
+
               const delta = chunk.choices?.[0]?.delta ?? {};
 
               const reasoning = delta.reasoning_content;
@@ -472,11 +514,13 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
               // after it — keep reading until [DONE] / end of stream.
               if (chunk.usage) usage = readUsage({ usage: chunk.usage });
             }
-            if (sawDone) break;
+            if (sawDone || terminatedByError) break;
           }
-          if (sawDone) break;
+          if (sawDone || terminatedByError) break;
         }
-        pushTerminal(controller);
+        // After a provider error chunk the error + finish(error) parts are
+        // already on the wire — pushTerminal must not add a second finish.
+        if (!terminatedByError) pushTerminal(controller);
         controller.close();
       } catch (error) {
         streamError = error instanceof Error ? error.message : "Provider stream error";

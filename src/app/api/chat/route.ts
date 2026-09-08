@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, chatThreads, workspaces } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
+import { describeStreamError } from "@/lib/ai/stream-errors";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
@@ -225,8 +226,14 @@ export async function POST(request: NextRequest) {
             // Never let run bookkeeping break the response.
           });
       },
-      onError: (error) => {
-        streamError = error instanceof Error ? error.message : "Provider stream error";
+      // The SDK passes the callback an EVENT ({ error }), not the error
+      // itself — destructuring is what turns the real provider failure
+      // (HTTP 429 rate limit, mid-stream drop, context error) into an
+      // honest, sanitized, actionable message instead of the opaque
+      // "Provider stream error" fallback. This string flows into the run
+      // row, the finish-part metadata and the persisted assistant message.
+      onError: ({ error }) => {
+        streamError = describeStreamError(error);
       },
       onFinish: async ({ usage, finishReason }) => {
         unregisterRunController(run.id);

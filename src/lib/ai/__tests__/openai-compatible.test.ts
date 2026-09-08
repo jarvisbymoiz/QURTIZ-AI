@@ -102,4 +102,106 @@ describe("openai-compatible doStream", () => {
     const finish = parts.find((p) => p.type === "finish");
     expect(finish).toMatchObject({ finishReason: "error" });
   });
+
+  it("surfaces a mid-stream provider error chunk as an honest failure", async () => {
+    // OpenRouter reports 429s/upstream drops mid-stream as an error chunk
+    // (no choices) followed by [DONE]. It used to be silently ignored, so
+    // the stream ended with a bogus finish instead of the real reason.
+    const parts = await collectParts([
+      sseData({ choices: [{ delta: { content: "Partial" } }] }),
+      sseData({ error: { message: "Rate limit exceeded", code: "limit_rpd" } }),
+      "data: [DONE]\n\n",
+    ]);
+
+    const errorParts = parts.filter((p) => p.type === "error");
+    expect(errorParts).toHaveLength(1);
+    expect(errorParts[0]).toMatchObject({
+      type: "error",
+      error: "Rate limit exceeded (code: limit_rpd)",
+    });
+    const finishParts = parts.filter((p) => p.type === "finish");
+    expect(finishParts).toHaveLength(1);
+    expect(finishParts[0]).toMatchObject({ finishReason: "error" });
+  });
+
+  it("serializes BigInt and circular tool results without throwing", async () => {
+    let capturedBody: unknown = null;
+    const loop: Record<string, unknown> = {};
+    loop.self = loop;
+    globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+      capturedBody = JSON.parse(String(init?.body ?? "null"));
+      return sseResponse([
+        sseData({ choices: [{ delta: { content: "ok" } }] }),
+        sseData({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+        "data: [DONE]\n\n",
+      ]);
+    }) as typeof fetch;
+
+    const model = createOpenAICompatibleModel({ modelId: "test-model", apiKey: "k", baseUrl: null });
+    const { stream } = await model.doStream({
+      prompt: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              output: { type: "json", value: { total: BigInt("9007199254740993"), loop } },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "go" }] },
+      ],
+    } as Parameters<typeof model.doStream>[0]);
+
+    // Consuming the stream must not throw — the request was built safely.
+    const reader = stream.getReader();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+
+    const messages = (capturedBody as { messages?: { role: string; content: string }[] }).messages ?? [];
+    const toolMessage = messages.find((m) => m.role === "tool");
+    expect(toolMessage?.content).toContain('"total":"9007199254740993"');
+    expect(toolMessage?.content).toContain('"<circular>"');
+    expect(() => JSON.parse(toolMessage?.content ?? "")).not.toThrow();
+  });
+
+  it("round-trips a normal tool result unchanged", async () => {
+    let capturedBody: unknown = null;
+    globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+      capturedBody = JSON.parse(String(init?.body ?? "null"));
+      return sseResponse([
+        sseData({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+        "data: [DONE]\n\n",
+      ]);
+    }) as typeof fetch;
+
+    const model = createOpenAICompatibleModel({ modelId: "test-model", apiKey: "k", baseUrl: null });
+    const { stream } = await model.doStream({
+      prompt: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_2",
+              output: { type: "json", value: { results: [{ id: "i1", topic: "t" }] } },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "go" }] },
+      ],
+    } as Parameters<typeof model.doStream>[0]);
+    const reader = stream.getReader();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+
+    const messages = (capturedBody as { messages?: { role: string; content: string }[] }).messages ?? [];
+    const toolMessage = messages.find((m) => m.role === "tool");
+    expect(JSON.parse(toolMessage?.content ?? "")).toEqual({ results: [{ id: "i1", topic: "t" }] });
+  });
 });
