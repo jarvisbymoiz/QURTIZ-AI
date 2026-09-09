@@ -32,7 +32,12 @@ import { safeToolResultJson, unwrapWrappedJsonInput } from "./stream-errors";
  * Honest limitations surfaced as errors (never silently dropped):
  * - Non-image file attachments (e.g. PDF) are unsupported.
  * - JSON output uses `response_format: json_object`; servers that do not
- *   implement it return a clear API error which propagates unchanged.
+ *   implement it return a clear API error which propagates unchanged. Since
+ *   json_object mode additionally requires the word "json" in the messages,
+ *   a minimal "Respond with JSON." system message is appended when the
+ *   prompt does not already mention JSON (never mutating the caller's
+ *   prompt), so OpenAI/gpt-oss/OpenRouter-compatible endpoints never reject
+ *   the request for the missing token.
  */
 
 type ChatContentPart =
@@ -179,6 +184,30 @@ function toChatMessages(prompt: LanguageModelV2Prompt): ChatMessage[] {
   return messages;
 }
 
+/** True when a message's visible text already mentions JSON (case-insensitive). */
+function messageMentionsJson(msg: ChatMessage): boolean {
+  if (typeof msg.content === "string") return msg.content.toLowerCase().includes("json");
+  if (Array.isArray(msg.content)) {
+    return msg.content.some((part) => part.type === "text" && part.text.toLowerCase().includes("json"));
+  }
+  return false;
+}
+
+/**
+ * OpenAI-compatible servers reject `response_format: { type: "json_object" }`
+ * with HTTP 400 unless the word "json" appears somewhere in the messages
+ * ("'messages' must contain the word 'json' in some form...") — OpenAI,
+ * OpenRouter and gpt-oss all enforce this. `generateObject` prompts may
+ * legitimately never mention JSON (the schema is only conveyed via prompt
+ * injection for generic providers), so append a minimal system hint when the
+ * token is missing. A fresh array is returned; the caller's messages are
+ * never mutated, and already-satisfied prompts are left byte-identical.
+ */
+function ensureJsonTokenPresent(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.some(messageMentionsJson)) return messages;
+  return [...messages, { role: "system", content: "Respond with JSON." }];
+}
+
 function buildRequestBody(args: {
   modelId: string;
   messages: ChatMessage[];
@@ -186,9 +215,11 @@ function buildRequestBody(args: {
   stream: boolean;
 }): Record<string, unknown> {
   const o = args.callOptions;
+  const messages =
+    o.responseFormat?.type === "json" ? ensureJsonTokenPresent(args.messages) : args.messages;
   const body: Record<string, unknown> = {
     model: args.modelId,
-    messages: args.messages,
+    messages,
     stream: args.stream,
   };
   if (o.maxOutputTokens != null) body.max_tokens = o.maxOutputTokens;
@@ -214,7 +245,13 @@ function buildRequestBody(args: {
     }
   }
   // JSON mode: schema-aware servers can be targeted later; every
-  // OpenAI-compatible server implements json_object at minimum.
+  // OpenAI-compatible server implements json_object at minimum, and the
+  // required "json" token in the messages is guaranteed above
+  // (ensureJsonTokenPresent) so the request is never rejected for its
+  // absence. json_schema mode is deliberately not used: the SDK does pass
+  // a schema through responseFormat.schema, but many compatible endpoints
+  // (vLLM, LM Studio, older Groq/Together) only implement json_object, and
+  // this provider must not branch per model.
   if (o.responseFormat?.type === "json") body.response_format = { type: "json_object" };
   if (args.stream) {
     // Standard OpenAI field that makes the server report token usage in the

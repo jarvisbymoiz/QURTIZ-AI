@@ -315,3 +315,88 @@ describe("openai-compatible doStream", () => {
     expect(JSON.parse(toolMessage?.content ?? "")).toEqual({ results: [{ id: "i1", topic: "t" }] });
   });
 });
+
+/**
+ * Regression tests for the json_object token requirement: OpenAI-compatible
+ * servers (OpenAI, OpenRouter, gpt-oss) reject `response_format: json_object`
+ * with HTTP 400 unless the word "json" appears in the messages. The SDK's
+ * generateObject prompts may never mention JSON, so the adapter must
+ * guarantee the token without mutating the caller's prompt.
+ */
+describe("openai-compatible json_object message guarantee", () => {
+  async function captureGenerateBody(callOptions: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    let capturedBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+      capturedBody = JSON.parse(String(init?.body ?? "null")) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const model = createOpenAICompatibleModel({ modelId: "test-model", apiKey: "k", baseUrl: null });
+    await model.doGenerate(callOptions as Parameters<typeof model.doGenerate>[0]);
+    return capturedBody;
+  }
+
+  type CapturedMessage = { role: string; content: string };
+
+  it("injects a 'Respond with JSON.' system message in json mode when no message mentions json", async () => {
+    const body = await captureGenerateBody({
+      prompt: [
+        { role: "system", content: "You are the content engine." },
+        { role: "user", content: [{ type: "text", text: "Write a post about Ramadan." }] },
+      ],
+      responseFormat: { type: "json" },
+    });
+
+    expect(body?.response_format).toEqual({ type: "json_object" });
+    const messages = body?.messages as CapturedMessage[];
+    expect(messages).toHaveLength(3);
+    expect(messages[2]).toEqual({ role: "system", content: "Respond with JSON." });
+    // The caller's prompt is untouched — only the wire request gained a message.
+  });
+
+  it("does not inject when a message already contains the word json (case-insensitive)", async () => {
+    const body = await captureGenerateBody({
+      prompt: [
+        { role: "system", content: "Output JSON only." },
+        { role: "user", content: [{ type: "text", text: "Write a post about Ramadan." }] },
+      ],
+      responseFormat: { type: "json" },
+    });
+
+    const messages = body?.messages as CapturedMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages.some((m) => String(m.content).toLowerCase().includes("json"))).toBe(true);
+    expect(messages.some((m) => m.content === "Respond with JSON.")).toBe(false);
+  });
+
+  it("detects json inside multi-part user content without injecting", async () => {
+    const body = await captureGenerateBody({
+      prompt: [
+        { role: "system", content: "Be concise." },
+        { role: "user", content: [{ type: "text", text: "Return the answer as JSON, please." }] },
+      ],
+      responseFormat: { type: "json" },
+    });
+
+    const messages = body?.messages as CapturedMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages.some((m) => m.content === "Respond with JSON.")).toBe(false);
+  });
+
+  it("leaves messages unchanged when no json response format is requested", async () => {
+    const body = await captureGenerateBody({
+      prompt: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+    });
+
+    expect(body?.response_format).toBeUndefined();
+    const messages = body?.messages as CapturedMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual({ role: "user", content: "Hello" });
+  });
+});
