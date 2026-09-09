@@ -1,10 +1,13 @@
 import { APICallError } from "@ai-sdk/provider";
+import { InvalidToolInputError, NoSuchToolError } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   describeStreamError,
   normalizeToolOutput,
+  repairWrappedToolCall,
   safeToolResultJson,
   scrubCredentials,
+  unwrapWrappedJsonInput,
 } from "@/lib/ai/stream-errors";
 
 /**
@@ -158,5 +161,143 @@ describe("normalizeToolOutput", () => {
     expect(output.note).toContain("cannot be serialized");
     expect(output.preview).toContain('"total":"123"');
     expect(() => JSON.parse(output.preview)).not.toThrow();
+  });
+});
+
+describe("unwrapWrappedJsonInput", () => {
+  it("unwraps an object wrapper", () => {
+    expect(unwrapWrappedJsonInput({ json: { topic: "x", platforms: ["facebook"] } })).toEqual({
+      topic: "x",
+      platforms: ["facebook"],
+    });
+  });
+
+  it("unwraps a JSON-string wrapper", () => {
+    expect(unwrapWrappedJsonInput('{"json":{"topic":"x","platforms":["facebook"]}}')).toEqual({
+      topic: "x",
+      platforms: ["facebook"],
+    });
+  });
+
+  it("unwraps a nested string wrapper (stringified payload inside the envelope)", () => {
+    expect(unwrapWrappedJsonInput('{"json":"{\\"topic\\":\\"x\\",\\"platforms\\":[\\"facebook\\"]}"}')).toEqual({
+      topic: "x",
+      platforms: ["facebook"],
+    });
+  });
+
+  it("passes non-wrapper objects through by reference", () => {
+    const input = { topic: "x", platforms: ["facebook"] };
+    expect(unwrapWrappedJsonInput(input)).toBe(input);
+  });
+
+  it("returns the parsed value for a non-wrapper JSON string", () => {
+    expect(unwrapWrappedJsonInput('{"topic":"x"}')).toEqual({ topic: "x" });
+  });
+
+  it("passes primitives and unparseable strings through unchanged", () => {
+    expect(unwrapWrappedJsonInput(42)).toBe(42);
+    expect(unwrapWrappedJsonInput(null)).toBe(null);
+    expect(unwrapWrappedJsonInput("not json")).toBe("not json");
+    expect(unwrapWrappedJsonInput('{"topic":')).toBe('{"topic":');
+    expect(unwrapWrappedJsonInput('"42"')).toBe('"42"');
+  });
+
+  it("passes arrays through unchanged", () => {
+    const input = ["facebook"];
+    expect(unwrapWrappedJsonInput(input)).toBe(input);
+  });
+
+  it("passes circular objects through unchanged", () => {
+    const loop: Record<string, unknown> = { topic: "x" };
+    loop.self = loop;
+    expect(unwrapWrappedJsonInput(loop)).toBe(loop);
+  });
+
+  it("leaves multi-key objects with a json field alone (ambiguous shape)", () => {
+    const input = { json: { topic: "x" }, topic: "y" };
+    expect(unwrapWrappedJsonInput(input)).toBe(input);
+  });
+
+  it("leaves wrappers with non-object payloads alone", () => {
+    expect(unwrapWrappedJsonInput({ json: 42 })).toEqual({ json: 42 });
+    expect(unwrapWrappedJsonInput('{"json":42}')).toEqual('{"json":42}');
+  });
+});
+
+describe("repairWrappedToolCall", () => {
+  const invalidInputError = (input: string) =>
+    new InvalidToolInputError({
+      toolName: "create_content",
+      toolInput: input,
+      cause: new Error("missing properties: topic, platforms"),
+    });
+
+  function repairOptions(
+    input: string,
+    error: Parameters<typeof repairWrappedToolCall>[0]["error"],
+  ): Parameters<typeof repairWrappedToolCall>[0] {
+    return {
+      system: undefined,
+      messages: [],
+      toolCall: { type: "tool-call", toolCallId: "call-1", toolName: "create_content", input },
+      tools: {},
+      inputSchema: () => ({ type: "object" }),
+      error,
+    };
+  }
+
+  it("repairs a wrapped object-form input", async () => {
+    const input = '{"json":{"topic":"Juma specials","platforms":["facebook"]}}';
+    const repaired = await repairWrappedToolCall(repairOptions(input, invalidInputError(input)));
+    expect(repaired).toEqual({
+      type: "tool-call",
+      toolCallId: "call-1",
+      toolName: "create_content",
+      input: '{"topic":"Juma specials","platforms":["facebook"]}',
+    });
+  });
+
+  it("repairs a wrapped string-form input", async () => {
+    const input =
+      '{"json":"{\\"topic\\":\\"Juma specials\\",\\"platforms\\":[\\"facebook\\"]}"}';
+    const repaired = await repairWrappedToolCall(repairOptions(input, invalidInputError(input)));
+    expect(repaired).toMatchObject({
+      type: "tool-call",
+      toolCallId: "call-1",
+      toolName: "create_content",
+      input: '{"topic":"Juma specials","platforms":["facebook"]}',
+    });
+  });
+
+  it("declines a non-wrapper input so the original validation error surfaces", async () => {
+    const input = '{"topic":"x"}';
+    expect(await repairWrappedToolCall(repairOptions(input, invalidInputError(input)))).toBeNull();
+  });
+
+  it("declines unparseable input", async () => {
+    const input = '{"topic":';
+    expect(await repairWrappedToolCall(repairOptions(input, invalidInputError(input)))).toBeNull();
+  });
+
+  it("declines errors that are not input-validation failures", async () => {
+    const input = '{"json":{"topic":"Juma specials","platforms":["facebook"]}}';
+    const repaired = await repairWrappedToolCall(
+      repairOptions(input, new NoSuchToolError({ toolName: "create_content", availableTools: [] })),
+    );
+    expect(repaired).toBeNull();
+  });
+
+  it("declines non-string tool-call inputs", async () => {
+    const options = {
+      ...repairOptions('{"json":{}}', invalidInputError('{"json":{}}')),
+      toolCall: {
+        type: "tool-call" as const,
+        toolCallId: "call-1",
+        toolName: "create_content",
+        input: { json: {} } as unknown as string,
+      },
+    };
+    expect(await repairWrappedToolCall(options)).toBeNull();
   });
 });

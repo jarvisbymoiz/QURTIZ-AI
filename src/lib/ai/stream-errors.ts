@@ -1,5 +1,7 @@
 import "server-only";
 
+import { InvalidToolInputError, type ToolCallRepairFunction, type ToolSet } from "ai";
+
 /**
  * Shared helpers for surfacing provider/stream failures as honest,
  * user-safe messages — and for normalizing tool outputs so nothing a tool
@@ -15,6 +17,11 @@ import "server-only";
  *   neither the adapter's `toChatMessages` nor the SDK's own part
  *   serialization can throw mid-stream on a hostile value (BigInt, circular
  *   references, oversized payloads).
+ * - `unwrapWrappedJsonInput` / `repairWrappedToolCall` normalize tool-call
+ *   arguments that some models emit wrapped in a `{"json": {...}}` envelope:
+ *   the SDK validates the OUTER object against the tool schema, which fails
+ *   with "missing properties" + "additionalProperties 'json' not allowed"
+ *   even though the real arguments are inside.
  */
 
 const MAX_MESSAGE_LENGTH = 300;
@@ -174,3 +181,130 @@ export function normalizeToolOutput<T>(value: T): T {
     preview: safeToolResultJson(value),
   } as unknown as T;
 }
+
+// ---------------------------------------------------------------------------
+// Wrapped tool-call argument unwrapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Plain-object test: prototype is Object.prototype (or null), and the check
+ * itself can never throw on a hostile value (throwing Proxy getters).
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Normalize tool-call arguments that a model wrapped in a `{"json": ...}`
+ * envelope before emitting them. Some models send `{"json": {"topic": ...}}`
+ * (or a stringified payload inside it) instead of the raw schema shape; the
+ * AI SDK then validates the OUTER object against the tool schema and fails
+ * with "missing properties" + "additionalProperties 'json' not allowed".
+ *
+ * Conservative semantics — only an explicit wrapper is ever unwrapped, never
+ * arguments invented, and the function NEVER throws:
+ * - JSON string input → parsed once; a parsed single-key `{"json": ...}`
+ *   wrapper is unwrapped (object payload, or string payload that parses to a
+ *   plain object — one nesting level); any other parsed object is returned
+ *   (the raw-string adapter path).
+ * - object input → only a single-key `{"json": ...}` wrapper is unwrapped;
+ *   anything else passes through BY REFERENCE so callers can detect "nothing
+ *   changed".
+ * - primitives, unparseable strings, arrays and multi-key objects (a real
+ *   schema could legitimately own a `json` field alongside others) pass
+ *   through unchanged, so the SDK's own validation error surfaces verbatim.
+ */
+export function unwrapWrappedJsonInput(input: unknown): unknown {
+  let value = input;
+  let parsedFromString = false;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+      parsedFromString = true;
+    } catch {
+      return input; // not JSON — leave it alone, validation fails honestly
+    }
+  }
+
+  if (!isPlainObject(value)) return input;
+
+  const keys = Object.keys(value);
+  // Only an explicit single-key wrapper is unambiguous.
+  if (keys.length === 1 && keys[0] === "json") {
+    const inner = value.json;
+    if (isPlainObject(inner)) return inner;
+    if (typeof inner === "string") {
+      try {
+        const parsedInner = JSON.parse(inner);
+        if (isPlainObject(parsedInner)) return parsedInner;
+      } catch {
+        // fall through — wrapper payload is not a parseable object
+      }
+    }
+    return input; // wrapper with a non-object payload — leave it alone
+  }
+
+  // A plain JSON string that parses to a non-wrapper object returns the
+  // parsed value; object inputs pass through by reference.
+  return parsedFromString ? value : input;
+}
+
+/**
+ * Centralized `experimental_repairToolCall` hook (wired into the chat route's
+ * streamText call): the AI SDK runs it BEFORE tool-call validation when a
+ * tool call fails to parse (NoSuchToolError / InvalidToolInputError). It
+ * unwraps a wrapped `{"json": ...}` input and hands back a repaired call;
+ * the SDK then re-runs doParseToolCall on it, so the FULL schema validation
+ * (required fields, enum/array constraints) still applies to the normalized
+ * input — validation is not weakened, only the envelope removed.
+ *
+ * Anything not clearly repairable is declined (null): unknown tool names,
+ * non-string inputs, unparseable arguments, inputs with no wrapper removed,
+ * and values that cannot be re-serialized. The original validation error
+ * then surfaces unchanged — an honest failure, never a suppressed one.
+ *
+ * The repaired `input` stays stringified JSON: LanguageModelV2ToolCall.input
+ * is a string and the SDK's doParseToolCall runs `input.trim()` +
+ * safeParseJSON({ text }) on it (node_modules/ai/dist/index.js
+ * parse-tool-call.ts).
+ */
+export const repairWrappedToolCall: ToolCallRepairFunction<ToolSet> = async ({ toolCall, error }) => {
+  // Only input-validation failures are in scope: a missing/unknown tool
+  // cannot be fixed by reshaping its arguments.
+  if (!InvalidToolInputError.isInstance(error)) return null;
+  if (typeof toolCall.input !== "string") return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(toolCall.input);
+  } catch {
+    // Unparseable arguments: nothing to unwrap — decline so the SDK's
+    // original error (which carries the JSON parse failure) surfaces.
+    return null;
+  }
+
+  const unwrapped = unwrapWrappedJsonInput(parsed);
+  if (unwrapped === parsed) return null; // no wrapper removed — decline
+
+  let input: string;
+  try {
+    const json = JSON.stringify(unwrapped);
+    if (typeof json !== "string") return null;
+    input = json;
+  } catch {
+    return null; // cannot serialize — decline, original error surfaces
+  }
+
+  return {
+    type: "tool-call",
+    toolCallId: toolCall.toolCallId,
+    toolName: toolCall.toolName,
+    input,
+  };
+};

@@ -15,7 +15,7 @@ import {
   type LanguageModelV2Usage,
 } from "@ai-sdk/provider";
 import { convertUint8ArrayToBase64, generateId } from "@ai-sdk/provider-utils";
-import { safeToolResultJson } from "./stream-errors";
+import { safeToolResultJson, unwrapWrappedJsonInput } from "./stream-errors";
 
 /**
  * Minimal OpenAI Chat Completions-compatible LanguageModelV2.
@@ -88,6 +88,36 @@ function filePartToContent(part: {
     url = `data:${mt};base64,${convertUint8ArrayToBase64(part.data)}`;
   }
   return { type: "image_url", image_url: { url } };
+}
+
+/**
+ * Normalize a tool call's raw accumulated `arguments` text before it becomes
+ * the terminal `tool-call` part input: models occasionally wrap their JSON in
+ * a `{"json": {...}}` envelope, which the SDK's schema validation then
+ * rejects (missing properties + additionalProperties 'json'). Unwrap it here
+ * as defense-in-depth alongside the streamText repair hook, so the part the
+ * SDK receives is already normalized.
+ *
+ * The input MUST remain a STRING: the SDK's parseToolCall runs
+ * `toolCall.input.trim()` and `safeParseJSON({ text })` on it
+ * (node_modules/ai/dist/index.js parse-tool-call.ts) — the `unknown` in
+ * LanguageModelV2ToolCallPart is permissive, but the runtime implementation
+ * is string-only, and an object here would break tool execution. Values
+ * without a wrapper are returned byte-identical (the raw string is kept),
+ * and malformed JSON stays raw so validation fails honestly.
+ */
+function normalizeToolCallArguments(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw);
+    const unwrapped = unwrapWrappedJsonInput(parsed);
+    if (unwrapped !== parsed) {
+      const json = JSON.stringify(unwrapped);
+      if (typeof json === "string") return json;
+    }
+  } catch {
+    // not JSON — keep the raw string, validation fails honestly
+  }
+  return raw;
 }
 
 /** Convert an AI SDK v2 prompt into OpenAI chat message objects. */
@@ -282,7 +312,7 @@ export function createOpenAICompatibleModel(opts: {
           type: "tool-call",
           toolCallId: tc.id ?? generateId(),
           toolName: tc.function?.name ?? "",
-          input: tc.function?.arguments ?? "{}",
+          input: normalizeToolCallArguments(tc.function?.arguments ?? "{}"),
         });
       }
 
@@ -376,7 +406,9 @@ function parseSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Langua
         type: "tool-call",
         toolCallId: st.id,
         toolName: st.name || "function",
-        input: st.args || "{}",
+        // Normalized (wrapped `{"json": ...}` payloads unwrapped) while the
+        // tool-input-delta display parts above keep the RAW text unchanged.
+        input: normalizeToolCallArguments(st.args || "{}"),
       });
     }
     toolStates.clear();

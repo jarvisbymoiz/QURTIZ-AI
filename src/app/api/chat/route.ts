@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, brandMemory, brands, chatThreads, workspaces } from "@/db/schema";
 import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
-import { describeStreamError } from "@/lib/ai/stream-errors";
+import { describeStreamError, repairWrappedToolCall } from "@/lib/ai/stream-errors";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
@@ -194,6 +194,15 @@ export async function POST(request: NextRequest) {
       messages: convertToModelMessages(recent),
       tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
       stopWhen: stepCountIs(6),
+      // Centralized, provider-agnostic repair for tool calls whose arguments
+      // arrive wrapped in a `{"json": {...}}` envelope (some models emit the
+      // wrapped shape; the SDK then rejects the OUTER object with "missing
+      // properties" + "additionalProperties 'json' not allowed"). The hook
+      // unwraps before validation and the SDK re-validates the normalized
+      // input against the FULL tool schema, so required fields and enum
+      // constraints stay enforced for every tool on every provider (Gemini
+      // via @ai-sdk/google, everything else via openai-compatible).
+      experimental_repairToolCall: repairWrappedToolCall,
       // Overall safety net for the entire streamed response, combined with
       // the user-cancel signal (AbortSignal.any — Node 22). A dead SSE
       // connection (server restart) or a stalled provider step used to leave

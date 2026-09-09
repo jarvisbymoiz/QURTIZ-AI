@@ -77,6 +77,116 @@ describe("openai-compatible doStream", () => {
     expect(finish).toMatchObject({ finishReason: "tool-calls" });
   });
 
+  it("unwraps a {\"json\": ...} arguments envelope in the terminal part (deltas stay raw)", async () => {
+    const raw = '{"json":{"topic":"Juma Mubarak","platforms":["facebook"]}}';
+    const parts = await collectParts([
+      sseData({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: "call_1",
+              function: { name: "create_content", arguments: raw },
+            }],
+          },
+        }],
+      }),
+      sseData({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "data: [DONE]\n\n",
+    ]);
+
+    const toolCall = parts.find((p) => p.type === "tool-call");
+    expect(toolCall).toMatchObject({
+      type: "tool-call",
+      toolCallId: "call_1",
+      toolName: "create_content",
+      input: '{"topic":"Juma Mubarak","platforms":["facebook"]}',
+    });
+    // Client display keeps the RAW streamed text — only the terminal part
+    // (what the SDK validates/executes) is normalized.
+    const delta = parts.find((p) => p.type === "tool-input-delta");
+    expect(delta).toMatchObject({ delta: raw });
+  });
+
+  it("keeps a normal tool-call arguments string byte-identical", async () => {
+    const raw = '{"topic": "Juma Mubarak", "platforms": ["facebook"]}';
+    const parts = await collectParts([
+      sseData({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: "call_1",
+              function: { name: "create_content", arguments: raw },
+            }],
+          },
+        }],
+      }),
+      sseData({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "data: [DONE]\n\n",
+    ]);
+
+    const toolCall = parts.find((p) => p.type === "tool-call");
+    expect(toolCall).toMatchObject({ input: raw });
+  });
+
+  it("keeps malformed tool-call arguments raw so validation fails honestly", async () => {
+    const parts = await collectParts([
+      sseData({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: "call_1",
+              function: { name: "create_content", arguments: '{"topic":' },
+            }],
+          },
+        }],
+      }),
+      sseData({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      "data: [DONE]\n\n",
+    ]);
+
+    const toolCall = parts.find((p) => p.type === "tool-call");
+    expect(toolCall).toMatchObject({ input: '{"topic":' });
+  });
+
+  it("doGenerate unwraps a wrapped arguments envelope", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call_1",
+                type: "function",
+                function: {
+                  name: "create_content",
+                  arguments: '{"json":{"topic":"Juma Mubarak","platforms":["facebook"]}}',
+                },
+              }],
+            },
+            finish_reason: "tool_calls",
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    const model = createOpenAICompatibleModel({ modelId: "test-model", apiKey: "k", baseUrl: null });
+    const result = await model.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    } as Parameters<typeof model.doGenerate>[0]);
+
+    expect(result.content).toContainEqual({
+      type: "tool-call",
+      toolCallId: "call_1",
+      toolName: "create_content",
+      input: '{"topic":"Juma Mubarak","platforms":["facebook"]}',
+    });
+  });
+
   it("captures usage sent in the trailing include_usage chunk", async () => {
     const parts = await collectParts([
       sseData({ choices: [{ delta: { content: "Hello" } }] }),
