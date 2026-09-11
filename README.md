@@ -78,3 +78,4 @@ src/
 
 See ARCHITECTURE.md for the workspace-isolation and AI-provider patterns.
 
+"# QURTIZ-AI" 
