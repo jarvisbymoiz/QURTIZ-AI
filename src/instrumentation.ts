@@ -61,4 +61,19 @@ export async function register() {
   } catch (e) {
     console.error("[qurtiz] storage check skipped:", e instanceof Error ? e.message : e);
   }
+
+  // Legacy credential migration: ciphertext still encrypted under the removed
+  // deterministic dev key is re-encrypted with the real ENCRYPTION_KEY once at
+  // boot. Bounded, idempotent (emits exactly one summary line), and wrapped so
+  // a failure (no DB, broken key) can never crash or slow the server beyond
+  // the single bounded scan.
+  try {
+    const { migrateLegacyEncryptedCredentials } = await import("@/lib/crypto/key-migration");
+    await migrateLegacyEncryptedCredentials();
+  } catch (e) {
+    console.error(
+      "[qurtiz] encryption: legacy migration failed:",
+      e instanceof Error ? e.message : e,
+    );
+  }
 }
