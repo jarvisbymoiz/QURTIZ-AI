@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev --turbopack -p 3000 -H 0.0.0.0",
     "dev:https": "next dev --turbopack --experimental-https --experimental-https-key certificates/localhost-key.pem --experimental-https-cert certificates/localhost.pem",
     "build": "next build --turbopack",
     "start": "next start",
@@ -36,6 +36,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "satori": "^0.33.4",
+    "server-only": "^0.0.1",
     "shadcn": "^4.19.0",
     "sharp": "^0.35.4",
     "sonner": "^2.0.8",

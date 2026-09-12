@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -10,6 +10,7 @@ import { can, type WorkspaceRole } from "@/lib/permissions";
 import { uniqueSlug } from "@/lib/slug";
 import { createWorkspaceSchema, updateWorkspaceSchema } from "@/lib/validation";
 import { getSessionUser, getMembership, resolveActionWorkspace, WORKSPACE_COOKIE } from "@/lib/workspace";
+import { getAppCookieOptions } from "@/lib/supabase/cookie-options";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -60,11 +61,9 @@ export async function createWorkspaceAction(formData: FormData): Promise<ActionR
   ]);
 
   const cookieStore = await cookies();
+  const cookieOpts = getAppCookieOptions();
   cookieStore.set(WORKSPACE_COOKIE, workspace.id, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
+    ...cookieOpts,
     maxAge: 60 * 60 * 24 * 365,
   });
 
@@ -80,11 +79,9 @@ export async function switchWorkspaceAction(workspaceId: string): Promise<Action
   if (!membership) return { ok: false, error: "You are not a member of that workspace." };
 
   const cookieStore = await cookies();
+  const cookieOpts = getAppCookieOptions();
   cookieStore.set(WORKSPACE_COOKIE, workspaceId, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
+    ...cookieOpts,
     maxAge: 60 * 60 * 24 * 365,
   });
 

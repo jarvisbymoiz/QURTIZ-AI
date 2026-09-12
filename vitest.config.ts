@@ -1,4 +1,4 @@
-﻿import { defineConfig } from "vitest/config";
+import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
@@ -11,6 +11,7 @@ export default defineConfig({
     // developer's shell. This is a committed test fixture, never a secret.
     env: {
       ENCRYPTION_KEY:
+        process.env.ENCRYPTION_KEY ||
         "7b2c91e391ccbe7cc94dd05fadc888cc0f3bd0dc04915db1073c7df7573cdc30",
     },
   },

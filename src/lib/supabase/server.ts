@@ -1,5 +1,6 @@
-﻿import { createServerClient } from "@supabase/ssr";
+import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { getAppCookieOptions } from "./cookie-options";
 
 /**
  * Supabase server client bound to the current request cookies.
@@ -16,12 +17,10 @@ export async function createClient() {
     );
   }
 
+  const appCookieOptions = getAppCookieOptions();
+
   return createServerClient(url, anonKey, {
-    // M13: session cookies carry the access token — keep them out of JS reach
-    // (httpOnly) and TLS-only (secure). The browser client on the login page
-    // still works: document.cookie writes ignore httpOnly, and localhost is a
-    // trustworthy origin for Secure cookies.
-    cookieOptions: { httpOnly: true, secure: true, sameSite: "lax" },
+    cookieOptions: appCookieOptions,
     cookies: {
       getAll() {
         return cookieStore.getAll();
@@ -29,7 +28,10 @@ export async function createClient() {
       setAll(cookiesToSet) {
         try {
           cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options),
+            cookieStore.set(name, value, {
+              ...options,
+              ...appCookieOptions,
+            }),
           );
         } catch {
           // Called from a Server Component render — safe to ignore when

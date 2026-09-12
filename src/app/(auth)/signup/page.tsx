@@ -1,8 +1,7 @@
-﻿"use client";
+"use client";
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -11,7 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function SignupPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -34,8 +32,7 @@ export default function SignupPage() {
         return;
       }
       if (data.session) {
-        router.push("/");
-        router.refresh();
+        window.location.href = "/";
         return;
       }
       setEmailSent(true);

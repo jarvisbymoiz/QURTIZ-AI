@@ -2,6 +2,7 @@ import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Pin the workspace root (Next infers it from lockfiles and warns when
   // multiple lockfiles exist, e.g. C:\Users\IRONMAN\package-lock.json).
   outputFileTracingRoot: path.resolve(),
@@ -12,6 +13,18 @@ const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   turbopack: {
     root: path.resolve(),
+  },
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve = config.resolve || {};
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        "@resvg/resvg-js": false,
+        fs: false,
+        path: false,
+      };
+    }
+    return config;
   },
   experimental: {
     serverActions: {

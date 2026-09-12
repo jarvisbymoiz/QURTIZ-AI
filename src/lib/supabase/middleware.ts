@@ -1,5 +1,6 @@
-﻿import { createServerClient } from "@supabase/ssr";
+import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getAppCookieOptions } from "./cookie-options";
 
 // /api/meta/callback and /api/buffer/callback must be reachable without a
 // session: Meta/Buffer redirect the browser here after OAuth (the session can
@@ -31,10 +32,15 @@ export async function updateSession(request: NextRequest) {
     return supabaseResponse;
   }
 
+  const isHttps =
+    request.headers.get("x-forwarded-proto") === "https" ||
+    request.nextUrl.protocol === "https:" ||
+    process.env.NODE_ENV === "production";
+
+  const appCookieOptions = getAppCookieOptions(isHttps);
+
   const supabase = createServerClient(url, anonKey, {
-    // M13: session cookies carry the access token — keep them out of JS reach
-    // (httpOnly) and TLS-only (secure). Edge-safe: no Node APIs here.
-    cookieOptions: { httpOnly: true, secure: true, sameSite: "lax" },
+    cookieOptions: appCookieOptions,
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -43,7 +49,10 @@ export async function updateSession(request: NextRequest) {
         cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
         supabaseResponse = NextResponse.next({ request });
         cookiesToSet.forEach(({ name, value, options }) =>
-          supabaseResponse.cookies.set(name, value, options),
+          supabaseResponse.cookies.set(name, value, {
+            ...options,
+            ...appCookieOptions,
+          }),
         );
       },
     },
@@ -59,14 +68,24 @@ export async function updateSession(request: NextRequest) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/login";
     redirectUrl.searchParams.set("next", pathname);
-    return NextResponse.redirect(redirectUrl);
+    const redirectResponse = NextResponse.redirect(redirectUrl);
+    // Copy any cookies set during updateSession (e.g. cleared sessions)
+    supabaseResponse.cookies.getAll().forEach((c) => {
+      redirectResponse.cookies.set(c.name, c.value, c);
+    });
+    return redirectResponse;
   }
 
   if (user && (pathname === "/login" || pathname === "/signup")) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/";
     redirectUrl.search = "";
-    return NextResponse.redirect(redirectUrl);
+    const redirectResponse = NextResponse.redirect(redirectUrl);
+    // Copy any cookies set during updateSession (e.g. refreshed sessions)
+    supabaseResponse.cookies.getAll().forEach((c) => {
+      redirectResponse.cookies.set(c.name, c.value, c);
+    });
+    return redirectResponse;
   }
 
   return supabaseResponse;

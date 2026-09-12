@@ -1,10 +1,12 @@
-﻿"use client";
+"use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { loginWithPasswordAction } from "@/server/actions/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -12,33 +14,71 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 
 function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const next = searchParams.get("next") ?? "/";
+  const rawNext = searchParams.get("next") ?? "/";
+  // Prevent redirect loops back to login/signup
+  const next =
+    rawNext.startsWith("/login") || rawNext.startsWith("/signup")
+      ? "/"
+      : rawNext.startsWith("/")
+        ? rawNext
+        : "/";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [magicMode, setMagicMode] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [inIframe, setInIframe] = useState(false);
+
+  useEffect(() => {
+    try {
+      setInIframe(window.self !== window.top);
+    } catch {
+      setInIframe(true);
+    }
+
+    // Auto-redirect if already signed in
+    try {
+      const supabase = createClient();
+      supabase.auth.getUser().then(({ data }) => {
+        if (data?.user) {
+          window.location.href = next;
+        }
+      });
+    } catch {
+      // Ignore initial auth probe error
+    }
+  }, [next]);
 
   async function handlePasswordLogin(e: React.FormEvent) {
     e.preventDefault();
     if (busy) return;
     setBusy(true);
+
     try {
-      const supabase = createClient();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        toast.error(error.message);
+      // 1. Authenticate via Server Action so Set-Cookie response headers are dispatched
+      const serverRes = await loginWithPasswordAction(email, password);
+      if (!serverRes.ok) {
+        toast.error(serverRes.error ?? "Invalid email or password.");
+        setBusy(false);
         return;
       }
-      router.push(next);
-      router.refresh();
+
+      // 2. Also hydrate browser client storage
+      try {
+        const supabase = createClient();
+        await supabase.auth.signInWithPassword({ email, password });
+      } catch {
+        // Non-blocking if browser storage write fails; server cookies are already set
+      }
+
+      toast.success("Signed in successfully! Loading workspace…");
+      // 3. Full document navigation ensures fresh server rendering with authentication cookies
+      window.location.href = next;
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Login failed. Check your configuration.",
       );
-    } finally {
       setBusy(false);
     }
   }
@@ -67,7 +107,7 @@ function LoginForm() {
   }
 
   return (
-    <Card>
+    <Card className="w-full">
       <CardHeader>
         <CardTitle className="text-xl">Sign in</CardTitle>
         <CardDescription>
@@ -77,6 +117,21 @@ function LoginForm() {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {inIframe ? (
+          <div className="mb-4 rounded-md border border-border/60 bg-muted/40 p-2.5 text-xs text-muted-foreground flex items-center justify-between gap-2">
+            <span>Running in embedded preview?</span>
+            <a
+              href={typeof window !== "undefined" ? window.location.href : "#"}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
+            >
+              Open in new tab
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        ) : null}
+
         <form onSubmit={magicMode ? handleMagicLink : handlePasswordLogin} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>

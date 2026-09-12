@@ -1,5 +1,4 @@
-﻿import satori from "satori";
-import { Resvg } from "@resvg/resvg-js";
+import satori from "satori";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -153,6 +152,7 @@ export async function renderTemplateVisual(style: TemplateStyle, size: keyof typ
     height: h,
     fonts: loadFonts().map((f) => ({ data: f.data, name: "Inter", weight: 400, style: "normal" })),
   });
+  const { Resvg } = await import("@resvg/resvg-js");
   const resvg = new Resvg(svg, { fitTo: { mode: "width", value: w } });
   return Buffer.from(resvg.render().asPng());
 }

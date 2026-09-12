@@ -1,0 +1,6 @@
+{
+  "name": "QURTIZ AI",
+  "description": "An agent-first social media operating system: research, strategy, content, visuals, scheduling, publishing and analytics for every brand you manage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

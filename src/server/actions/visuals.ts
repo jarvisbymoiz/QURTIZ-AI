@@ -1,11 +1,11 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { generateVisual, type VisualMode } from "@/lib/visuals/generate";
+import type { VisualMode } from "@/lib/visuals/generate";
 import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -90,6 +90,7 @@ export async function generateVisualAction(
   if (!rl.allowed) return { ok: false, error: "Visual generation limit reached. Try again in a few minutes." };
 
   try {
+    const { generateVisual } = await import("@/lib/visuals/generate");
     const result = await generateVisual({
       workspaceId: ctx.workspaceId,
       userId: ctx.userId,
