@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { Loader2, Mail, ShieldAlert, Trash2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getPublicAppUrl } from "@/lib/app-url";
 import {
   authorizeWorkspaceDeleteAction,
   deleteWorkspaceAction,
@@ -234,7 +235,7 @@ export function WorkspaceDeleteCard({
         email: r.email || email,
         options: {
           shouldCreateUser: false,
-          emailRedirectTo: `${window.location.origin}/auth/workspace-delete?workspaceId=${encodeURIComponent(workspaceId)}`,
+          emailRedirectTo: `${getPublicAppUrl()}/auth/workspace-delete?workspaceId=${encodeURIComponent(workspaceId)}`,
         },
       });
       if (error) {

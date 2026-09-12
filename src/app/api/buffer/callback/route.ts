@@ -15,6 +15,7 @@ import {
 } from "@/lib/buffer/client";
 import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
+import { getPublicAppUrl } from "@/lib/app-url";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,7 @@ function failureRedirect(origin: string, reason: string, message: string, opts: 
   return NextResponse.redirect(detail ? `${base}&detail=${encodeURIComponent(detail)}` : base);
 }
 export async function GET(request: NextRequest) {
-  const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
+  const origin = getPublicAppUrl(request);
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const oauthState = searchParams.get("state");

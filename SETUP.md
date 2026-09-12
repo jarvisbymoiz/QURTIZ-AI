@@ -1,4 +1,4 @@
-﻿# SETUP — QURTIZ AI
+# SETUP — QURTIZ AI
 
 Follow these steps exactly. Total time: ~15 minutes.
 
@@ -130,6 +130,46 @@ permanently with a reconnection prompt.
    an HTTP 200 `errors` array and are surfaced as rejected publishes /
    sanitized `detail` params in the Connections toast. Refresh tokens stay
    single-use and are already rotated + persisted by the publishing worker.
+
+## 8. Deploying to Vercel (https://qurtiz-ai.vercel.app)
+
+When deploying to Vercel with your custom or assigned URL (e.g. `https://qurtiz-ai.vercel.app`):
+
+### 8a. Supabase Authentication URL Configuration (CRITICAL for Email Confirmation)
+If email confirmation links are redirecting to `localhost` instead of `https://qurtiz-ai.vercel.app`, it is because Supabase defaults the project **Site URL** to `http://localhost:3000`.
+
+1. Go to your **[Supabase Dashboard](https://supabase.com/dashboard)**.
+2. Select your project → **Authentication** → **URL Configuration**.
+3. Set **Site URL** to:
+   ```text
+   https://qurtiz-ai.vercel.app
+   ```
+4. Under **Redirect URLs**, click **Add URL** and add:
+   ```text
+   https://qurtiz-ai.vercel.app/**
+   https://qurtiz-ai.vercel.app/auth/callback
+   ```
+   *(You can keep `http://localhost:3000/**` in Redirect URLs if you also develop locally).*
+5. Click **Save**.
+
+### 8b. Vercel Environment Variables
+In your Vercel Project Settings → **Environment Variables**, configure:
+
+| Key | Value / Source |
+|---|---|
+| `NEXT_PUBLIC_APP_URL` | `https://qurtiz-ai.vercel.app` |
+| `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase Project URL (`https://xyz.supabase.co`) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Your Supabase `anon` public key |
+| `DATABASE_URL` | Your Supabase Postgres Session Pooler URI (port 5432) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Your Supabase `service_role` secret key |
+| `GEMINI_API_KEY` | Your Google Gemini API Key |
+| `ENCRYPTION_KEY` | 32-byte hex / base64 string for AES-256 token encryption |
+| `QURTIZ_AI_MODEL` | `gemini-3.6-flash` (or your chosen model) |
+
+### 8c. Meta & Buffer OAuth Redirects (If using social publishing)
+If you connect Meta or Buffer on production:
+- Meta App Settings → Valid OAuth Redirect URI: `https://qurtiz-ai.vercel.app/api/meta/callback`
+- Buffer App Settings → Redirect URI: `https://qurtiz-ai.vercel.app/api/buffer/callback`
 
 ## Troubleshooting
 

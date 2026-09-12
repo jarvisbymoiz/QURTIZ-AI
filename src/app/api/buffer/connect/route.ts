@@ -10,6 +10,7 @@ import {
   signBufferOAuthState,
 } from "@/lib/buffer/client";
 import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
+import { getPublicAppUrl } from "@/lib/app-url";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,7 @@ export const dynamic = "force-dynamic";
  * Buffer's authorize dialog (OAuth2 Authorization Code + PKCE).
  */
 export async function GET(request: NextRequest) {
-  const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
+  const origin = getPublicAppUrl(request);
 
   if (!bufferConfigured()) {
     return NextResponse.redirect(`${origin}/connections?buffer=error&reason=not_configured`);

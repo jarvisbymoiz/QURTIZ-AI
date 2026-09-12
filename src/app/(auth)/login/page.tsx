@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ExternalLink } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { loginWithPasswordAction } from "@/server/actions/auth";
+import { getPublicAppUrl } from "@/lib/app-url";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -89,7 +90,7 @@ function LoginForm() {
     setBusy(true);
     try {
       const supabase = createClient();
-      const origin = window.location.origin;
+      const origin = getPublicAppUrl();
       const { error } = await supabase.auth.signInWithOtp({
         email,
         options: { emailRedirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}` },

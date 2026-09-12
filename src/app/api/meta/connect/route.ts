@@ -1,12 +1,13 @@
-﻿import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import crypto from "node:crypto";
 import { buildOAuthUrl, metaConfigured } from "@/lib/meta/oauth";
 import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
+import { getPublicAppUrl } from "@/lib/app-url";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
+  const origin = getPublicAppUrl(request);
 
   if (!metaConfigured()) {
     return NextResponse.redirect(`${origin}/connections?error=meta_not_configured`);

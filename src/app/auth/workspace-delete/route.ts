@@ -9,6 +9,7 @@ import {
   WORKSPACE_DELETE_COOKIE,
   WORKSPACE_DELETE_TOKEN_TTL_SECONDS,
 } from "@/lib/workspace-delete";
+import { getPublicAppUrl } from "@/lib/app-url";
 
 /**
  * Email-OTP confirmation landing page for workspace deletion.
@@ -21,10 +22,11 @@ import {
  * and never receive a marker. Tokens are never logged.
  */
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const workspaceId = searchParams.get("workspaceId");
-  const denied = `${origin}/settings?wsdelete=denied`;
+  const publicOrigin = getPublicAppUrl(request);
+  const denied = `${publicOrigin}/settings?wsdelete=denied`;
 
   if (!code || !workspaceId) {
     return NextResponse.redirect(denied);
@@ -67,5 +69,5 @@ export async function GET(request: NextRequest) {
     },
   );
 
-  return NextResponse.redirect(`${origin}/settings?wsdelete=authorized`);
+  return NextResponse.redirect(`${publicOrigin}/settings?wsdelete=authorized`);
 }

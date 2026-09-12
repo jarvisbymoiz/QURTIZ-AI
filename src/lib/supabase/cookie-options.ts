@@ -16,19 +16,46 @@ export type CookieConfig = {
   secure: boolean;
   httpOnly: boolean;
   partitioned?: boolean;
+  maxAge?: number;
 };
 
 export function getAppCookieOptions(isHttps?: boolean): CookieConfig {
   let https = isHttps;
+  let inIframe = false;
 
-  if (typeof https === "undefined") {
-    if (typeof window !== "undefined") {
+  if (typeof window !== "undefined") {
+    if (typeof https === "undefined") {
       https = window.location.protocol === "https:";
-    } else {
+    }
+    try {
+      inIframe = window.self !== window.top;
+    } catch {
+      inIframe = true;
+    }
+  } else {
+    if (typeof https === "undefined") {
       https = process.env.NODE_ENV === "production";
     }
   }
 
+  const isVercel =
+    Boolean(process.env.VERCEL) ||
+    Boolean(process.env.NEXT_PUBLIC_APP_URL?.includes("vercel.app")) ||
+    (typeof window !== "undefined" && window.location.hostname.includes("vercel.app"));
+
+  // On Vercel (e.g. https://qurtiz-ai.vercel.app) or any top-level domain:
+  // SameSite=Lax + Secure is the gold standard for Supabase SSR and prevents cookie dropping.
+  if (isVercel || (!inIframe && https)) {
+    return {
+      path: "/",
+      sameSite: "lax",
+      secure: Boolean(https),
+      httpOnly: false,
+      maxAge: 400 * 24 * 60 * 60,
+    };
+  }
+
+  // Inside embedded preview iframes over HTTPS (such as AI Studio preview iframe):
   if (https) {
     return {
       path: "/",
@@ -36,6 +63,7 @@ export function getAppCookieOptions(isHttps?: boolean): CookieConfig {
       secure: true,
       httpOnly: false,
       partitioned: true,
+      maxAge: 400 * 24 * 60 * 60,
     };
   }
 
@@ -44,5 +72,6 @@ export function getAppCookieOptions(isHttps?: boolean): CookieConfig {
     sameSite: "lax",
     secure: false,
     httpOnly: false,
+    maxAge: 400 * 24 * 60 * 60,
   };
 }

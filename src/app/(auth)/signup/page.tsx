@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
+import { getPublicAppUrl } from "@/lib/app-url";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,7 +22,7 @@ export default function SignupPage() {
     setBusy(true);
     try {
       const supabase = createClient();
-      const origin = window.location.origin;
+      const origin = getPublicAppUrl();
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
