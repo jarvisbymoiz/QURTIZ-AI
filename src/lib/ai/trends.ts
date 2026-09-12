@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 
 import { z } from "zod";
 import { generateObject } from "ai";
@@ -13,14 +13,14 @@ import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 
 export const trendsSchema = z.object({
   trendingTopics: z.array(z.object({
-    topic: z.string().max(160),
-    why: z.string().max(240).default(""),
-  })).max(5),
+    topic: z.string().max(200),
+    why: z.string().max(300).default(""),
+  })).max(10),
   visualDirections: z.array(z.object({
-    direction: z.string().max(160),
-    style: z.string().max(240).default(""),
-  })).max(5),
-  hookIdeas: z.array(z.string().max(200)).max(5),
+    direction: z.string().max(200),
+    style: z.string().max(300).default(""),
+  })).max(10),
+  hookIdeas: z.array(z.string().max(250)).max(10),
 });
 export type Trends = z.infer<typeof trendsSchema>;
 

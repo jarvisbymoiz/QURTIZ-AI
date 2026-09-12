@@ -171,14 +171,38 @@ If you connect Meta or Buffer on production:
 - Meta App Settings → Valid OAuth Redirect URI: `https://qurtiz-ai.vercel.app/api/meta/callback`
 - Buffer App Settings → Redirect URI: `https://qurtiz-ai.vercel.app/api/buffer/callback`
 
+### 8d. Applying Database Schema to Supabase (CRITICAL — Fixes "Something went wrong")
+When deploying to Vercel, Vercel builds the frontend and serverless functions, but **does not automatically execute database migrations on your remote Supabase database**. If tables are missing, the app crashes with *"Something went wrong"*.
+
+To initialize all tables, types, enums, indexes, and Row-Level Security policies in 10 seconds:
+1. Go to your **[Supabase Dashboard](https://supabase.com/dashboard)**.
+2. Select your project → click **SQL Editor** in the left sidebar.
+3. Click **New query**.
+4. Copy the entire contents of the **`supabase-schema.sql`** file (located at the root of this repository) and paste it into the editor.
+5. Click **Run** (or `Ctrl+Enter`).
+6. All 18 tables (`workspaces`, `workspace_members`, `content_items`, `brands`, `platform_connections`, `notifications`, `agent_runs`, etc.) and RLS policies will be created immediately.
+
+### 8e. Verify Live Deployment Health
+You can visit:
+```text
+https://qurtiz-ai.vercel.app/api/health
+```
+This endpoint checks:
+- Whether all required environment variables are set in Vercel.
+- Whether the database connection over SSL is active.
+- Whether all required database tables exist in Supabase.
+- If anything is missing or misconfigured, it returns an explicit diagnostic message and quick-fix instructions.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Login page says configuration required | Supabase env vars missing in `.env.local`; restart dev server |
-| `DATABASE_URL is not configured` | Add it to `.env.local`; restart |
+| "Something went wrong" repeatedly on Vercel | 1. Open `https://qurtiz-ai.vercel.app/api/health` to see the exact issue.<br>2. Run `supabase-schema.sql` in Supabase SQL Editor if tables are missing.<br>3. Verify `DATABASE_URL` in Vercel is the Session Pooler URI (port 5432) with your correct DB password. |
+| Login page says configuration required | Supabase env vars missing in Vercel / `.env.local`; set and redeploy |
+| `DATABASE_URL is not configured` | Add it to Vercel Environment Variables; redeploy |
 | Migrations fail with auth.uid() error | You are not on a Supabase database — RLS policies require Supabase Postgres |
-| Chat shows Configuration Required | Add `GEMINI_API_KEY` and restart the dev server |
+| Chat shows Configuration Required | Add `GEMINI_API_KEY` and restart / redeploy |
 | `relation already exists` | Schema already applied; skip migrating again |
+
 
 

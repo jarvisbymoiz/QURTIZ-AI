@@ -1,4 +1,4 @@
-﻿import { Sidebar } from "@/components/layout/sidebar";
+import { Sidebar } from "@/components/layout/sidebar";
 import { requireWorkspace } from "@/lib/workspace";
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
@@ -7,13 +7,18 @@ import { notifications } from "@/db/schema";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const ctx = await requireWorkspace();
   const db = getDb();
-  const latestNotifications = await db
-    .select()
-    .from(notifications)
-    .where(eq(notifications.workspaceId, ctx.workspace.id))
-    .orderBy(desc(notifications.createdAt))
-    .limit(8);
-  const unreadCount = latestNotifications.filter((n) => !n.read).length;
+  let unreadCount = 0;
+  try {
+    const latestNotifications = await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.workspaceId, ctx.workspace.id))
+      .orderBy(desc(notifications.createdAt))
+      .limit(8);
+    unreadCount = latestNotifications.filter((n) => !n.read).length;
+  } catch (err) {
+    console.warn("[AppLayout] Could not load notifications:", err);
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
