@@ -121,8 +121,10 @@ export default function ErrorPage({
                     </p>
                   </div>
                 )}
-                {health.quickFix && !health.database?.schemaStatus && (
-                  <p className="text-muted-foreground">{health.quickFix}</p>
+                {health.quickFix && (
+                  <p className="rounded bg-background/80 p-2 font-mono text-[11px] text-foreground">
+                    💡 <strong>Suggested fix:</strong> {health.quickFix}
+                  </p>
                 )}
               </div>
             </div>

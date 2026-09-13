@@ -8,7 +8,16 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(),
   // Native binary modules must not be bundled by Turbopack/webpack -
   // they load at runtime via require with their platform binaries.
-  serverExternalPackages: ["@resvg/resvg-js", "sharp", "satori", "harfbuzzjs"],
+  serverExternalPackages: [
+    "@resvg/resvg-js",
+    "sharp",
+    "satori",
+    "harfbuzzjs",
+    "pg",
+    "pg-boss",
+    "pg-connection-string",
+    "detect-libc",
+  ],
   // Allows a verification build to run alongside `next dev` (which locks .next).
   distDir: process.env.NEXT_DIST_DIR || ".next",
   turbopack: {
@@ -20,8 +29,18 @@ const nextConfig: NextConfig = {
       config.resolve.fallback = {
         ...config.resolve.fallback,
         "@resvg/resvg-js": false,
+        sharp: false,
+        pg: false,
+        "pg-boss": false,
+        "pg-connection-string": false,
+        "detect-libc": false,
+        child_process: false,
         fs: false,
         path: false,
+        crypto: false,
+        net: false,
+        tls: false,
+        dns: false,
       };
     }
     return config;

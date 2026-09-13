@@ -10,7 +10,6 @@ export async function GET() {
     NEXT_PUBLIC_SUPABASE_URL: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
     NEXT_PUBLIC_SUPABASE_ANON_KEY: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
     SUPABASE_SERVICE_ROLE_KEY: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-    GEMINI_API_KEY: Boolean(process.env.GEMINI_API_KEY),
     ENCRYPTION_KEY: Boolean(process.env.ENCRYPTION_KEY),
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL || null,
   };
@@ -58,7 +57,14 @@ export async function GET() {
       }
     } catch (err) {
       databaseConnected = false;
-      databaseError = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const anyErr = err as any;
+      const causeMsg = anyErr?.cause?.message || (anyErr?.cause ? String(anyErr.cause) : null);
+      databaseError = causeMsg
+        ? `${err instanceof Error ? err.message : String(err)} [Underlying cause: ${causeMsg}]`
+        : err instanceof Error
+          ? err.message
+          : String(err);
     }
   }
 
@@ -92,7 +98,9 @@ export async function GET() {
         missingTables.length > 0
           ? "Your Supabase database does not have the required tables yet. In your Supabase Dashboard, open SQL Editor, paste the contents of 'supabase-schema.sql', and click Run."
           : databaseError
-            ? `Check your DATABASE_URL in Vercel. Error was: ${databaseError}`
+            ? process.env.DATABASE_URL?.includes("db.") && process.env.DATABASE_URL?.includes(".supabase.co")
+              ? `You appear to be using Supabase Direct Connection (db.[ref].supabase.co), which uses IPv6 and is unreachable from Vercel serverless. Please switch to your Supabase Connection Pooler URI (aws-0-[region].pooler.supabase.com:5432) in Supabase Dashboard → Settings → Database → Connection string → URI → Session (port 5432). Error was: ${databaseError}`
+              : `Check your DATABASE_URL in Vercel. Error was: ${databaseError}. Note: On Vercel, you must use the Supabase Connection Pooler (pooler.supabase.com:5432 Session mode), not direct db.[ref].supabase.co.`
             : missingEnvVars.length > 0
               ? `Add the following missing variables in Vercel Project Settings: ${missingEnvVars.join(", ")}`
               : "All system checks passed.",
