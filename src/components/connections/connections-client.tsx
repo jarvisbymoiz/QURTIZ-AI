@@ -4,14 +4,31 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeftRight, CheckCircle2, CircleAlert, LogOut, X } from "lucide-react";
-import { disconnectPlatformAction, updatePublishingProviderAction } from "@/server/actions/connections";
+import {
+  Activity,
+  ArrowLeftRight,
+  CheckCircle2,
+  CircleAlert,
+  Loader2,
+  LogOut,
+  Settings2,
+  Sparkles,
+  X,
+} from "lucide-react";
+import {
+  checkMetaConnectionHealthAction,
+  disconnectPlatformAction,
+  getPendingMetaDiscoveryAction,
+  updatePublishingProviderAction,
+  type ClientMetaDiscovery,
+} from "@/server/actions/connections";
 import type { PublishProvider } from "@/lib/publish/provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import { MetaAccountSelectionDialog } from "@/components/connections/meta-account-selection-dialog";
 
 type Platform = "facebook" | "instagram";
 type Conn = {
@@ -34,15 +51,14 @@ const PROVIDER_LABEL: Record<PublishProvider, string> = {
 
 const ERROR_TEXT: Record<string, string> = {
   meta_not_configured: "Meta app credentials (META_APP_ID / META_APP_SECRET) are missing in .env.local.",
-  oauth_invalid: "The OAuth handshake was incomplete. Try connecting again.",
+  oauth_invalid: "The OAuth handshake was incomplete or timed out. Try connecting again.",
   oauth_state_mismatch: "Security check failed (state mismatch). Try connecting again.",
-  no_pages: "No Facebook Pages were returned — make sure your account manages at least one Page.",
+  no_pages: "No Facebook Pages were found for your account. Ensure you have admin access to a published Page.",
   no_workspace: "Create a workspace before connecting accounts.",
   forbidden: "You do not have permission to connect accounts.",
 };
 
 // Mirrors the reasons the Buffer connect/callback routes redirect with
-// (?buffer=error&reason=…). One entry per server-emitted reason.
 const BUFFER_ERROR_TEXT: Record<string, string> = {
   not_configured:
     "Buffer is not configured — add BUFFER_CLIENT_ID and BUFFER_CLIENT_SECRET to .env.local, then restart the server.",
@@ -79,25 +95,34 @@ export function ConnectionsClient({
   publishingProvider,
   metaConfigured,
   bufferConfigured,
+  pendingDiscovery: initialDiscovery,
 }: {
   connections: Conn[];
   publishingProvider: PublishProvider;
   metaConfigured: boolean;
   bufferConfigured: boolean;
+  pendingDiscovery?: ClientMetaDiscovery | null;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, start] = useTransition();
-  // Optimistic toggle state; reverted on action failure (the server page
-  // re-delivers the persisted provider via router.refresh() after success).
   const [provider, setProvider] = useState<PublishProvider>(publishingProvider);
   const [busy, setBusy] = useState(false);
 
-  // Stale-origin guard (client-only): OAuth callbacks and publishing expect
-  // the canonical NEXT_PUBLIC_APP_URL origin — a tab left open on a retired
-  // http:// origin fails silently. Gated behind state so the server render
-  // and the first client render agree (no hydration mismatch); null until the
-  // effect confirms the mismatch, and reused as the banner's link target.
+  // Meta account selection dialog state
+  const [discovery, setDiscovery] = useState<ClientMetaDiscovery | null>(initialDiscovery ?? null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [checkingHealth, setCheckingHealth] = useState<Platform | null>(null);
+
+  // Open dialog automatically if meta_discovered param is present
+  useEffect(() => {
+    if (searchParams.get("meta_discovered") === "1" && discovery) {
+      setDialogOpen(true);
+      router.replace("/connections");
+    }
+  }, [searchParams, discovery, router]);
+
+  // Stale-origin guard
   const [staleOriginUrl, setStaleOriginUrl] = useState<string | null>(null);
   useEffect(() => {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL;
@@ -110,9 +135,7 @@ export function ConnectionsClient({
   const connected = searchParams.get("connected") === "1";
   const rawError = error && !ERROR_TEXT[error] ? decodeURIComponent(error) : null;
 
-  // Handles the return trip from the Buffer OAuth flow. The param is cleared
-  // from the URL so a refresh/back never re-triggers the toast (same pattern
-  // as the workspace-delete ?wsdelete= param).
+  // Handles Buffer return
   const handledBufferParam = useRef(false);
   useEffect(() => {
     const status = searchParams.get("buffer");
@@ -122,9 +145,6 @@ export function ConnectionsClient({
       toast.success("Buffer connected — your linked Facebook/Instagram channels are ready to publish.");
     } else if (status === "error") {
       const reason = searchParams.get("reason") ?? "oauth_failed";
-      // `detail` is a sanitized server-side failure snippet (see the callback
-      // route) that pinpoints the failing step — supplementary to the reason
-      // mapping, so it renders as a dim/small suffix.
       const detail = searchParams.get("detail");
       toast.error(
         <div className="flex flex-col gap-1">
@@ -139,7 +159,7 @@ export function ConnectionsClient({
   async function changeProvider(next: PublishProvider) {
     if (busy || next === provider) return;
     const prev = provider;
-    setProvider(next); // optimistic
+    setProvider(next);
     setBusy(true);
     try {
       const r = await updatePublishingProviderAction(next);
@@ -147,11 +167,11 @@ export function ConnectionsClient({
         toast.success(`Publishing provider: ${PROVIDER_LABEL[next]}`);
         router.refresh();
       } else {
-        setProvider(prev); // revert
+        setProvider(prev);
         toast.error(r.error);
       }
     } catch {
-      setProvider(prev); // revert
+      setProvider(prev);
       toast.error("Could not change the publishing provider.");
     } finally {
       setBusy(false);
@@ -167,8 +187,50 @@ export function ConnectionsClient({
     });
   }
 
+  async function handleOpenManageAccounts() {
+    if (discovery) {
+      setDialogOpen(true);
+      return;
+    }
+    // Fetch pending discovery from server if not cached
+    const res = await getPendingMetaDiscoveryAction();
+    if (res.ok && res.discovery) {
+      setDiscovery(res.discovery);
+      setDialogOpen(true);
+    } else {
+      toast.info("To choose new accounts, click 'Reconnect' to refresh Meta permissions.");
+    }
+  }
+
+  async function handleCheckHealth(platform: Platform) {
+    setCheckingHealth(platform);
+    try {
+      const res = await checkMetaConnectionHealthAction(platform);
+      if (res.ok) {
+        if (res.health.ok) {
+          toast.success(`${PLATFORM_LABEL[platform]} connection is healthy and ready to publish!`);
+        } else {
+          toast.error(`${PLATFORM_LABEL[platform]} check failed: ${res.health.message}`);
+        }
+        router.refresh();
+      } else {
+        toast.error(res.error);
+      }
+    } catch {
+      toast.error("Failed to verify connection health.");
+    } finally {
+      setCheckingHealth(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
+      <MetaAccountSelectionDialog
+        discovery={discovery}
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+      />
+
       {staleOriginUrl ? (
         <div className="flex items-start justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
           <p className="text-sm text-amber-500">
@@ -191,6 +253,28 @@ export function ConnectionsClient({
           </button>
         </div>
       ) : null}
+
+      {/* Pending Discovery Banner if user hasn't selected accounts yet */}
+      {discovery && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/5 p-4">
+          <div className="flex items-center gap-3">
+            <Sparkles className="size-5 text-primary shrink-0" aria-hidden />
+            <div>
+              <p className="text-sm font-semibold text-foreground">
+                Meta Authorization Ready ({discovery.pages.length} Pages discovered)
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Authorized as {discovery.authorizedUser?.name || "Facebook User"}. Select which Facebook Page and Instagram account to publish from.
+              </p>
+            </div>
+          </div>
+          <Button size="sm" onClick={() => setDialogOpen(true)} className="gap-2">
+            <Settings2 className="size-3.5" />
+            Select Accounts
+          </Button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -257,7 +341,7 @@ export function ConnectionsClient({
         <Alert>
           <CheckCircle2 className="size-4" aria-hidden />
           <AlertTitle>Account connected</AlertTitle>
-          <AlertDescription> Publishing is now enabled for the linked platforms.</AlertDescription>
+          <AlertDescription>Publishing is now enabled for the linked platforms.</AlertDescription>
         </Alert>
       ) : null}
       {error && ERROR_TEXT[error] ? (
@@ -295,7 +379,11 @@ export function ConnectionsClient({
                   metaConfigured={metaConfigured}
                   bufferConfigured={bufferConfigured}
                   pending={pending}
+                  checkingHealth={checkingHealth === platform}
+                  hasDiscovery={Boolean(discovery)}
                   onDisconnect={disconnect}
+                  onManageAccounts={handleOpenManageAccounts}
+                  onCheckHealth={() => handleCheckHealth(platform)}
                 />
               ))}
             </CardContent>
@@ -318,7 +406,11 @@ function ProviderSection({
   metaConfigured,
   bufferConfigured,
   pending,
+  checkingHealth,
+  hasDiscovery,
   onDisconnect,
+  onManageAccounts,
+  onCheckHealth,
 }: {
   platform: Platform;
   provider: PublishProvider;
@@ -326,40 +418,102 @@ function ProviderSection({
   metaConfigured: boolean;
   bufferConfigured: boolean;
   pending: boolean;
+  checkingHealth: boolean;
+  hasDiscovery: boolean;
   onDisconnect: (platform: Platform, provider: PublishProvider) => void;
+  onManageAccounts: () => void;
+  onCheckHealth: () => void;
 }) {
   const status = conn?.status ?? "not_connected";
   const connected = status === "connected";
-  // A REAL auth failure during a publish/refresh marks the row "expired"
-  // (never at boot) — surface it like the error badge and point at the
-  // reconnect button below.
   const expired = status === "expired";
   const platformName = platform === "facebook" ? "Facebook" : "Instagram";
   const envReady = provider === "meta" ? metaConfigured : bufferConfigured;
   const connectDisabled = !envReady;
 
+  const healthStatus = conn?.meta?.healthStatus;
+  const healthMessage = conn?.meta?.healthMessage;
+
   return (
     <div className="rounded-lg border p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="secondary">{PROVIDER_LABEL[provider]}</Badge>
-        <Badge
-          variant={connected ? "default" : status === "error" || expired ? "destructive" : "secondary"}
-          className={cnDefault(status)}
-        >
-          {connected ? "Connected" : status.replaceAll("_", " ")}
-        </Badge>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary">{PROVIDER_LABEL[provider]}</Badge>
+          <Badge
+            variant={connected ? "default" : status === "error" || expired ? "destructive" : "secondary"}
+            className={cnDefault(status)}
+          >
+            {connected ? "Connected" : status.replaceAll("_", " ")}
+          </Badge>
+        </div>
+
+        {connected && provider === "meta" && healthStatus ? (
+          <Badge
+            variant="outline"
+            className={`text-[10px] ${
+              healthStatus === "healthy"
+                ? "border-emerald-500/30 text-emerald-600 bg-emerald-500/5"
+                : "border-destructive/30 text-destructive bg-destructive/5"
+            }`}
+          >
+            {healthStatus === "healthy" ? "Verified Active" : healthStatus.replaceAll("_", " ")}
+          </Badge>
+        ) : null}
       </div>
 
       {conn?.status === "connected" ? (
-        <div className="mt-2.5 space-y-1.5">
-          <p className="truncate text-sm">{accountDetail(platform, conn)}</p>
-          <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-1.5 text-xs text-emerald-500">
-              <CheckCircle2 className="size-3.5" aria-hidden /> Token stored encrypted
+        <div className="mt-2.5 space-y-2">
+          <p className="truncate text-sm font-medium">{accountDetail(platform, conn)}</p>
+
+          {healthMessage && healthStatus !== "healthy" ? (
+            <p className="text-xs text-destructive rounded bg-destructive/10 p-1.5">{healthMessage}</p>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-500">
+              <CheckCircle2 className="size-3.5" aria-hidden /> Token encrypted at rest
             </span>
-            <Button size="sm" variant="ghost" disabled={pending} onClick={() => onDisconnect(platform, provider)}>
-              <LogOut className="size-3.5" aria-hidden /> Disconnect
-            </Button>
+
+            <div className="flex items-center gap-1.5">
+              {provider === "meta" ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs gap-1"
+                    disabled={checkingHealth}
+                    onClick={onCheckHealth}
+                  >
+                    {checkingHealth ? (
+                      <Loader2 className="size-3 animate-spin" aria-hidden />
+                    ) : (
+                      <Activity className="size-3" aria-hidden />
+                    )}
+                    Verify
+                  </Button>
+                  {hasDiscovery ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs gap-1"
+                      onClick={onManageAccounts}
+                    >
+                      <Settings2 className="size-3" aria-hidden /> Switch
+                    </Button>
+                  ) : null}
+                </>
+              ) : null}
+
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-xs"
+                disabled={pending}
+                onClick={() => onDisconnect(platform, provider)}
+              >
+                <LogOut className="size-3.5" aria-hidden /> Disconnect
+              </Button>
+            </div>
           </div>
         </div>
       ) : (
@@ -371,7 +525,7 @@ function ProviderSection({
           ) : null}
           <p className="text-xs text-muted-foreground">
             {provider === "meta"
-              ? "Official Graph API publishing — no browser automation."
+              ? "Official Graph API publishing — 60-day long-lived access token with instant verification."
               : "Queue posts through your Buffer account."}
           </p>
           <Button
@@ -407,5 +561,6 @@ function ProviderSection({
 }
 
 function cnDefault(status: string): string {
-  return status === "connected" ? "bg-emerald-500/10 text-emerald-500" : "";
+  return status === "connected" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500" : "";
 }
+

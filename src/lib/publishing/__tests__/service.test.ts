@@ -7,6 +7,7 @@ import {
 import {
   buildBufferPayload,
   deriveContentKind,
+  isFirstCommentPlanError,
   platformToBufferService,
   publishNow,
   resolvePublishConnection,
@@ -360,7 +361,7 @@ describe("createPost variables contract (wired through buildBufferPayload)", () 
     expect(input.metadata).toHaveProperty("facebook.type", "post"); // a plain STRING (valid enum in variables)
   });
 
-  it("instagram customScheduled — dueAt present, per-channel metadata.instagram", () => {
+  it("instagram customScheduled — dueAt present, omits metadata when no firstComment", () => {
     const args = buildBufferPayload({
       channelId: "ch-ig",
       text: "Hi",
@@ -384,9 +385,24 @@ describe("createPost variables contract (wired through buildBufferPayload)", () 
       schedulingType: "automatic",
       needsApproval: false,
       assets: [],
-      metadata: { instagram: { type: "reel" } },
       dueAt: "2026-09-04T10:00:00.000Z",
     });
+    expect(input.metadata).toBeUndefined();
+  });
+
+  it("instagram — includes firstComment in metadata.instagram without unsupported type field", () => {
+    const { input } = buildCreatePostVariables({
+      channelId: "ch-ig",
+      text: "Hi",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "instagram",
+      firstComment: "Hello from IG comment!",
+    });
+    expect(input.metadata).toEqual({
+      instagram: { firstComment: "Hello from IG comment!" },
+    });
+    expect("type" in (input.metadata as Record<string, unknown>).instagram).toBe(false);
   });
 });
 
@@ -1063,6 +1079,52 @@ describe("publishNow — first-comment paid-plan fallback", () => {
     const failUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "failed");
     expect(failUpdate).toBeDefined();
     expect(failUpdate!.values.lastError).toBe("Invalid post: First comment requires a paid plan.");
+  });
+
+  it("retries Instagram publish when Buffer rejects firstComment / input.metadata.instagram GraphQL validation", async () => {
+    const fake = fcDb("conn-fc-ig");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: "rejected",
+        message: 'Variable "$input" got invalid value { firstComment: "..." } at "input.metadata.instagram"; Field "shouldShareToFeed"...',
+      })
+      .mockResolvedValueOnce({ ok: true, data: { id: "post-ig-fc", status: "sent", dueAt: null } });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "instagram",
+    });
+
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(2);
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.firstComment).toBe("First! 🚀");
+    expect(mockedCreatePostForBuffer.mock.calls[1][1]?.firstComment).toBeNull();
+    expect(res).toEqual({
+      ok: true,
+      provider: "buffer",
+      mode: "shareNow",
+      providerPostId: "post-ig-fc",
+      scheduledAt: expect.any(Date),
+      mediaAttached: false,
+      firstCommentSkipped: true,
+    });
+  });
+
+  it("isFirstCommentPlanError matches paid-plan, camelCase firstComment, and metadata.instagram errors", () => {
+    expect(isFirstCommentPlanError("Invalid post: First comment requires a paid plan.")).toBe(true);
+    expect(
+      isFirstCommentPlanError(
+        'Variable "$input" got invalid value { type: "post", firstComment: "..." } at "input.metadata.instagram"; Field "s..."',
+      ),
+    ).toBe(true);
+    expect(isFirstCommentPlanError('Field "firstComment" is not defined by type "InstagramPostMetadataInput"')).toBe(true);
+    expect(isFirstCommentPlanError("Unsupported Instagram metadata field")).toBe(true);
+    expect(isFirstCommentPlanError("Invalid post: Image dimensions not supported.")).toBe(false);
+    expect(isFirstCommentPlanError("Channel not found")).toBe(false);
   });
 });
 

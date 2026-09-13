@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { getDb } from "@/db";
-import { platformConnections } from "@/db/schema";
+import { settings } from "@/db/schema";
 import { encryptToken } from "@/lib/crypto/tokens";
-import { exchangeForPages } from "@/lib/meta/oauth";
+import { discoverMetaAccounts } from "@/lib/meta/oauth";
 import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 import { getPublicAppUrl } from "@/lib/app-url";
@@ -33,9 +33,6 @@ export async function GET(request: NextRequest) {
   }
 
   // Re-verify the session and workspace membership before persisting anything.
-  // The state cookie proves this browser started the flow, but the caller must
-  // still be a logged-in member of the workspace it claims (defense in depth —
-  // sessions can expire or change mid-flow).
   const sessionUser = await getSessionUser();
   if (!sessionUser) {
     return NextResponse.json({ error: "You must be signed in to connect Meta." }, { status: 401 });
@@ -55,79 +52,54 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const pages = await exchangeForPages(code, origin);
-    if (pages.length === 0) {
-      return NextResponse.redirect(`${origin}/connections?error=no_pages`);
-    }
+    // Perform full authenticated account discovery with long-lived tokens
+    const discovery = await discoverMetaAccounts(code, origin);
+
+    // Encrypt page access tokens before storing in settings
+    const securedDiscovery = {
+      authorizedUser: discovery.authorizedUser,
+      grantedScopes: discovery.grantedScopes,
+      expiresAt: discovery.expiresAt,
+      diagnostics: discovery.diagnostics,
+      createdAt: new Date().toISOString(),
+      pages: discovery.pages.map((p) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        tasks: p.tasks,
+        canPost: p.canPost,
+        unavailableReason: p.unavailableReason,
+        encryptedPageToken: encryptToken(p.pageToken),
+        instagramAccount: p.instagramAccount,
+      })),
+    };
 
     const db = getDb();
-    for (const page of pages) {
-      // Facebook Page connection — provider-scoped: only the "meta" row is
-      // upserted here; a "buffer" row for the same platform (if any) is
-      // owned by the Buffer connect flow and must not be clobbered.
-      const [fb] = await db
-        .select()
-        .from(platformConnections)
-        .where(
-          and(
-            eq(platformConnections.workspaceId, stored.workspaceId),
-            eq(platformConnections.platform, "facebook"),
-            eq(platformConnections.provider, "meta"),
-          ),
-        );
-      const fbMeta = { pageId: page.pageId, pageName: page.pageName };
-      if (fb) {
-        await db
-          .update(platformConnections)
-          .set({ status: "connected", meta: fbMeta, encryptedToken: encryptToken(page.pageToken), updatedAt: new Date() })
-          .where(eq(platformConnections.id, fb.id));
-      } else {
-        await db.insert(platformConnections).values({
-          workspaceId: stored.workspaceId,
-          platform: "facebook",
-          provider: "meta",
-          status: "connected",
-          meta: fbMeta,
-          encryptedToken: encryptToken(page.pageToken),
-        });
-      }
+    const [existingSetting] = await db
+      .select()
+      .from(settings)
+      .where(and(eq(settings.workspaceId, stored.workspaceId), eq(settings.key, "meta_discovery")));
 
-      // Instagram (linked business account on that page)
-      if (page.igUserId) {
-        const [ig] = await db
-          .select()
-          .from(platformConnections)
-          .where(
-            and(
-              eq(platformConnections.workspaceId, stored.workspaceId),
-              eq(platformConnections.platform, "instagram"),
-              eq(platformConnections.provider, "meta"),
-            ),
-          );
-        const igMeta = { igUserId: page.igUserId, igUsername: page.igUsername, pageId: page.pageId };
-        if (ig) {
-          await db
-            .update(platformConnections)
-            .set({ status: "connected", meta: igMeta, encryptedToken: encryptToken(page.pageToken), updatedAt: new Date() })
-            .where(eq(platformConnections.id, ig.id));
-        } else {
-          await db.insert(platformConnections).values({
-            workspaceId: stored.workspaceId,
-            platform: "instagram",
-            provider: "meta",
-            status: "connected",
-            meta: igMeta,
-            encryptedToken: encryptToken(page.pageToken),
-          });
-        }
-      }
+    if (existingSetting) {
+      await db
+        .update(settings)
+        .set({ value: securedDiscovery, updatedAt: new Date() })
+        .where(and(eq(settings.workspaceId, stored.workspaceId), eq(settings.key, "meta_discovery")));
+    } else {
+      await db.insert(settings).values({
+        workspaceId: stored.workspaceId,
+        key: "meta_discovery",
+        value: securedDiscovery,
+      });
     }
 
-    const response = NextResponse.redirect(`${origin}/connections?connected=1`);
+    const response = NextResponse.redirect(`${origin}/connections?meta_discovered=1`);
     response.cookies.delete("qurtiz_meta_oauth");
     return response;
   } catch (error) {
     const message = error instanceof Error ? encodeURIComponent(error.message) : "oauth_failed";
-    return NextResponse.redirect(`${origin}/connections?error=${message}`);
+    const response = NextResponse.redirect(`${origin}/connections?error=${message}`);
+    response.cookies.delete("qurtiz_meta_oauth");
+    return response;
   }
 }

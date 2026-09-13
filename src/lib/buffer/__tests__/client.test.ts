@@ -571,7 +571,7 @@ describe("createPost (legacy alias → createPostForBuffer customScheduled)", ()
     });
   });
 
-  it("stamps metadata.instagram.type=post when service=instagram is passed to the legacy alias", async () => {
+  it("omits metadata for instagram when no firstComment is passed to legacy alias (no unsupported type field)", async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
       void _url;
       void _init;
@@ -581,7 +581,7 @@ describe("createPost (legacy alias → createPostForBuffer customScheduled)", ()
     const res = await createPost("tok-1", { channelId: "ch-ig", text: "IG", dueAt: DUE_AT, service: "instagram" });
     expect(res.ok).toBe(true);
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.variables.input.metadata).toEqual({ instagram: { type: "post" } });
+    expect(body.variables.input.metadata).toBeUndefined();
     expect(body.query).toBe(CREATE_POST_MUTATION);
   });
 
@@ -673,7 +673,7 @@ describe("createPostForBuffer (variables-based createPost contract)", () => {
     expect(body.variables.input.assets).toEqual([]);
   });
 
-  it("instagram customScheduled post — per-channel metadata.instagram, dueAt ISO string", async () => {
+  it("instagram customScheduled post — omits metadata when no firstComment, dueAt ISO string", async () => {
     const fetchMock = stubSuccess("post-ig");
     vi.stubGlobal("fetch", fetchMock);
     await createPostForBuffer("tok-1", {
@@ -685,7 +685,7 @@ describe("createPostForBuffer (variables-based createPost contract)", () => {
       dueAt: DUE_AT,
     });
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.variables.input.metadata).toEqual({ instagram: { type: "post" } });
+    expect(body.variables.input.metadata).toBeUndefined();
     expect(body.variables.input.dueAt).toBe("2026-09-04T09:59:00.000Z");
     expect(body.variables.input.mode).toBe("customScheduled");
   });
@@ -756,6 +756,31 @@ describe("createPostForBuffer (variables-based createPost contract)", () => {
     const body2 = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
     expect(body2.variables.input.metadata).toEqual({ facebook: { type: "post" } });
     expect("firstComment" in body2.variables.input.metadata.facebook).toBe(false);
+
+    // Instagram: sends firstComment without type field
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-ig",
+      text: "IG post",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "instagram",
+      firstComment: "First IG! 📸",
+    });
+    const body3 = JSON.parse((fetchMock.mock.calls[2][1] as RequestInit).body as string);
+    expect(body3.variables.input.metadata).toEqual({ instagram: { firstComment: "First IG! 📸" } });
+    expect("type" in body3.variables.input.metadata.instagram).toBe(false);
+
+    // Instagram: omits metadata completely when firstComment is null or empty
+    await createPostForBuffer("tok-1", {
+      channelId: "ch-ig",
+      text: "IG post without comment",
+      mode: "shareNow",
+      contentKind: "post",
+      service: "instagram",
+      firstComment: null,
+    });
+    const body4 = JSON.parse((fetchMock.mock.calls[3][1] as RequestInit).body as string);
+    expect(body4.variables.input.metadata).toBeUndefined();
   });
 
   it("throws BEFORE the wire when contentKind is not exactly post/reel/story", async () => {

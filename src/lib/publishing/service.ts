@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 
 /**
  * Centralized publishing service.
@@ -147,14 +147,21 @@ export function platformToBufferService(platform: ContentPlatform): BufferServic
 
 /**
  * Pure predicate (unit-testable): did Buffer reject the mutation because the
- * first comment is a paid-plan feature? Buffer surfaces it as a MutationError
- * ("Invalid post: First comment requires a paid plan.") which createPostForBuffer
- * maps to reason "rejected" with the sanitized message. A MutationError means
- * Buffer created NOTHING, so retrying the identical payload without the first
- * comment cannot duplicate the post.
+ * first comment is a paid-plan feature, or due to unsupported firstComment /
+ * Instagram metadata in Buffer's GraphQL schema?
+ * Buffer surfaces paid-plan restrictions as a MutationError ("Invalid post: First
+ * comment requires a paid plan.") and input schema validation failures as GraphQL
+ * application errors (e.g. at "input.metadata.instagram" or referencing "firstComment").
+ * Both mean Buffer created NOTHING, so retrying the identical payload without
+ * the first comment cannot duplicate the post.
  */
 export function isFirstCommentPlanError(message: string): boolean {
-  return /first comment/i.test(message);
+  return (
+    /first[\s_-]?comment/i.test(message) ||
+    /metadata\.instagram/i.test(message) ||
+    /InstagramPostMetadata/i.test(message) ||
+    /(unsupported|unknown|invalid).*instagram.*metadata/i.test(message)
+  );
 }
 
 /** Build the publish call's argument bag. Pure — used by tests + the

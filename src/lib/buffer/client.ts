@@ -595,9 +595,9 @@ export type CreatePostInputVariables = {
     schedulingType: BufferSchedulingTypeValue;
     needsApproval: boolean;
     assets: Array<{ image: { url: string } }>;
-    metadata:
+    metadata?:
       | { facebook: { type: BufferPostTypeFacebookValue; firstComment?: string } }
-      | { instagram: { type: BufferPostTypeInstagramValue; firstComment?: string } };
+      | { instagram: { firstComment?: string } };
     /** ONLY present for customScheduled — NEVER for shareNow. */
     dueAt?: string;
     aiAssisted?: boolean;
@@ -617,6 +617,13 @@ export type CreatePostInputVariables = {
  * "post" | "reel" | "story" (TypeScript unions are compile-time only — a
  * stale caller or JS consumer must fail HERE, before the wire, not with an
  * opaque Buffer enum error).
+ *
+ * Instagram metadata schema:
+ *   - `InstagramPostMetadataInput` does NOT define a `type` field (that is
+ *     Facebook-only).
+ *   - `firstComment` is supported when present; if no firstComment is
+ *     provided, `metadata.instagram` is omitted to avoid sending unsupported
+ *     or empty input fields to Buffer's GraphQL server.
  */
 export function buildCreatePostVariables(args: {
   channelId: string;
@@ -635,13 +642,17 @@ export function buildCreatePostVariables(args: {
     );
   }
   const firstComment =
-    typeof args.firstComment === "string" && args.firstComment.length > 0
-      ? { firstComment: args.firstComment }
+    typeof args.firstComment === "string" && args.firstComment.trim().length > 0
+      ? { firstComment: args.firstComment.trim() }
       : {};
-  const metadata: CreatePostInputVariables["input"]["metadata"] =
-    args.service === "facebook"
-      ? { facebook: { type: args.contentKind, ...firstComment } }
-      : { instagram: { type: args.contentKind, ...firstComment } };
+  let metadata: CreatePostInputVariables["input"]["metadata"] | undefined;
+  if (args.service === "facebook") {
+    metadata = { facebook: { type: args.contentKind, ...firstComment } };
+  } else if (args.service === "instagram") {
+    if (firstComment.firstComment) {
+      metadata = { instagram: { firstComment: firstComment.firstComment } };
+    }
+  }
   const input: CreatePostInputVariables["input"] = {
     channelId: args.channelId,
     text: args.text,
@@ -652,7 +663,7 @@ export function buildCreatePostVariables(args: {
     // attaches as a single image asset keyed by url (the one unverified
     // subshape — Buffer field errors surface verbatim if it complains).
     assets: args.mediaUrl ? [{ image: { url: args.mediaUrl } }] : [],
-    metadata,
+    ...(metadata ? { metadata } : {}),
   };
   if (args.mode === "customScheduled") {
     if (!args.dueAt) {

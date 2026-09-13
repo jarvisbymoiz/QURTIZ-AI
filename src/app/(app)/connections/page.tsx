@@ -1,8 +1,8 @@
 import { Suspense } from "react";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Plug } from "lucide-react";
 import { getDb } from "@/db";
-import { platformConnections } from "@/db/schema";
+import { platformConnections, settings } from "@/db/schema";
 import { bufferConfigured } from "@/lib/buffer/client";
 import { metaConfigured } from "@/lib/meta/oauth";
 import { getWorkspacePublishProvider, isPublishProvider } from "@/lib/publish/provider";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { ConnectionsClient } from "@/components/connections/connections-client";
 import { Badge } from "@/components/ui/badge";
+import type { ClientMetaDiscovery } from "@/server/actions/connections";
 
 export const metadata = { title: "Connections" };
 
@@ -31,17 +32,79 @@ export default async function ConnectionsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
-  const [connections, publishingProvider, serverStorage] = await Promise.all([
+  const [connections, publishingProvider, serverStorage, [discoveryRow]] = await Promise.all([
     db.select().from(platformConnections).where(eq(platformConnections.workspaceId, ctx.workspace.id)),
     getWorkspacePublishProvider(ctx.workspace.id),
     getServerStorageConfigStatus(),
+    db
+      .select()
+      .from(settings)
+      .where(and(eq(settings.workspaceId, ctx.workspace.id), eq(settings.key, "meta_discovery"))),
   ]);
+
+  let pendingDiscovery: ClientMetaDiscovery | null = null;
+  if (discoveryRow?.value) {
+    const raw = discoveryRow.value as {
+      authorizedUser?: { id: string; name: string };
+      grantedScopes?: string[];
+      expiresAt?: string | null;
+      createdAt?: string;
+      diagnostics?: {
+        totalFacebookPages: number;
+        eligibleFacebookPages: number;
+        totalInstagramAccounts: number;
+        eligibleInstagramAccounts: number;
+        warnings: string[];
+      };
+      pages?: Array<{
+        id: string;
+        name: string;
+        category?: string | null;
+        tasks?: string[];
+        canPost?: boolean;
+        unavailableReason?: string | null;
+        instagramAccount?: {
+          id: string;
+          username: string | null;
+          name: string | null;
+          profilePictureUrl: string | null;
+          followersCount: number | null;
+          linkedPageId: string;
+          linkedPageName: string;
+          isEligible: boolean;
+          unavailableReason: string | null;
+          status: "eligible" | "ineligible_personal" | "not_linked" | "permission_missing";
+        } | null;
+      }>;
+    };
+
+    pendingDiscovery = {
+      authorizedUser: raw.authorizedUser ?? { id: "", name: "Facebook User" },
+      grantedScopes: raw.grantedScopes ?? [],
+      expiresAt: raw.expiresAt ?? null,
+      createdAt: raw.createdAt ?? new Date().toISOString(),
+      diagnostics: raw.diagnostics ?? {
+        totalFacebookPages: 0,
+        eligibleFacebookPages: 0,
+        totalInstagramAccounts: 0,
+        eligibleInstagramAccounts: 0,
+        warnings: [],
+      },
+      pages: (raw.pages ?? []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category ?? null,
+        tasks: p.tasks ?? [],
+        canPost: Boolean(p.canPost),
+        unavailableReason: p.unavailableReason ?? null,
+        instagramAccount: p.instagramAccount ?? null,
+      })),
+    };
+  }
 
   const requirements = publishingProvider === "buffer" ? BUFFER_REQUIREMENTS : META_REQUIREMENTS;
 
   // Server-side storage status (visual publishing signs URLs through it).
-  // Plain text + a colored dot — no secret, no client fetch. Probed server-side
-  // via getServerStorageConfigStatus().
   const storageChip = !serverStorage.configured
     ? { label: "Missing configuration", dot: "bg-amber-500" }
     : serverStorage.connected
@@ -72,6 +135,7 @@ export default async function ConnectionsPage() {
           publishingProvider={publishingProvider}
           metaConfigured={metaConfigured()}
           bufferConfigured={bufferConfigured()}
+          pendingDiscovery={pendingDiscovery}
         />
       </Suspense>
       <div className="flex items-start gap-3 rounded-lg border p-4 text-xs text-muted-foreground">
@@ -88,3 +152,4 @@ export default async function ConnectionsPage() {
     </div>
   );
 }
+
