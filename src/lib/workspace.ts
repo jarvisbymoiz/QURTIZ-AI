@@ -1,7 +1,7 @@
-﻿import { cookies } from "next/headers";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "@/db";
+import { withDbRetry } from "@/db";
 import { workspaceMembers, workspaces } from "@/db/schema";
 import { can, type Capability, type WorkspaceRole } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
@@ -14,6 +14,11 @@ export type SessionUser = {
 };
 
 export type WorkspaceRecord = typeof workspaces.$inferSelect;
+
+export type UserWorkspaceMembership = {
+  workspace: WorkspaceRecord;
+  role: WorkspaceRole;
+};
 
 export type WorkspaceContext = {
   user: SessionUser;
@@ -36,45 +41,56 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   }
 }
 
+/**
+ * Fetch all workspaces for a user along with their membership role in a single DB query.
+ */
+export async function getUserWorkspacesWithRoles(userId: string): Promise<UserWorkspaceMembership[]> {
+  return withDbRetry(async (db) => {
+    const rows = await db
+      .select({
+        workspace: workspaces,
+        role: workspaceMembers.role,
+      })
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
+      .where(eq(workspaceMembers.userId, userId));
+
+    return rows.map((r) => ({
+      workspace: r.workspace,
+      role: (r.role as WorkspaceRole) ?? "viewer",
+    }));
+  });
+}
+
 export async function getUserWorkspaces(userId: string): Promise<WorkspaceRecord[]> {
-  const db = getDb();
-  const rows = await db
-    .select({ workspace: workspaces })
-    .from(workspaceMembers)
-    .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(eq(workspaceMembers.userId, userId));
-  return rows.map((r) => r.workspace);
+  const memberships = await getUserWorkspacesWithRoles(userId);
+  return memberships.map((m) => m.workspace);
 }
 
 /**
  * Resolve the full workspace context for the current request.
  * Redirects to /login or /onboarding as appropriate. The active workspace
  * comes from the cookie; falls back to the user's first workspace.
+ * Uses a single joined query for all workspaces + roles.
  */
 export async function requireWorkspace(): Promise<WorkspaceContext> {
   const user = await getSessionUser();
   if (!user) redirect("/login");
 
-  const all = await getUserWorkspaces(user.id);
-  if (all.length === 0) redirect("/onboarding");
+  const memberships = await getUserWorkspacesWithRoles(user.id);
+  if (memberships.length === 0) redirect("/onboarding");
 
+  const allWorkspaces = memberships.map((m) => m.workspace);
   const cookieStore = await cookies();
   const activeId = cookieStore.get(WORKSPACE_COOKIE)?.value;
-  const active = all.find((w) => w.id === activeId) ?? all[0];
+  const active = memberships.find((m) => m.workspace.id === activeId) ?? memberships[0];
 
-  const db = getDb();
-  const membershipRows = await db
-    .select({ role: workspaceMembers.role })
-    .from(workspaceMembers)
-    .where(
-      and(
-        eq(workspaceMembers.userId, user.id),
-        eq(workspaceMembers.workspaceId, active.id),
-      ),
-    );
-  const role: WorkspaceRole = membershipRows[0]?.role ?? "viewer";
-
-  return { user, workspace: active, role, allWorkspaces: all };
+  return {
+    user,
+    workspace: active.workspace,
+    role: active.role,
+    allWorkspaces,
+  };
 }
 
 /**
@@ -104,17 +120,18 @@ export async function getMembership(
   userId: string,
   workspaceId: string,
 ): Promise<{ role: WorkspaceRole } | null> {
-  const db = getDb();
-  const rows = await db
-    .select({ role: workspaceMembers.role })
-    .from(workspaceMembers)
-    .where(
-      and(
-        eq(workspaceMembers.userId, userId),
-        eq(workspaceMembers.workspaceId, workspaceId),
-      ),
-    );
-  return rows[0] ? { role: rows[0].role } : null;
+  return withDbRetry(async (db) => {
+    const rows = await db
+      .select({ role: workspaceMembers.role })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.userId, userId),
+          eq(workspaceMembers.workspaceId, workspaceId),
+        ),
+      );
+    return rows[0] ? { role: rows[0].role as WorkspaceRole } : null;
+  });
 }
 
 /**
@@ -126,20 +143,30 @@ export async function getMembership(
  * timezone (with the app-default Asia/Karachi fallback) for date formatting.
  * On any failure an `{ error }` object is returned — callers must check
  * `"error" in ctx` before using `userId`/`workspaceId`.
+ *
+ * Highly optimized: resolves membership, role, and timezone in a single query.
  */
 export type ActiveContext = { error: string } | { userId: string; workspaceId: string; timezone: string };
 
 export async function getActiveContext(capability: Capability): Promise<ActiveContext> {
   const user = await getSessionUser();
   if (!user) return { error: "You must be signed in." };
-  const workspaceId = await resolveActionWorkspace(user.id);
-  if (!workspaceId) return { error: "Create or join a workspace first." };
-  // resolveActionWorkspace only returns workspaces the user belongs to, so
-  // membership is guaranteed; kept as a defensive guard, not a deny path.
-  const membership = await getMembership(user.id, workspaceId);
-  if (!membership) return { error: "You are not a member of this workspace." };
-  if (!can(membership.role, capability)) return { error: "You do not have permission for this action." };
-  const db = getDb();
-  const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, workspaceId));
-  return { userId: user.id, workspaceId, timezone: ws?.timezone ?? "Asia/Karachi" };
+
+  const memberships = await getUserWorkspacesWithRoles(user.id);
+  if (memberships.length === 0) return { error: "Create or join a workspace first." };
+
+  const cookieStore = await cookies();
+  const activeId = cookieStore.get(WORKSPACE_COOKIE)?.value;
+  const active = memberships.find((m) => m.workspace.id === activeId) ?? memberships[0];
+
+  if (!can(active.role, capability)) {
+    return { error: "You do not have permission for this action." };
+  }
+
+  return {
+    userId: user.id,
+    workspaceId: active.workspace.id,
+    timezone: active.workspace.timezone ?? "Asia/Karachi",
+  };
 }
+

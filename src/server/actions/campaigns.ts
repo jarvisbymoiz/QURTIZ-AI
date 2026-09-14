@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
@@ -145,9 +145,27 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
 
   await db.update(campaigns).set({ jobId: job.id }).where(eq(campaigns.id, campaign.id));
 
-  const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
-  const boss = await getBoss();
-  await boss.send(QUEUES.campaignGenerate, { campaignId: campaign.id, jobId: job.id });
+  try {
+    if (!process.env.VERCEL) {
+      const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+      const boss = await getBoss();
+      await boss.send(QUEUES.campaignGenerate, { campaignId: campaign.id, jobId: job.id });
+    } else {
+      const { generateCampaign } = await import("@/lib/jobs/workflows");
+      void generateCampaign(campaign.id).catch((err) => {
+        console.error("[campaign serverless execution failed]", err);
+      });
+    }
+  } catch (error) {
+    try {
+      const { generateCampaign } = await import("@/lib/jobs/workflows");
+      void generateCampaign(campaign.id).catch((err) => {
+        console.error("[campaign fallback execution failed]", err);
+      });
+    } catch {
+      console.warn("[campaign dispatch]", error);
+    }
+  }
 
   revalidatePath("/campaigns");
   return {

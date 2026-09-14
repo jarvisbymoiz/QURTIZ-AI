@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 
 import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db";
@@ -164,7 +164,7 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
 
 /** Recover publish jobs stuck in "processing" (a worker died mid-publish):
  *  requeue them while attempts remain, otherwise fail them permanently. */
-async function recoverStuckPublishJobs(): Promise<void> {
+export async function recoverStuckPublishJobs(): Promise<void> {
   const db = getDb();
   const stale = await db
     .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId })
@@ -211,10 +211,10 @@ async function recoverStuckPublishJobs(): Promise<void> {
   }
 }
 
-/** Scan for due publishing jobs (runs every minute via pg-boss cron).
+/** Scan for due publishing jobs (runs every minute via pg-boss cron or vercel cron).
  *  All providers (Meta + Buffer) now route through the unified `attemptPublish`
  *  entry — the per-provider adapter lives inside the publishing service. */
-async function publishDueScan(): Promise<void> {
+export async function publishDueScan(): Promise<void> {
   const db = getDb();
   await recoverStuckPublishJobs();
   const due = await db
@@ -230,7 +230,7 @@ async function publishDueScan(): Promise<void> {
 /**
  * Bulk content plan: delegates to the staged pipeline in lib/jobs/bulk.ts.
  */
-async function bulkGenerate(jobId: string): Promise<void> {
+export async function bulkGenerate(jobId: string): Promise<void> {
   const { runBulkPlan } = await import("@/lib/jobs/bulk");
   await runBulkPlan(jobId);
 }
@@ -238,7 +238,7 @@ async function bulkGenerate(jobId: string): Promise<void> {
 /**
  * Campaign generation: produce content for each day of the arc.
  */
-async function generateCampaign(campaignId: string): Promise<void> {
+export async function generateCampaign(campaignId: string): Promise<void> {
   const db = getDb();
   const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
   if (!campaign) return;
@@ -568,7 +568,7 @@ async function buildAutopilotRunContext(workspaceId: string, timezone: string): 
  * minute scans can never double-fire one occurrence. The claim also survives
  * partial failures — the scan stays a no-op until the next configured time.
  */
-async function autopilotLoop(): Promise<void> {
+export async function autopilotLoop(): Promise<void> {
   const db = getDb();
   const rows = await db
     .select({ workspaceId: settings.workspaceId, value: settings.value })

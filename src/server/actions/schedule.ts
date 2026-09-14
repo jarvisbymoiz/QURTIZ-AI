@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, desc, eq, inArray } from "drizzle-orm";
@@ -337,14 +337,29 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
   if (!result.ok) return { ok: false, error: result.error };
 
   try {
-    const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
-    const boss = await getBoss();
-    await boss.send(QUEUES.bulkGenerate, { jobId: result.jobId });
+    if (!process.env.VERCEL) {
+      const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+      const boss = await getBoss();
+      await boss.send(QUEUES.bulkGenerate, { jobId: result.jobId });
+    } else {
+      const { runBulkPlan } = await import("@/lib/jobs/bulk");
+      void runBulkPlan(result.jobId).catch((err) => {
+        console.error("[bulk-plan serverless execution failed]", err);
+      });
+    }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : "Queue unavailable";
-    const db = getDb();
-    await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, result.jobId));
-    return { ok: false, error: "Could not queue the bulk plan: " + msg };
+    // If pg-boss fails or is unavailable, fallback to direct background execution
+    try {
+      const { runBulkPlan } = await import("@/lib/jobs/bulk");
+      void runBulkPlan(result.jobId).catch((err) => {
+        console.error("[bulk-plan fallback execution failed]", err);
+      });
+    } catch {
+      const msg = error instanceof Error ? error.message : "Queue unavailable";
+      const db = getDb();
+      await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, result.jobId));
+      return { ok: false, error: "Could not queue the bulk plan: " + msg };
+    }
   }
 
   revalidatePath("/content-studio");

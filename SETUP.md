@@ -25,7 +25,7 @@ From **Project Settings**:
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Settings → API → Project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Settings → API → anon public key |
-| `DATABASE_URL` | Settings → Database → Connection string → **Session pooler** URI. Replace `[YOUR-PASSWORD]` with your DB password. Use port `5432` (session pooler), NOT `6543` (transaction pooler) — the app uses a standard connection pool. |
+| `DATABASE_URL` | Settings → Database → Connection string → **Session pooler** URI (e.g. `postgresql://postgres.[ref]:[PASSWORD]@aws-0-[region].pooler.supabase.com:5432/postgres`). Replace `[PASSWORD]` with your DB password. Use port `5432` (Session Pooler mode), NOT direct `db.[ref].supabase.co` (which is IPv6-only and subject to direct connection caps) and NOT `6543` (Transaction pooler mode). |
 
 ## 2. Gemini API key
 
@@ -198,6 +198,7 @@ This endpoint checks:
 | Symptom | Fix |
 |---|---|
 | "Something went wrong" repeatedly on Vercel | 1. Open `https://qurtiz-ai.vercel.app/api/health` to see the exact issue.<br>2. Run `supabase-schema.sql` in Supabase SQL Editor if tables are missing.<br>3. Verify `DATABASE_URL` in Vercel is the Session Pooler URI (port 5432) with your correct DB password. |
+| `EMAXCONNSESSION: max clients reached` | 1. Go to Supabase Dashboard → Project Settings → Database.<br>2. Under Connection string, choose **Session** pooler (URI mode).<br>3. Verify the host is `aws-0-[region].pooler.supabase.com` and port is `5432`.<br>4. Update `DATABASE_URL` in Vercel Environment Variables and redeploy. |
 | Login page says configuration required | Supabase env vars missing in Vercel / `.env.local`; set and redeploy |
 | `DATABASE_URL is not configured` | Add it to Vercel Environment Variables; redeploy |
 | Migrations fail with auth.uid() error | You are not on a Supabase database — RLS policies require Supabase Postgres |
