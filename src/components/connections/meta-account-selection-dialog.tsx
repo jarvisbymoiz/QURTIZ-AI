@@ -8,7 +8,7 @@ import {
   CheckCircle2,
   CircleAlert,
   HelpCircle,
-  Instagram,
+  Camera,
   Loader2,
   ShieldCheck,
   Sparkles,
@@ -253,7 +253,7 @@ export function MetaAccountSelectionDialog({
         <div className="space-y-3 pt-2">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold flex items-center gap-2">
-              <Instagram className="size-4 text-pink-600" aria-hidden />
+              <Camera className="size-4 text-pink-600" aria-hidden />
               <span>2. Instagram Professional Account</span>
               <Badge variant="secondary" className="text-xs font-normal">
                 {eligibleIgs.length} eligible
