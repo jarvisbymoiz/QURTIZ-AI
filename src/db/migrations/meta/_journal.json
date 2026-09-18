@@ -183,6 +183,20 @@
       "when": 1789772400000,
       "tag": "0025_content_server_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789763541794,
+      "tag": "0026_media_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789763541794,
+      "tag": "0026_media_lifecycle",
+      "breakpoints": true
     }
   ]
 }

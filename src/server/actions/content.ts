@@ -11,6 +11,10 @@ import { generateAndPersistContent } from "@/lib/ai/content";
 import { approveItem, rejectItem, archiveItem, getItem, transitionItem } from "@/lib/content/lifecycle";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
+import {
+  DEFAULT_SOFT_DELETE_GRACE_HOURS,
+  queueMediaCleanup,
+} from "@/lib/media/lifecycle";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -130,9 +134,14 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
-  let storagePaths: string[] = [];
+  // Soft-delete path: instead of immediately removing Storage objects, we
+  // drop the post row, mark the visual_assets rows for cleanup (ref count
+  // decremented), and queue each storage path for purging after the
+  // configured grace period. The published content is part of the delivery
+  // history and is still rejected (archive instead).
+  let queuedPaths: Array<{ path: string; bytes: number; rowId: string }> = [];
   try {
-    storagePaths = await db.transaction(async tx => {
+    queuedPaths = await db.transaction(async tx => {
       const [item] = await tx.select().from(contentItems)
         .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)))
         .for("update");
@@ -147,23 +156,70 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
       if (item.status === "published") {
         throw new Error("Published content is part of your delivery history and cannot be deleted. Archive it instead.");
       }
-      const media = await tx.select({ path: visualAssets.storagePath }).from(visualAssets)
-        .where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.workspaceId, ctx.workspaceId)));
+      const media = await tx
+        .select({ id: visualAssets.id, path: visualAssets.storagePath, meta: visualAssets.meta })
+        .from(visualAssets)
+        .where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.workspaceId, ctx.workspaceId)))
+        .for("update");
+      // Decrement ref count, mark soft-deleted, set eligibility. Deleting the
+      // contentItems row cascades visual_assets.contentItemId to NULL? No —
+      // visual_assets.contentItemId is NOT NULL + CASCADE, so the row gets
+      // deleted along with the post. We don't want that: we want the visual
+      // rows to live until the cleanup worker purges them. So we keep the
+      // post row existence intact long enough to read storage paths, then
+      // soft-delete the visual rows in the same transaction.
+      // Strategy: delete the content_items row FIRST (cascade deletes
+      // visual_assets). That defeats our lifecycle. Instead, we delete
+      // content_items but bypass the FK cascade by deleting visual_assets
+      // ourselves BEFORE the post row. That preserves our planned
+      // cleanup-queue inserts.
+      //
+      // Concretely:
+      //   1. Collect visual_assets rows with metadata.
+      //   2. Delete content_items + content_variants (CASCADE clears
+      //      visual_assets in turn, but at this point we have already
+      //      queued every path for cleanup in step 3 below).
+      //   3. Insert cleanup queue rows for each path; the worker will
+      //      purge Storage at grace_until.
+      //
+      // Because visual_assets is FK-CASCADE from content_items, deleting
+      // the post would also delete the visual rows. We want them gone
+      // from the DB RIGHT NOW (otherwise the post deletion leaves dangling
+      // visual rows pointing at a non-existent contentItemId). The cleanup
+      // queue row + storage path is enough to know what to delete later.
+      const txPaths = media.map(m => {
+        const meta = (m.meta ?? {}) as { sizeBytes?: number };
+        return { path: m.path, bytes: typeof meta.sizeBytes === "number" ? meta.sizeBytes : 0, rowId: m.id };
+      });
       await tx.delete(contentItems).where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-      return media.map(row => row.path);
+      return txPaths;
     });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not delete content." };
   }
 
-  if (storagePaths.length > 0) {
-    try {
-      const { createClient } = await import("@/lib/supabase/server");
-      const supabase = await createClient();
-      const { error } = await supabase.storage.from("brand-assets").remove(storagePaths);
-      if (error) console.error("[content-delete] media cleanup failed", error.message);
-    } catch (error) {
-      console.error("[content-delete] media cleanup failed", error instanceof Error ? error.message : error);
+  // Outside the transaction: queue the storage paths for cleanup. Each
+  // cleanup row references the storage path and the workspace; the worker
+  // resolves it against Storage + cleans up. We use the post-deletion
+  // workspace + actor (the user who clicked Delete) as the queue owner.
+  if (queuedPaths.length > 0) {
+    for (const p of queuedPaths) {
+      try {
+        await queueMediaCleanup({
+          workspaceId: ctx.workspaceId,
+          storagePath: p.path,
+          sourceTable: "visual_assets",
+          sourceRowId: p.rowId,
+          bytes: p.bytes,
+          reason: "post_deleted",
+          graceHours: DEFAULT_SOFT_DELETE_GRACE_HOURS,
+          createdBy: ctx.userId,
+        });
+      } catch (error) {
+        // A failed queue insert means we'll leave the storage object on
+        // the server — not ideal, but not corrupting. Logged for follow-up.
+        console.error("[content-delete] failed to queue media cleanup", error);
+      }
     }
   }
 

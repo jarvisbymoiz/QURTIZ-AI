@@ -1,4 +1,4 @@
-﻿import {
+import {
   boolean,
   foreignKey,
   index,
@@ -478,6 +478,12 @@ export const brandAssets = pgTable(
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // Media-lifecycle columns added in 0026. Existing rows are treated as
+    // permanent (refCount=1, no grace period) so legacy uploads stay live.
+    refCount: integer("ref_count").notNull().default(1),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),
+    cleanupStatus: text("cleanup_status").notNull().default("permanent"),
+    cleanupEligibleAt: timestamp("cleanup_eligible_at", { withTimezone: true }),
   },
   (t) => [index("brand_assets_ws_idx").on(t.workspaceId, t.kind)],
 );
@@ -500,6 +506,13 @@ export const visualAssets = pgTable(
     height: integer("height"),
     meta: jsonb("meta").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Media-lifecycle columns added in 0026. Same defaults as brand_assets:
+    // existing rows are permanent, refCount=1, no grace period.
+    refCount: integer("ref_count").notNull().default(1),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),
+    cleanupStatus: text("cleanup_status").notNull().default("permanent"),
+    cleanupEligibleAt: timestamp("cleanup_eligible_at", { withTimezone: true }),
+    createdBy: uuid("created_by"),
   },
   (t) => [index("visual_assets_item_idx").on(t.contentItemId, t.createdAt)],
 );
@@ -734,3 +747,60 @@ export const competitorSnapshots = pgTable(
   },
   (t) => [index("competitor_snapshots_comp_idx").on(t.competitorId, t.capturedAt)],
 );
+
+/* ── Media lifecycle (0026) ─────────────────────────────────────────
+   Cleanup queue: append-only log of storage paths eligible for deletion
+   once grace_until has passed AND ref_count is 0. The mediaCleanup worker
+   reads from this table to know WHAT to clean, then DELETEs both the
+   Storage object AND the source DB row in one transaction. We keep a
+   history row for 30 days post-cleanup for audit / explainability. */
+
+export const mediaCleanupQueue = pgTable(
+  "media_cleanup_queue",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    storagePath: text("storage_path").notNull(),
+    sourceTable: text("source_table").notNull(),
+    sourceRowId: uuid("source_row_id"),
+    sourceKind: text("source_kind").notNull(),
+    refCountAtQueue: integer("ref_count_at_queue").notNull().default(1),
+    bytes: integer("bytes").notNull().default(0),
+    reason: text("reason").notNull(),
+    graceUntil: timestamp("grace_until", { withTimezone: true }).notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    cleanedAt: timestamp("cleaned_at", { withTimezone: true }),
+    cleanedBytes: integer("cleaned_bytes"),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("media_cleanup_queue_pending_idx").on(t.graceUntil).where(sql`${t.status} = 'pending'`),
+    index("media_cleanup_queue_workspace_idx").on(t.workspaceId, sql`${t.createdAt} DESC`),
+  ],
+);
+
+/* Workspace storage quotas: per-workspace plan + caps. Used by the
+   beginMediaUploadAction to reject over-quota uploads and by the in-app
+   storage chip to show progress against the cap. warnRatio is 0..1 in
+   Postgres (real); the UI multiplies by 100 for display. */
+export const workspaceStorageQuotas = pgTable(
+  "workspace_storage_quotas",
+  {
+    workspaceId: uuid("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+    plan: text("plan").notNull().default("free"),
+    maxStorageBytes: integer("max_storage_bytes"),
+    maxPerFileBytes: integer("max_per_file_bytes").notNull().default(52428800),
+    maxImageBytes: integer("max_image_bytes").notNull().default(9437184),
+    maxVideoBytes: integer("max_video_bytes").notNull().default(52428800),
+    warnRatio: real("warn_ratio").notNull().default(0.8),
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
+

@@ -668,6 +668,10 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();
   });
+  await boss.work(QUEUES.mediaCleanup, async () => {
+    const { mediaCleanupTick } = await import("@/lib/media/cleanup-worker");
+    await mediaCleanupTick();
+  });
   await boss.work<{ jobId: string }>(QUEUES.autopilotRun, async batch => {
     const { executeAutoRun } = await import("@/lib/autopilot/run");
     for (const job of batch) await executeAutoRun(job.data.jobId);
