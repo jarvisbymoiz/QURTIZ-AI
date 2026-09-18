@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
+    exclude: process.env.RUN_LIVE_TESTS === "true" ? [] : ["**/*.live.test.ts"],
     environment: "node",
     // Fixed hermetic ENCRYPTION_KEY for the whole suite: the crypto layer
     // now REQUIRES a valid 64-hex key in every environment (the old dev

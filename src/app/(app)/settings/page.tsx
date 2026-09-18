@@ -1,9 +1,11 @@
+import { AgentMemoryCard } from "@/components/settings/agent-memory-card";
+import { listAgentMemory } from "@/lib/ai/persistent-memory";
 ﻿import { can } from "@/lib/permissions";
 import { requireWorkspace } from "@/lib/workspace";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { settings } from "@/db/schema";
-import { sanitizeMaxPosts, sanitizeRunTimes } from "@/lib/autopilot/logic";
+import { jobs, settings } from "@/db/schema";
+import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
 import { AiConfigCard } from "@/components/settings/ai-config-card";
@@ -18,11 +20,14 @@ import { AutopilotCard } from "@/components/settings/autopilot-card";
 export default async function SettingsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
+  const agentMemory = await listAgentMemory({ userId: ctx.user.id, workspaceId: ctx.workspace.id });
   const [autopilotRow] = await db
     .select()
     .from(settings)
     .where(and(eq(settings.workspaceId, ctx.workspace.id), eq(settings.key, "autopilot")));
-  const autopilot = (autopilotRow?.value ?? {}) as { enabled?: boolean; requireApproval?: boolean; nicheFocus?: string; maxPostsPerRun?: unknown; runTimes?: unknown };
+  const parsedAutopilot = autopilotSettingsSchema.safeParse(autopilotRow?.value ?? { enabled: false });
+  const autopilot = parsedAutopilot.success ? parsedAutopilot.data : autopilotSettingsSchema.parse({ enabled: false });
+  const [lastAutoRun] = await db.select().from(jobs).where(and(eq(jobs.workspaceId, ctx.workspace.id), eq(jobs.type, "autopilot"))).orderBy(desc(jobs.createdAt)).limit(1);
 
   return (
     <div className="space-y-6">
@@ -35,7 +40,10 @@ export default async function SettingsPage() {
       />
 
       <AutopilotCard
-        initial={{ enabled: autopilot.enabled ?? false, requireApproval: autopilot.requireApproval ?? true, nicheFocus: autopilot.nicheFocus ?? "", maxPostsPerRun: sanitizeMaxPosts(autopilot.maxPostsPerRun), runTimes: sanitizeRunTimes(autopilot.runTimes) }}
+        initial={autopilot}
+        lastRun={lastAutoRun ? { status: lastAutoRun.status, progress: lastAutoRun.progress, total: lastAutoRun.total, error: lastAutoRun.error,
+          stage: (lastAutoRun.result as { stage?: string } | null)?.stage ?? "", occurrence: (lastAutoRun.input as { occurrence?: string } | null)?.occurrence ?? "",
+          warnings: (lastAutoRun.result as { errors?: string[] } | null)?.errors ?? [] } : undefined}
         timezone={ctx.workspace.timezone}
         editable={can(ctx.role, "workspace:manage")}
       />
@@ -56,6 +64,9 @@ export default async function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <AgentMemoryCard key={ctx.workspace.id} workspaceId={ctx.workspace.id} personal={agentMemory.personal} workspace={agentMemory.workspace} profile={agentMemory.profile}
+        workspaceEditable={can(ctx.role, "brand:write")} profileEditable={can(ctx.role, "workspace:manage")} />
 
       <AiConfigCard editable={can(ctx.role, "workspace:manage")} />
 

@@ -4,6 +4,8 @@
  * native Node packages (sharp, resvg, pg, pg-boss) into edge/client bundles.
  */
 export async function registerNode() {
+  // Explicit read-only/UI validation mode: no workers or startup migrations.
+  if (process.env.DISABLE_BACKGROUND_WORKER === "true") return;
   const g = globalThis as typeof globalThis & { __qurtizSchedulerReady?: boolean };
   if (g.__qurtizSchedulerReady) return;
 

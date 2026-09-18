@@ -1,12 +1,14 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
+import { contentItems, contentVariants, publishingJobs, visualAssets } from "@/db/schema";
+import { editContent } from "@/lib/content/edit";
+
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { approveItem, rejectItem, archiveItem, getItem } from "@/lib/content/lifecycle";
+import { approveItem, rejectItem, archiveItem, getItem, transitionItem } from "@/lib/content/lifecycle";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 
@@ -65,51 +67,8 @@ export async function setContentStatusAction(
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
-  const db = getDb();
-  const [item] = await db
-    .select({ status: contentItems.status })
-    .from(contentItems)
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-  if (!item) return { ok: false, error: "Content item not found." };
-
-  // Published content stays published: moving it back to a reviewable state
-  // would re-enable a live post (and could re-post it). Archiving remains
-  // allowed — it hides the item in-app without touching the live post.
-  if (item.status === "published" && status !== "archived") {
-    return { ok: false, error: "Published content cannot be moved back to a reviewable state." };
-  }
-
-  // Leaving approved/scheduled (draft, back-to-review, archive) must cancel
-  // pending publish jobs — otherwise the item would still go live at its
-  // scheduled time.
-  const leavingPublishEnabled =
-    (item.status === "approved" || item.status === "scheduled") &&
-    !(["approved", "scheduled"] as readonly string[]).includes(status);
-  if (leavingPublishEnabled) {
-    await db
-      .delete(publishingJobs)
-      .where(and(
-        eq(publishingJobs.contentItemId, itemId),
-        eq(publishingJobs.workspaceId, ctx.workspaceId),
-        eq(publishingJobs.status, "pending"),
-      ));
-  }
-
-  await db
-    .update(contentItems)
-    .set({ status, updatedAt: new Date() })
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-
-  const variantStatus = status === "approved" ? "approved" : status === "archived" ? "archived" : "ready_for_review";
-  await db
-    .update(contentVariants)
-    .set({ status: variantStatus, updatedAt: new Date() })
-    .where(and(
-      eq(contentVariants.contentItemId, itemId),
-      eq(contentVariants.workspaceId, ctx.workspaceId),
-      // A published variant (partial publish) is never flipped back.
-      ne(contentVariants.status, "published"),
-    ));
+  try { await transitionItem(ctx.workspaceId, itemId, status); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not change status." }; }
 
   revalidatePath("/content-studio");
   revalidatePath("/");
@@ -128,13 +87,42 @@ export async function updateVariantCaptionAction(
   }
 
   const db = getDb();
-  await db
-    .update(contentVariants)
-    .set({ caption, updatedAt: new Date() })
-    .where(and(eq(contentVariants.id, variantId), eq(contentVariants.workspaceId, ctx.workspaceId)));
+  const [variant] = await db.select().from(contentVariants).where(and(eq(contentVariants.id, variantId), eq(contentVariants.workspaceId, ctx.workspaceId)));
+  if (!variant) return { ok: false, error: "Variant not found." };
+  try { await editContent(ctx, { itemId: variant.contentItemId, variants: [{ variantId, caption }] }); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not save caption." }; }
 
   revalidatePath("/content-studio");
   return { ok: true };
+}
+
+export async function updateReviewFieldAction(
+  variantId: string,
+  field: "firstComment" | "visualConcept" | "slidePrompt",
+  value: string,
+  slideIndex?: number,
+): Promise<ActionResult> {
+  const ctx = await getActiveContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const parsed = z.object({ variantId: z.string().uuid(), field: z.enum(["firstComment", "visualConcept", "slidePrompt"]),
+    value: z.string().max(10000), slideIndex: z.number().int().min(0).max(19).optional() }).safeParse({ variantId, field, value, slideIndex });
+  if (!parsed.success) return { ok: false, error: "Invalid review field." };
+  if (field === "firstComment" && value.length > 2200) return { ok: false, error: "First comment must be at most 2200 characters." };
+  try {
+    const db = getDb();
+    const [variant] = await db.select().from(contentVariants).where(and(eq(contentVariants.id, variantId), eq(contentVariants.workspaceId, ctx.workspaceId)));
+    if (!variant) throw new Error("Variant not found.");
+    if (field === "visualConcept") await editContent(ctx, { itemId: variant.contentItemId, visualConcept: value });
+    else if (field === "firstComment") await editContent(ctx, { itemId: variant.contentItemId, variants: [{ variantId, firstComment: value }] });
+    else {
+      const slides = (variant.slides ?? []) as { index: number }[];
+      const position = slides.findIndex(slide => slide.index === slideIndex);
+      if (position < 0) throw Error("Carousel slide not found.");
+      await editContent(ctx, { itemId: variant.contentItemId, variants: [{ variantId, slideEdits: [{ slideNumber: position + 1, visualPrompt: value }] }] });
+    }
+    revalidatePath("/content-studio");
+    return { ok: true };
+  } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not save review field." }; }
 }
 
 export async function deleteContentAction(itemId: string): Promise<ActionResult> {
@@ -142,9 +130,42 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   const db = getDb();
-  await db
-    .delete(contentItems)
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+  let storagePaths: string[] = [];
+  try {
+    storagePaths = await db.transaction(async tx => {
+      const [item] = await tx.select().from(contentItems)
+        .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)))
+        .for("update");
+      if (!item) throw new Error("Content item not found.");
+      const active = await tx.select({ id: publishingJobs.id }).from(publishingJobs).where(and(
+        eq(publishingJobs.contentItemId, itemId),
+        eq(publishingJobs.status, "processing"),
+      ));
+      if (active.length > 0 || item.status === "scheduled") {
+        throw new Error("Unschedule this post and wait for active publishing to finish before deleting it.");
+      }
+      if (item.status === "published") {
+        throw new Error("Published content is part of your delivery history and cannot be deleted. Archive it instead.");
+      }
+      const media = await tx.select({ path: visualAssets.storagePath }).from(visualAssets)
+        .where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.workspaceId, ctx.workspaceId)));
+      await tx.delete(contentItems).where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
+      return media.map(row => row.path);
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Could not delete content." };
+  }
+
+  if (storagePaths.length > 0) {
+    try {
+      const { createClient } = await import("@/lib/supabase/server");
+      const supabase = await createClient();
+      const { error } = await supabase.storage.from("brand-assets").remove(storagePaths);
+      if (error) console.error("[content-delete] media cleanup failed", error.message);
+    } catch (error) {
+      console.error("[content-delete] media cleanup failed", error instanceof Error ? error.message : error);
+    }
+  }
 
   revalidatePath("/content-studio");
   revalidatePath("/");
@@ -162,7 +183,7 @@ export async function approveContentAction(itemId: string): Promise<ActionResult
   if (!["ready_for_review", "rejected"].includes(item.status)) {
     return { ok: false, error: "Only content waiting for review can be approved." };
   }
-  await approveItem(ctx.workspaceId, itemId);
+  try { await approveItem(ctx.workspaceId, itemId); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Approval failed." }; }
   revalidatePath("/content-studio");
   return { ok: true };
 }
@@ -175,7 +196,7 @@ export async function rejectContentAction(itemId: string, reason?: string): Prom
   if (item.status === "published" || item.status === "scheduled") {
     return { ok: false, error: "Published or scheduled content cannot be rejected — unschedule first." };
   }
-  await rejectItem(ctx.workspaceId, itemId, reason ?? null);
+  try { await rejectItem(ctx.workspaceId, itemId, reason ?? null); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Rejection failed." }; }
   revalidatePath("/content-studio");
   return { ok: true };
 }
@@ -185,7 +206,6 @@ export async function regenerateContentAction(itemId: string): Promise<ActionRes
   if ("error" in ctx) return { ok: false, error: ctx.error };
   const item = await getItem(ctx.workspaceId, itemId);
   if (!item) return { ok: false, error: "Content item not found." };
-  await archiveItem(ctx.workspaceId, itemId);
   try {
     const created = await generateAndPersistContent({
       workspaceId: ctx.workspaceId,
@@ -198,6 +218,7 @@ export async function regenerateContentAction(itemId: string): Promise<ActionRes
       },
     });
     revalidatePath("/content-studio");
+    await archiveItem(ctx.workspaceId, itemId);
     return { ok: true, newItemId: created.itemId };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Regeneration failed";

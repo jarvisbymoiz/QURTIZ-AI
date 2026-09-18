@@ -5,8 +5,9 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { platformConnections, settings } from "@/db/schema";
+import { can } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
+import { getSessionUser, resolveActionWorkspace, getMembership } from "@/lib/workspace";
 import {
   isPublishProvider,
   updateWorkspacePublishProvider,
@@ -96,6 +97,8 @@ export async function getPendingMetaDiscoveryAction(): Promise<
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const db = getDb();
   const [row] = await db
@@ -153,6 +156,8 @@ export async function saveSelectedMetaAccountsAction(input: {
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const rl = rateLimit("meta-save-accounts:" + workspaceId, 15, 60_000);
   if (!rl.allowed) {
@@ -346,6 +351,8 @@ export async function checkMetaConnectionHealthAction(
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const db = getDb();
   const [conn] = await db
@@ -410,6 +417,8 @@ export async function dismissMetaDiscoveryAction(): Promise<ActionResult> {
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const db = getDb();
   await db
@@ -433,6 +442,8 @@ export async function disconnectPlatformAction(
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const db = getDb();
   await db
@@ -462,6 +473,8 @@ export async function updatePublishingProviderAction(provider: string): Promise<
   if (!user) return { ok: false, error: "You must be signed in." };
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return { ok: false, error: "Create or join a workspace first." };
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) return { ok: false, error: "Only workspace administrators can manage connections." };
 
   const rl = rateLimit("publishing-provider:" + workspaceId, 10, 10 * 60_000);
   if (!rl.allowed) {

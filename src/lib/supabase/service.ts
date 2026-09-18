@@ -6,7 +6,8 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
  * Service-role Supabase client for background workers (pg-boss) and other
  * non-request contexts (instrumentation, cron). The service role bypasses
  * RLS, so this must never be imported from client code or used to answer
- * user-facing requests — the key is a secret.
+ * unscoped user-facing requests — the key is a secret. Authenticated media
+ * signing must verify workspace membership and the object path before using it.
  *
  * Unlike `@/lib/supabase/server`, this does NOT touch request APIs
  * (cookies()), so it is safe to call where no request scope exists — e.g.

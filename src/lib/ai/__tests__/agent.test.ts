@@ -1,3 +1,6 @@
+import { createLazyChatTools } from "../chat-tools";
+import { estimatePayloadTokens, type ChatBudgetDiagnostic } from "../chat-budget";
+import { createBudgetedChatModel, resolveChatBudget } from "../chat-budget";
 import { describe, expect, it, vi } from "vitest";
 import { stepCountIs, streamText } from "ai";
 import type {
@@ -5,7 +8,7 @@ import type {
   LanguageModelV2CallOptions,
   LanguageModelV2StreamPart,
 } from "@ai-sdk/provider";
-import { agentSteps, brands, contentItems } from "@/db/schema";
+import { agentRuns, agentSteps, brands, contentItems, workspaceMembers } from "@/db/schema";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { buildAgentTools } from "@/lib/ai/tools";
 
@@ -38,6 +41,7 @@ describe("buildSystemPrompt publishing-route copy", () => {
 // two tools' queries, so the test is hermetic.
 
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
+vi.mock("@/lib/workspace", () => ({ getMembership: vi.fn(async () => ({ role: "editor" })) }));
 
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
@@ -54,12 +58,14 @@ function makeFakeDb(stepRows: StepRow[]) {
   const db = {
     select: () => ({
       from: (table: unknown) => {
-        const data: unknown[] = table === brands ? brandRows : table === contentItems ? contentRows : [];
+        const data: unknown[] = table === workspaceMembers ? [{ role: "editor" }] : table === agentRuns ? [{ status: "running" }] : table === brands ? brandRows : table === contentItems ? contentRows : [];
         const thenable = Promise.resolve(data) as Promise<unknown[]> & {
+          innerJoin: () => Promise<unknown[]>;
           where: () => Promise<unknown[]>;
           orderBy: () => Promise<unknown[]>;
           limit: () => Promise<unknown[]>;
         };
+        thenable.innerJoin = () => thenable;
         thenable.where = () => thenable;
         thenable.orderBy = () => thenable;
         thenable.limit = () => thenable;
@@ -139,13 +145,14 @@ describe("agent sequential multi-tool conversation", () => {
     const stepRows: StepRow[] = [];
     mockedGetDb.mockReturnValue(makeFakeDb(stepRows) as never);
 
+    const all = buildAgentTools({ workspaceId: "ws-test", userId: "user-test", runId: "run-test" });
     const result = streamText({
-      model: fakeSequentialModel(),
+      model: createBudgetedChatModel({ model: fakeSequentialModel(), budget: resolveChatBudget("custom", "test", { QURTIZ_CHAT_LIMITS_JSON: JSON.stringify({ default: { requestTokens: 8000, outputTokens: 1024 } }) }), save: async () => undefined }),
       system: "You are a test agent.",
       messages: [
         { role: "user", content: [{ type: "text", text: "Find content and check the brand." }] },
       ],
-      tools: buildAgentTools({ workspaceId: "ws-test", userId: "user-test", runId: "run-test" }),
+      tools: { search_content_library: all.search_content_library, get_brand_brain: all.get_brand_brain },
       stopWhen: stepCountIs(6),
     });
 
@@ -176,5 +183,82 @@ describe("agent sequential multi-tool conversation", () => {
 
     // Both tool executions were recorded to agent_steps in order.
     expect(stepRows.map((r) => r.toolName)).toEqual(["search_content_library", "get_brand_brain"]);
+  });
+});
+
+
+describe("short chat with real agent instructions and schemas", () => {
+  it.each(["Change the caption of my last post", "Remove hashtags from this post", "Update the visual prompt", "Replace the second carousel slide", "Change this Reel caption"])("keeps the actual editing payload within the unchanged 8000-token limit: %s", async request => {
+    mockedGetDb.mockReturnValue(makeFakeDb([]) as never);
+    const lazy = createLazyChatTools(buildAgentTools({ workspaceId: "ws-test", userId: "user-test", runId: "run-test" }), request);
+    const calls: LanguageModelV2CallOptions[] = [];
+    const raw: LanguageModelV2 = { specificationVersion: "v2", provider: "fixture", modelId: "fixture", supportedUrls: {}, doGenerate: async () => { throw Error("Small edits must not need compression"); }, doStream: async options => {
+      calls.push(options);
+      return { stream: new ReadableStream<LanguageModelV2StreamPart>({ start(controller) {
+        controller.enqueue({ type: "text-start", id: "t" }); controller.enqueue({ type: "text-delta", id: "t", delta: "Ready" }); controller.enqueue({ type: "text-end", id: "t" });
+        controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }); controller.close();
+      } }) };
+    } };
+    const model = createBudgetedChatModel({ model: raw, budget: resolveChatBudget("custom", "fixture", { QURTIZ_CHAT_LIMITS_JSON: JSON.stringify({ default: { requestTokens: 8000, outputTokens: 1024 } }) }), save: async () => { throw Error("Small edits must not need compression"); } });
+    expect(await streamText({ model, system: buildSystemPrompt({ workspaceName: "Fixture", brandSummary: "", memories: [], lazyContext: true, currentTask: request }), messages: [{ role: "user", content: "Create a Facebook post for the synthetic offer" }, { role: "assistant", content: "Saved post with real IDs. " + "Synthetic recent post context ".repeat(25) }, { role: "user", content: request }], tools: lazy.tools, prepareStep: lazy.prepareStep }).text).toBe("Ready");
+    expect(calls).toHaveLength(1); expect(calls[0].tools?.map(t => t.name)).toContain("edit_content"); expect(calls[0].tools?.map(t => t.name)).not.toContain("create_content");
+  });
+  it("keeps five small turns under the unchanged learned request limit without compression", async () => {
+    mockedGetDb.mockReturnValue(makeFakeDb([]) as never);
+    const existing = buildAgentTools({ workspaceId: "ws-test", userId: "user-test", runId: "run-test" });
+    const eagerSystem = buildSystemPrompt({ workspaceName: "Test", brandSummary: "Business and brand information ".repeat(120), memories: [] });
+    const lazySystem = buildSystemPrompt({ workspaceName: "Test", brandSummary: "", memories: [], lazyContext: true });
+    const calls: LanguageModelV2CallOptions[] = [];
+    const summaries = vi.fn(async () => { throw new Error("Short turns must not summarize"); });
+    const raw: LanguageModelV2 = { specificationVersion: "v2", provider: "test", modelId: "test", supportedUrls: {}, doGenerate: summaries,
+      doStream: async options => { calls.push(options); return { stream: new ReadableStream<LanguageModelV2StreamPart>({ start(c) {
+        c.enqueue({ type: "text-start", id: "text" }); c.enqueue({ type: "text-delta", id: "text", delta: "Hello" }); c.enqueue({ type: "text-end", id: "text" });
+        c.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 } }); c.close();
+      } }) }; } };
+    const messages: { role: "user" | "assistant"; content: string }[] = [];
+    const diagnostics: ChatBudgetDiagnostic[] = [];
+    for (let turn = 0; turn < 5; turn++) {
+      messages.push({ role: "user", content: ["Hi", "How are you?", "Thanks", "Continue", "Tell me more"][turn] });
+      const lazy = createLazyChatTools(existing);
+      const model = createBudgetedChatModel({ model: raw, budget: resolveChatBudget("custom", "test"), scope: "test/test",
+        context: { version: 1, hashes: [], summary: "", learnedLimit: 8000, scope: "test/test" }, save: async () => { throw Error("No short turn compression"); },
+        onDiagnostic: value => diagnostics.push(value) });
+      const result = streamText({ model, system: lazySystem, messages, tools: lazy.tools, prepareStep: lazy.prepareStep, stopWhen: stepCountIs(6) });
+      expect(await result.text).toBe("Hello"); messages.push({ role: "assistant", content: "Hello" });
+    }
+    expect(calls).toHaveLength(5); expect(summaries).not.toHaveBeenCalled();
+    for (const d of diagnostics.filter(d => d.phase === "ready")) {
+      expect(d.contributions.total).toBeLessThan(d.usableInputTokens); expect(d.systemMessages).toBe(1);
+      expect(d.toolCount).toBe(5); expect(d.contributions.attachments).toBe(0); expect(d.contributions.summary).toBe(0);
+    }
+    expect(calls.map(call => call.prompt.filter(message => message.role === "user").length)).toEqual([1, 2, 3, 4, 5]);
+    // Reproduce the old fixed-context overhead using all real schemas and a
+    // Brand Brain of the observed size, without changing the request limit.
+    const eager: LanguageModelV2CallOptions[] = [];
+    const eagerRaw = { ...raw, doStream: async (options: LanguageModelV2CallOptions) => { eager.push(options); return raw.doStream(options); } };
+    const old = streamText({ model: eagerRaw, system: eagerSystem, messages: [{ role: "user", content: "Hi" }], tools: existing });
+    await old.text;
+    expect(estimatePayloadTokens(eager[0])).toBeGreaterThan(diagnostics[0].usableInputTokens);
+    // Genuine long conversation with the SAME real system, lazy schemas and
+    // learned limit. Older history must be replaced, then reused on continuation.
+    const summarize = vi.fn(async () => ({ content: [{ type: "text" as const, text: "Important decisions retained; outstanding task: prepare a strategy." }],
+      finishReason: "stop" as const, usage: { inputTokens: 500, outputTokens: 100, totalTokens: 600 }, warnings: [] }));
+    const saved = vi.fn(async (_context: import("../chat-budget").ConversationContext) => { void _context; });
+    const longMessages = Array.from({ length: 30 }, (_, i) => [{ role: "user" as const, content: "Requirement " + i + ": " + "relevant discussion ".repeat(100) },
+      { role: "assistant" as const, content: "Decision " + i + ": " + "verified progress ".repeat(100) }]).flat();
+    longMessages.push({ role: "user", content: "Continue our strategy" });
+    const longRaw = { ...raw, doGenerate: summarize };
+    const longModel = createBudgetedChatModel({ model: longRaw, scope: "test/test", budget: resolveChatBudget("custom", "test"),
+      context: { version: 1, hashes: [], summary: "", learnedLimit: 8000, scope: "test/test" }, save: saved });
+    const lazy = createLazyChatTools(existing);
+    expect(await streamText({ model: longModel, system: lazySystem, messages: longMessages, tools: lazy.tools, prepareStep: lazy.prepareStep }).text).toBe("Hello");
+    expect(summarize).toHaveBeenCalled(); expect(saved).toHaveBeenCalled();
+    expect(JSON.stringify(calls.at(-1)?.prompt)).not.toContain("Requirement 0");
+    expect(JSON.stringify(calls.at(-1)?.prompt)).toContain("Continue our strategy");
+    const summaryCalls = summarize.mock.calls.length;
+    const restored = createBudgetedChatModel({ model: longRaw, scope: "test/test", budget: resolveChatBudget("custom", "test"), context: saved.mock.calls.at(-1)![0], save: saved });
+    expect(await streamText({ model: restored, system: lazySystem, messages: [...longMessages, { role: "assistant", content: "Hello" }, { role: "user", content: "Thanks" }], tools: lazy.tools, prepareStep: lazy.prepareStep }).text).toBe("Hello");
+    expect(summarize.mock.calls).toHaveLength(summaryCalls);
+
   });
 });

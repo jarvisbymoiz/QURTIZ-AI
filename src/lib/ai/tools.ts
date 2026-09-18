@@ -1,8 +1,17 @@
-﻿import { tool, type Tool, type ToolCallOptions } from "ai";
+import { editContent, agentEditContentSchema } from "@/lib/content/edit";
+import { findPosts, readContent } from "@/lib/content/query";
+import { unscheduleContent } from "@/lib/scheduling/unschedule";
+import { reorderVisualUploads } from "@/lib/visuals/media-order";
+import { transitionItem } from "@/lib/content/lifecycle";
+import { revalidatePath } from "next/cache";
+import { tool, type Tool, type ToolCallOptions } from "ai";
 import { z } from "zod";
 import { and, desc, eq, ilike, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentSteps, brandMemory, brands, contentItems, contentVariants, platformConnections } from "@/db/schema";
+import { agentRuns, agentSteps, brandMemory, brands, competitors, competitorSnapshots, researchItems, jobs, contentItems, contentVariants, platformConnections } from "@/db/schema";
+import { getMembership } from "@/lib/workspace";
+import { can } from "@/lib/permissions";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { appendRateLimitHint, capMessage, normalizeToolOutput, scrubCredentials } from "@/lib/ai/stream-errors";
@@ -19,6 +28,8 @@ import { approveItem, rejectItem, getItem } from "@/lib/content/lifecycle";
 import { sumTotals } from "@/lib/analytics/compute";
 import { postMetrics } from "@/db/schema";
 import { generateVisual } from "@/lib/visuals/generate";
+import { memoryInputSchema } from "./memory-policy";
+import { forgetAgentMemory, retrieveAgentMemory, saveAgentMemory } from "./persistent-memory";
 
 export type BrandMemoryRow = typeof brandMemory.$inferSelect;
 
@@ -26,6 +37,8 @@ export type AgentToolContext = {
   workspaceId: string;
   userId: string;
   runId: string;
+  abortSignal?: AbortSignal;
+  currentTask?: string;
 };
 
 /**
@@ -99,11 +112,16 @@ export function buildAgentTools(ctx: AgentToolContext) {
         toolName,
         input: (input ?? {}) as Record<string, unknown>,
         output: (output ?? {}) as Record<string, unknown>,
-        status: "completed",
+        status: output && typeof output === "object" && ("error" in output || ("ok" in output && output.ok === false)) ? "failed" : "completed",
       });
     } catch {
       // Logging must never break the agent turn.
     }
+  }
+
+  async function refreshContent() {
+    try { for (const path of ["/content-studio", "/content-library", "/calendar", "/"]) revalidatePath(path); }
+    catch { console.warn("[agent-content] cache invalidation unavailable", { workspaceId: ctx.workspaceId, runId: ctx.runId }); }
   }
 
   const getBrandBrain = tool({
@@ -132,13 +150,8 @@ export function buildAgentTools(ctx: AgentToolContext) {
     inputSchema: z.object({}),
     execute: async () => {
       try {
-        const rows = await db
-          .select()
-          .from(brandMemory)
-          .where(and(eq(brandMemory.workspaceId, ctx.workspaceId), eq(brandMemory.active, true)))
-          .orderBy(desc(brandMemory.createdAt))
-          .limit(50);
-        const memories = rows.map((r) => ({ type: r.type, content: r.content }));
+        const context = await retrieveAgentMemory(ctx, ctx.currentTask ?? "brand content strategy");
+        const memories = context.workspace;
         await logStep("list_workspace_facts", {}, { memories });
         return { memories };
       } catch (error) {
@@ -152,33 +165,11 @@ export function buildAgentTools(ctx: AgentToolContext) {
   const updateBrandMemory = tool({
     description:
       'Save a durable brand preference, fact, or rule learned from the conversation. Use when the user says things like "remember that...", "always...", or "never use...". Confirm the save to the user afterwards.',
-    inputSchema: z.object({
-      type: z.enum(["preference", "fact", "rule"]).describe("What kind of memory this is."),
-      content: z.string().min(3).max(1000).describe("The memory, written as a single clear sentence."),
-    }),
+    inputSchema: memoryInputSchema,
     execute: async (input) => {
-      try {
-        const [row] = await db
-          .insert(brandMemory)
-          .values({
-            workspaceId: ctx.workspaceId,
-            type: input.type,
-            content: input.content,
-            source: "chat",
-            createdBy: ctx.userId,
-          })
-          .returning();
-        await logStep("update_brand_memory", input, { id: row.id });
-        return {
-          saved: true,
-          id: row.id,
-          message: `Saved ${input.type}: "${input.content}". You can view or remove it in Brand Brain → Memory.`,
-        };
-      } catch (error) {
-        const message = formatAgentToolError(error);
-        await logStep("update_brand_memory", input, { saved: false, error: message });
-        return { saved: false, error: message };
-      }
+      const result = await saveAgentMemory(ctx, input, `chat:${ctx.runId}`);
+      await logStep("update_brand_memory", { scope: input.scope, key: result.key }, { id: result.id, saved: true });
+      return { ...result, scope: input.scope, message: "Saved. Manage this in Settings - Agent Memory." };
     },
   });
 
@@ -189,6 +180,8 @@ export function buildAgentTools(ctx: AgentToolContext) {
       topic: z.string().min(4).max(500).describe("What the post is about"),
       platforms: z.array(z.enum(["facebook", "instagram"])).min(1).describe("Target platforms"),
       objective: z.string().max(300).optional().describe("e.g. engagement, leads, sales"),
+      preferredFormat: z.enum(["single_image", "carousel", "reel", "story", "text_post"]).optional().describe("Requested content format; infer if unspecified"),
+      toneOverride: z.string().max(300).optional().describe("Explicit tone or refinement direction for this version"),
     }),
     execute: async (input) => {
       // A failed generation must surface as a tool result the agent can
@@ -197,11 +190,13 @@ export function buildAgentTools(ctx: AgentToolContext) {
         const { itemId, qa } = await generateAndPersistContent({
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
+          abortSignal: ctx.abortSignal,
           input: {
             topic: input.topic,
             objective: input.objective ?? null,
             platforms: input.platforms,
-            preferredFormat: null,
+            preferredFormat: input.preferredFormat ?? null,
+            toneOverride: input.toneOverride ?? null,
           },
         });
         await logStep("create_content", input, { itemId, qaScore: qa.score });
@@ -248,6 +243,10 @@ export function buildAgentTools(ctx: AgentToolContext) {
         return {
           found: true,
           count: result.count,
+          researchIds: result.insertedIds,
+          note: result.note,
+          findings: await db.select({ id: researchItems.id, topic: researchItems.topic, summary: researchItems.summary, sourceUrl: researchItems.sourceUrl })
+            .from(researchItems).where(and(eq(researchItems.workspaceId, ctx.workspaceId), inArray(researchItems.id, result.insertedIds ?? []))).limit(12),
           sourced: result.sourced,
           message: `${result.count} opportunities saved to the Research Lab${result.sourced ? " with live web sources" : " (AI estimates — no live sources on current plan)"}.`,
         };
@@ -347,6 +346,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
         await logStep("schedule_content", input, { ok: result.ok, scheduledAt: result.ok ? result.scheduledAt.toISOString() : undefined });
         if (!result.ok) return { scheduled: false, message: result.message };
 
+        await refreshContent();
         // Structured truth for the agent: provider, channel, job id and the
         // queued slot per scheduled variant — so the agent can state WHERE
         // and WHEN each post will go without guessing. `channel` is null for
@@ -357,11 +357,14 @@ export function buildAgentTools(ctx: AgentToolContext) {
           .join(", ");
         return {
           scheduled: true,
+          updated: true,
+          itemId: input.contentItemId,
           provider: result.jobs[0]?.provider,
           platform: result.jobs[0]?.platform,
           channel: result.jobs[0]?.channelRef ?? null,
           jobId: result.jobs[0]?.jobId,
           jobs: result.jobs,
+          failedVariants: result.failedVariants,
           scheduledAt: result.scheduledAt.toISOString(),
           status: "queued" as const,
           variants: result.variants,
@@ -410,11 +413,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     inputSchema: z.object({ query: z.string().min(2).max(200) }),
     execute: async (input) => {
       try {
-        const rows = await db
-          .select({ id: contentItems.id, topic: contentItems.topic, status: contentItems.status, createdAt: contentItems.createdAt })
-          .from(contentItems)
-          .where(and(eq(contentItems.workspaceId, ctx.workspaceId), ilike(contentItems.topic, "%" + input.query + "%")))
-          .limit(10);
+        const { results: rows } = await findPosts(ctx, { query: input.query, mine: false, limit: 10 });
         await logStep("search_content_library", input, { count: rows.length });
         return { results: rows.map((r) => ({ id: r.id, topic: r.topic, status: r.status })) };
       } catch (error) {
@@ -514,6 +513,95 @@ export function buildAgentTools(ctx: AgentToolContext) {
   });
 
   const tools: Record<string, Tool> = {
+    retrieve_agent_memory: tool({
+      description: "Retrieve relevant personal/workspace memories and profile for this task. Stable keys support updating/forgetting.",
+      inputSchema: z.object({ task: z.string().min(1).max(1000) }),
+      execute: async ({ task }) => { const { personal, workspace, profile } = await retrieveAgentMemory(ctx, task); return { personal, workspace, profile }; },
+    }),
+    forget_agent_memory: tool({
+      description: "Forget an explicitly user-requested memory by exact key. Default private user scope; workspace scope requires permission. Removes superseded versions too.",
+      inputSchema: z.object({ scope: z.enum(["user", "workspace"]).default("user"), key: z.string().min(2).max(80) }),
+      execute: async ({ scope, key }) => forgetAgentMemory(ctx, scope, key),
+    }),
+    find_posts: tool({
+      description: "Find existing workspace posts across chats/sessions. Use for my last/recent post or topic search when no real ID is known. Defaults to this user's posts, newest-created first. mine=false searches shared workspace posts. Never create a new post to edit an existing one; clarify genuinely ambiguous multiple matches.",
+      inputSchema: z.object({ query: z.string().max(200).optional(), mine: z.boolean().default(true), agentCreatedOnly: z.boolean().optional(), limit: z.number().int().min(1).max(10).default(5), order: z.enum(["created", "updated"]).default("created") }),
+      execute: async input => findPosts(ctx, input),
+    }),
+    get_content: tool({
+      description: "Read existing post, real variant IDs and current updatedAt before editing. sections allows ONLY copy (caption/hashtags/comment/CTA), visual (master Visual Prompt), slides, script, media, delivery. Never use caption or hashtags as section names. Omit sections for full details; select one variant/one-based slideNumber for smaller reads. Returns ordered media IDs without credentials or bearer URLs; default reads full details.",
+      inputSchema: z.object({ itemId: z.string().uuid(), variantId: z.string().uuid().optional(), sections: z.array(z.enum(["copy", "visual", "slides", "script", "media", "delivery"])).min(1).max(6).optional(), slideNumber: z.number().int().min(1).max(20).optional() }),
+      execute: async ({ itemId, ...options }) => readContent(ctx, itemId, options),
+    }),
+    edit_content: tool({
+      description: "Update an EXISTING post, preserving its ID/media/relationships; NEVER duplicates. First read get_content and supply expectedUpdatedAt. Patch only requested fields and variant IDs. hashtags=[] clears tags, firstComment='' clears comment. visualConcept is the shared Visual Prompt; slideEdits use one-based slideNumber and preserve index/other slides/media. Use edit_reel_script for script edits; it never changes video. Existing platform can be changed; use edit_post_platforms to add/remove variants without erasing delivery history. Changes revoke approval and require review. Scheduled/processing posts cannot be edited: use unschedule_content only when the user authorizes cancelling the schedule. For published posts internalOnly=true creates Qurtiz display-only corrections; no social-platform edits or provider retry changes. No arbitrary media URLs/IDs accepted.",
+      inputSchema: agentEditContentSchema,
+      execute: async input => { const result = await editContent(ctx, input); await logStep("edit_content", input, result); await refreshContent(); return result; },
+    }),
+    edit_reel_script: tool({
+      description: "Patch a Reel script on an existing post after reading get_content sections=[script]. Keeps video, caption and omitted script keys. Provided scenes replace only the scenes array. Same review, scheduling, published-correction and concurrency rules as edit_content.",
+      inputSchema: z.object({ itemId: z.string().uuid(), expectedUpdatedAt: z.string().datetime(), variantId: z.string().uuid(), internalOnly: z.boolean().default(false), script: z.object({ hook: z.string().max(3000).optional(), outro: z.string().max(3000).optional(), totalDuration: z.number().positive().max(600).optional(), scenes: z.array(z.object({ text: z.string().max(3000).optional(), voiceover: z.string().max(3000).optional(), visualDirection: z.string().max(3000).optional(), onScreenText: z.string().max(1000).optional(), transition: z.string().max(500).optional(), durationSeconds: z.number().positive().max(600).optional() }).strict()).max(30).optional() }).strict() }).strict(),
+      execute: async ({ variantId, script, ...input }) => { const result = await editContent(ctx, { ...input, variants: [{ variantId, script }] }); await logStep("edit_reel_script", input, result); await refreshContent(); return result; },
+    }),
+    edit_post_platforms: tool({
+      description: "Add/remove platform variants on an unpublished existing post. Read current details first; provide adapted caption for additions. Preserve post ID/media. Cannot remove variants with delivery history, remove all platforms or add duplicates. Revokes approval; no automatic scheduling/publishing.",
+      inputSchema: z.object({ itemId: z.string().uuid(), expectedUpdatedAt: z.string().datetime(), addVariants: z.array(z.object({ platform: z.enum(["facebook", "instagram"]), caption: z.string().trim().min(1).max(3000), hashtags: z.array(z.string().min(1).max(100)).max(30).optional(), firstComment: z.string().max(2200).optional(), cta: z.string().max(1000).optional() }).strict()).max(2).optional(), removeVariantIds: z.array(z.string().uuid()).max(4).optional() }).strict(),
+      execute: async input => { const result = await editContent(ctx, input); await logStep("edit_post_platforms", input, result); await refreshContent(); return result; },
+    }),
+    unschedule_content: tool({
+      description: "Cancel pending deliveries to allow edits ONLY when user requests/authorizes unscheduling. Preserves published deliveries; rejects active publishing. Content changes still need reapproval before rescheduling.",
+      inputSchema: z.object({ itemId: z.string().uuid() }),
+      execute: async ({ itemId }) => { const result = await unscheduleContent(ctx, itemId); await logStep("unschedule_content", { itemId }, result); await refreshContent(); return result; },
+    }),
+    set_content_status: tool({
+      description: "Move an existing post to draft/review or archive only on user request. Approval/rejection use their dedicated tools; publishing state cannot be assigned directly.",
+      inputSchema: z.object({ itemId: z.string().uuid(), status: z.enum(["draft", "ready_for_review", "archived"]) }),
+      execute: async ({ itemId, status }) => { await transitionItem(ctx.workspaceId, itemId, status); await refreshContent(); return { ok: true, updated: true, itemId, status }; },
+    }),
+    reorder_post_media: tool({
+      description: "Reorder ALL existing uploaded images or videos of this post using real orderedIds from get_content. Reuses Studio's exact safe upload order service. Does not upload, replace URLs, move files across posts or remove media. Post must be in review/draft; preserves MIME/asset IDs/storage/other media types.",
+      inputSchema: z.object({ itemId: z.string().uuid(), orderedIds: z.array(z.string().uuid()).min(1).max(10), mediaType: z.enum(["image/", "video/"]) }),
+      execute: async ({ itemId, orderedIds, mediaType }) => { const result = await reorderVisualUploads(ctx, itemId, orderedIds, mediaType); if (!result.ok) return result; await refreshContent(); return { ok: true, updated: true, itemId, orderedIds }; },
+    }),
+    get_research: tool({
+      description: "Read saved research, including sources and estimated scores. Use existing relevant research before making another paid research request.",
+      inputSchema: z.object({ query: z.string().max(200).optional() }),
+      execute: async ({ query }) => ({ results: await db.select().from(researchItems)
+        .where(and(eq(researchItems.workspaceId, ctx.workspaceId), query ? ilike(researchItems.topic, `%${query}%`) : undefined))
+        .orderBy(desc(researchItems.createdAt)).limit(12) }),
+    }),
+    get_competitors: tool({
+      description: "Read tracked competitors and their latest measured snapshots and AI analyses. Missing or old data is explicitly distinguishable from current research.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const tracked = await db.select().from(competitors).where(eq(competitors.workspaceId, ctx.workspaceId)).limit(20);
+        return { competitors: await Promise.all(tracked.map(async competitor => {
+          const [snapshot] = await db.select().from(competitorSnapshots)
+            .where(and(eq(competitorSnapshots.competitorId, competitor.id), eq(competitorSnapshots.workspaceId, ctx.workspaceId)))
+            .orderBy(desc(competitorSnapshots.capturedAt)).limit(1);
+          return { ...competitor, snapshot: snapshot ?? null };
+        })) };
+      },
+    }),
+    refresh_competitor: tool({
+      description: "Fetch a tracked competitor through the official Instagram Business Discovery integration and save a fresh analysis. Use only when fresh data is needed; requires a connected Meta Instagram account.",
+      inputSchema: z.object({ competitorId: z.string().uuid() }),
+      execute: async ({ competitorId }) => {
+        const { refreshCompetitor } = await import("@/lib/competitors/discovery");
+        const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
+        return refreshCompetitor({ workspaceId: ctx.workspaceId, competitorId,
+          ourSummary: summarizeBrandBrain(brand ?? null), ourTotalsSummary: "Read get_analytics for measured totals; none supplied to this comparison." });
+      },
+    }),
+    get_bulk_status: tool({
+      description: "Read a bulk plan's actual progress, created post IDs and failures. Use its ordered createdItemIds when the user refers to numbered posts.",
+      inputSchema: z.object({ jobId: z.string().uuid() }),
+      execute: async ({ jobId }) => {
+        const [job] = await db.select().from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
+        return job ? { ok: true, status: job.status, progress: job.progress, total: job.total, result: job.result, error: job.error }
+          : { ok: false, error: "Bulk plan not found." };
+      },
+    }),
     get_brand_brain: getBrandBrain,
     research_niche: researchNiche,
     create_content: createContent,
@@ -533,10 +621,31 @@ export function buildAgentTools(ctx: AgentToolContext) {
   // size-capped) regardless of what the tool returns or which provider the
   // agent runs on.
   for (const name of Object.keys(tools)) {
+    const execute = tools[name].execute;
+    if (execute) {
+      tools[name].execute = async (input, options) => {
+        try {
+          ctx.abortSignal?.throwIfAborted();
+          options.abortSignal?.throwIfAborted();
+          const membership = await getMembership(ctx.userId, ctx.workspaceId);
+          const readOnly = ["find_posts", "retrieve_agent_memory", "get_brand_brain", "list_workspace_facts", "search_content_library", "get_analytics", "get_content", "get_research", "get_competitors", "get_bulk_status"].includes(name);
+          if (!membership || !can(membership.role, readOnly ? "brand:read" : "brand:write")) throw new Error("Permission to use this tool was revoked.");
+          const [run] = await db.select({ status: agentRuns.status }).from(agentRuns)
+            .where(and(eq(agentRuns.id, ctx.runId), eq(agentRuns.userId, ctx.userId), eq(agentRuns.workspaceId, ctx.workspaceId)));
+          if (!run || run.status !== "running") throw new Error("This agent run is no longer active.");
+          if (!readOnly && !rateLimit(`agent-tool:${ctx.workspaceId}:${name}`, name === "bulk_plan" ? 3 : 12, 10 * 60_000).allowed) {
+            throw new Error("Tool usage limit reached. Please try again later.");
+          }
+          return await execute(input, options);
+        } catch (error) {
+          const output = { ok: false, error: formatAgentToolError(error) };
+          await logStep(name, input, output);
+          return output;
+        }
+      };
+    }
     tools[name] = withNormalizedOutput(tools[name]);
   }
   return tools;
 }
-
-
 

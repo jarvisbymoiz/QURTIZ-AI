@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -32,7 +32,7 @@ import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/chat/markdown";
-import { chatRunMetadataOf, type ChatRunStatusResponse } from "@/lib/ai/chat-run";
+import { chatRunMetadataOf, toolPartState, type ChatRunStatusResponse } from "@/lib/ai/chat-run";
 
 const MAX_FILE_MB = 9;
 // How long the conversation scrollbar stays visible after the last scroll event.
@@ -52,10 +52,21 @@ type ToolTruth = "live" | "completed" | "failed" | "cancelled";
 function toolDisplayName(type: string): string {
   const name = type.replace(/^tool-/, "");
   const labels: Record<string, string> = {
+    discover_tools: "Choosing capabilities",
     get_brand_brain: "Reading Brand Brain",
     list_workspace_facts: "Checking brand memory",
-    update_brand_memory: "Saving to brand memory",
+    update_brand_memory: "Remembering preferences",
+    retrieve_agent_memory: "Recalling relevant preferences",
+    forget_agent_memory: "Forgetting a memory",
     create_content: "Creating content",
+    find_posts: "Finding existing posts",
+    get_content: "Reading post details",
+    edit_content: "Updating post",
+    edit_reel_script: "Updating Reel script",
+    edit_post_platforms: "Updating post platforms",
+    unschedule_content: "Cancelling pending schedule",
+    set_content_status: "Updating review status",
+    reorder_post_media: "Reordering post media",
     schedule_content: "Scheduling post",
     research_niche: "Researching niche",
     web_search: "Searching the web",
@@ -135,12 +146,11 @@ function ToolActivity({
       </div>
     );
   }
-  // truth === "completed": the run finished successfully; render the dangling
-  // part as the muted completed step it counts as.
+  // A finished run does not prove that an unfinished tool succeeded.
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <CheckCheck className="size-3.5" aria-hidden />
-      <span>{label}</span>
+      <CircleAlert className="size-3.5" aria-hidden />
+      <span>{label} — no result recorded</span>
     </div>
   );
 }
@@ -155,7 +165,7 @@ function classifyPart(
   if (truth === "live") return "live";
   if (truth === "cancelled") return "stopped";
   if (truth === "failed") return "failed";
-  return "completed";
+  return "stopped";
 }
 
 function ToolActivitySummary({
@@ -261,7 +271,7 @@ function MessageBody({
   const [copied, setCopied] = useState(false);
   const toolParts: { type: string; state?: string }[] = [];
   for (const p of message.parts ?? [])
-    if (p.type.startsWith("tool-")) toolParts.push({ type: p.type, state: (p as unknown as { state?: string }).state });
+    if (p.type.startsWith("tool-")) toolParts.push({ type: p.type, state: toolPartState(p as { state?: string; output?: unknown }) });
 
   async function copyText() {
     const text = (message.parts ?? [])
@@ -287,13 +297,13 @@ function MessageBody({
               ) : (
                 <p className="whitespace-pre-wrap text-sm leading-relaxed">{part.text}</p>
               )}
-              <div className="mt-1 flex gap-1 opacity-0 transition-opacity group-hover/msg:opacity-100">
-                <Button size="icon" variant="ghost" className="size-6" aria-label="Copy message"
+              <div className="mt-1 flex gap-1 opacity-100 transition-opacity lg:opacity-0 lg:group-hover/msg:opacity-100 group-focus-within/msg:opacity-100">
+                <Button size="icon" variant="ghost" className="size-9" aria-label="Copy message"
                   onClick={() => { void copyText(); }}>
                   <Copy className={cn("size-3.5", copied && "text-emerald-500")} aria-hidden />
                 </Button>
                 {message.role === "user" && onEdit ? (
-                  <Button size="icon" variant="ghost" className="size-6" aria-label="Edit and resend" onClick={onEdit}>
+                  <Button size="icon" variant="ghost" className="size-9" aria-label="Edit and resend" onClick={onEdit}>
                     <Pencil className="size-3.5" aria-hidden />
                   </Button>
                 ) : null}
@@ -311,15 +321,15 @@ function MessageBody({
         }
         if (part.type.startsWith("tool-")) {
           if (toolParts.length > 1) return null; // already collapsed
-          const tp = part as unknown as { state?: string; errorText?: string };
+          const tp = part as unknown as { state?: string; errorText?: string; output?: { error?: string; message?: string } };
           return (
             <ToolActivity
               key={i}
               type={part.type}
-              state={tp.state}
+              state={toolPartState(tp)}
               truth={truth}
               // Tool-level error text wins; the run error explains run-level failures.
-              errorText={tp.errorText ?? (tp.state === "output-error" || truth === "failed" ? runError : null)}
+              errorText={tp.errorText ?? (toolPartState(tp) === "output-error" ? tp.output?.error ?? tp.output?.message ?? runError : truth === "failed" ? runError : null)}
             />
           );
         }
@@ -355,12 +365,13 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
-  const persistedCount = useRef(initialMessages.length);
+
   // Persist generation: bumped when the tail is replaced (retry) so an
   // in-flight persist of the replaced turn cannot clobber the rollback.
-  const persistGen = useRef(0);
-  const currentThreadId = useRef<string | null>(threadId);
-  const persisting = useRef(false);
+
+  const currentThreadId = useRef<string>(threadId ?? crypto.randomUUID());
+  const routed = useRef(threadId !== null);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -375,17 +386,40 @@ export function ChatPanel({
   const fetchingRuns = useRef<Set<string>>(new Set());
   const [runTruths, setRunTruths] = useState<Record<string, ChatRunStatusResponse>>({});
 
+  const announcedContentWrites = useRef(new Set<string>());
   const { messages, sendMessage, status, error, stop, regenerate, setMessages } = useChat({
     id: currentThreadId.current ?? "new-chat",
     messages: initialMessages,
     transport: new DefaultChatTransport({
       api: "/api/chat",
+      prepareSendMessagesRequest: ({ messages, body }) => ({ body: { ...body, messages: messages.filter(message => message.role === "user").slice(-1) } }),
       body: () => ({
         workspaceId,
         threadId: currentThreadId.current,
+        createThread: threadId === null,
       }),
     }),
   });
+
+  useEffect(() => {
+    for (const message of messages) for (const part of message.parts) {
+      const result = part as { type: string; state?: string; toolCallId?: string; output?: { updated?: boolean; created?: boolean; ok?: boolean; itemId?: string } };
+      if (!result.type.startsWith("tool-") || result.state !== "output-available" || !result.toolCallId || announcedContentWrites.current.has(result.toolCallId)) continue;
+      if (result.output?.ok === false || !(result.output?.updated || result.output?.created)) continue;
+      announcedContentWrites.current.add(result.toolCallId);
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel("qurtiz-content:" + workspaceId);
+        channel.postMessage({ changed: true }); channel.close();
+      }
+    }
+  }, [messages, router, workspaceId]);
+
+  useEffect(() => {
+    if (!routed.current && (status === "ready" || status === "error") && messages.some(m => chatRunMetadataOf(m))) {
+      routed.current = true;
+      router.replace(`/chat/${currentThreadId.current}`);
+    }
+  }, [messages, status, router]);
 
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
@@ -398,7 +432,7 @@ export function ChatPanel({
     const el = scrollRef.current;
     if (!el) return;
     if (targetMessageId) {
-      const el2 = el.querySelector(`[data-uid="${targetMessageId}"]`);
+      const el2 = el.querySelector(`[data-uid="${CSS.escape(targetMessageId)}"]`);
       if (el2) {
         el2.scrollIntoView({ behavior: "smooth", block: "center" });
         return;
@@ -410,9 +444,9 @@ export function ChatPanel({
   // Follow stream
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || status !== "streaming") return;
+    if (!el || status !== "streaming" || !atBottom) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, status]);
+  }, [messages, status, atBottom]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -431,60 +465,6 @@ export function ChatPanel({
     };
   }, []);
 
-  // Persist new messages after a terminal turn — success ("ready") AND
-  // failure ("error"): the complete UIMessage (all parts incl. tool
-  // inputs/outputs and the runId/runStatus metadata) is sent as-is, so
-  // reloaded threads re-render tools in their real states. Assistant rows
-  // are ALSO persisted server-side (the route's terminal callback) — the
-  // upsert key (thread_id + message->>'id') makes the two writers converge
-  // on one row instead of duplicating it.
-  useEffect(() => {
-    if ((status !== "ready" && status !== "error") || persisting.current) return;
-
-    // Drop an empty assistant tail (a stream that died before any output):
-    // it renders as a blank bubble, must not reach the model context on the
-    // next send (an assistant message with no content breaks several
-    // providers), and the persist route drops it anyway. The cursor is
-    // clamped in the same pass so the index math below stays consistent.
-    const last = messages[messages.length - 1];
-    if (last && last.role === "assistant" && (last.parts ?? []).length === 0) {
-      setMessages(messages.slice(0, -1));
-      persistedCount.current = Math.min(persistedCount.current, messages.length - 1);
-      return; // effect re-runs after the state update
-    }
-
-    const newMessages = messages.slice(persistedCount.current);
-    if (newMessages.length === 0) return;
-
-    const gen = persistGen.current;
-    persisting.current = true;
-    (async () => {
-      try {
-        const res = await fetch("/api/chat/persist", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            threadId: currentThreadId.current,
-            workspaceId,
-            messages: newMessages,
-          }),
-        });
-        if (!res.ok) throw new Error("persist failed");
-        const data = (await res.json()) as { threadId: string };
-        if (gen !== persistGen.current) return; // tail replaced while posting
-        persistedCount.current = messages.length;
-        if (!currentThreadId.current && data.threadId) {
-          currentThreadId.current = data.threadId;
-          router.replace(`/chat/${data.threadId}`);
-        }
-      } catch {
-        toast.error("Could not save this conversation turn.");
-      } finally {
-        persisting.current = false;
-      }
-    })();
-  }, [status, messages, workspaceId, router, setMessages]);
-
   // Reconnect-to-truth: whenever the panel is idle (stream ended, errored,
   // or a reloaded thread), resolve any message whose run metadata is still
   // "running" against the backend. This is what renders the real outcome for
@@ -492,7 +472,8 @@ export function ChatPanel({
   // builds on.
   useEffect(() => {
     if (status === "submitted" || status === "streaming") return;
-    for (const m of messages) {
+    let disposed = false;
+    const poll = () => { for (const m of messages) {
       const meta = chatRunMetadataOf(m);
       if (!meta || meta.runStatus !== "running") continue;
       if (fetchedRuns.current.has(meta.runId) || fetchingRuns.current.has(meta.runId)) continue;
@@ -500,20 +481,25 @@ export function ChatPanel({
       fetch(`/api/chat/run/${meta.runId}`)
         .then(async (res) => {
           if (!res.ok) throw new Error("run status unavailable");
-          const data = (await res.json()) as ChatRunStatusResponse;
-          fetchedRuns.current.add(meta.runId);
+          const data = (await res.json()) as ChatRunStatusResponse & { message?: UIMessage };
+          if (disposed) return;
+          if (data.status !== "running" && data.message && (data.message.metadata as { runStatus?: string })?.runStatus !== "running") {
+            fetchedRuns.current.add(meta.runId);
+            setMessages(current => current.map(message => message.id === data.message!.id ? data.message! : message));
+          }
           setRunTruths((prev) => ({ ...prev, [meta.runId]: data }));
         })
         .catch(() => {
-          // One attempt per runId; the tool rows keep the muted completed
-          // default rather than guessing a failure.
-          fetchedRuns.current.add(meta.runId);
+          // Transient connection failure: the next poll retries.
         })
         .finally(() => {
           fetchingRuns.current.delete(meta.runId);
         });
-    }
-  }, [status, messages]);
+    } };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [status, messages, setMessages]);
 
   async function handleSend(e?: React.FormEvent) {
     e?.preventDefault();
@@ -523,7 +509,9 @@ export function ChatPanel({
     const files = attachments;
     setAttachments([]);
     setEditing(null);
-    await sendMessage({ text: text || "Please analyze the attachment(s).", files: files as unknown as FileList });
+    const fileList = new DataTransfer();
+    for (const file of files) fileList.items.add(file);
+    await sendMessage({ text: text || "Please analyze the attachment(s).", files: fileList.files });
   }
 
   function startEdit(message: UIMessage) {
@@ -531,11 +519,11 @@ export function ChatPanel({
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
       .join("");
-    const idx = messages.findIndex((m) => m.id === message.id);
+
     setEditing({ id: message.id, text });
     setEditingText(text);
-    setMessages(messages.slice(0, idx));
-    persistedCount.current = idx;
+
+
   }
 
   function sendEdit() {
@@ -543,7 +531,7 @@ export function ChatPanel({
     if (!text || status !== "ready") return;
     setEditing(null);
     setEditingText("");
-    void sendMessage({ text });
+    void sendMessage({ text, messageId: editing?.id });
   }
 
   function addFiles(list: FileList | null) {
@@ -579,14 +567,16 @@ export function ChatPanel({
     setStopping(true);
     try {
       if (liveRunId) {
-        await fetch("/api/chat/cancel", {
+        const response = await fetch("/api/chat/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ runId: liveRunId }),
+          signal: AbortSignal.timeout(10_000),
         });
+        if (!response.ok) throw new Error("Cancellation could not be confirmed.");
       }
     } catch {
-      // Cancel endpoint unavailable — still stop the local stream.
+      toast.error("The connection stopped, but server cancellation could not be confirmed. Checking the run status.");
     }
     stop();
   }
@@ -601,16 +591,16 @@ export function ChatPanel({
     if (busy) return;
     const last = messages[messages.length - 1];
     if (!last) return;
-    persistGen.current += 1;
+
 
     if (last.role === "assistant") {
       // The failed assistant tail is replaced by the retry's response.
-      persistedCount.current = messages.length - 1;
+
       void regenerate({ messageId: last.id });
     } else {
       // Error before any assistant response — the (already persisted) user
       // message stays; the retry's response becomes the new tail.
-      persistedCount.current = messages.length;
+
       void regenerate();
     }
   }
@@ -686,7 +676,7 @@ export function ChatPanel({
   }
 
   return (
-    <div className="relative flex h-[calc(100vh-10rem)] flex-col gap-4">
+    <div className="relative flex h-[calc(100dvh-11rem)] min-h-80 flex-col gap-4">
       {messages.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
           <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-lg">
@@ -812,7 +802,7 @@ export function ChatPanel({
             <span className="flex items-center gap-1.5">
               <Pencil className="size-3.5" aria-hidden /> Editing message — sending replaces the rest of this turn
             </span>
-            <button type="button" onClick={() => { setEditing(null); setMessages(initialMessages.slice(0, persistedCount.current)); setEditingText(""); }}>
+            <button type="button" onClick={() => { setEditing(null); setEditingText(""); }}>
               <X className="size-3.5" aria-hidden />
             </button>
           </div>
@@ -829,7 +819,7 @@ export function ChatPanel({
             }}
           />
           <div className="mt-2 flex justify-end gap-2">
-            <Button size="sm" variant="ghost" onClick={() => { setEditing(null); setMessages(initialMessages.slice(0, persistedCount.current)); }}>
+            <Button size="sm" variant="ghost" onClick={() => { setEditing(null); }}>
               Cancel
             </Button>
             <Button size="sm" disabled={editingText.trim().length === 0 || busy} onClick={sendEdit}>

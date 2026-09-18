@@ -14,9 +14,10 @@
 export const RUN_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const MAX_RUN_TIMES = 6;
 /** Pre-filled when enabling Autopilot with no run times configured. */
-export const DEFAULT_RUN_TIMES = ["18:30"] as const;
+export const DEFAULT_RUN_TIMES = ["09:00"] as const;
 /** Slot used when the workspace has no measured best-hour data yet. */
-export const FALLBACK_SLOT_TIME = "18:30";
+export const DEFAULT_POSTING_TIMES = ["09:00", "12:00", "17:00"];
+export const FALLBACK_SLOT_TIME = DEFAULT_POSTING_TIMES[0];
 
 /**
  * Normalize arbitrary stored JSON into valid, unique, capped "HH:MM" times.
@@ -66,7 +67,7 @@ export function isAutopilotDue(
 /**
  * Pick the auto-schedule slot time from measured performance. `hours` is the
  * Analytics page reading (bestPostingHours: per-hour average engagement in
- * workspace time). Falls back to 18:30 when there is no evidence: fewer than
+ * workspace time). Falls back to the configured default when there is no evidence: fewer than
  * 3 measured posts, no hour data, or a best hour with zero engagement.
  */
 export function pickEngagementSlot(

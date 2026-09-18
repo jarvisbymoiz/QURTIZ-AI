@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import {
   BarChart3,
   Bell,
@@ -14,6 +14,7 @@ import {
   LogOut,
   Megaphone,
   MessageSquare,
+  Menu,
   PenSquare,
   Plug,
   Plus,
@@ -35,6 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const NAV_MAIN = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -74,6 +76,7 @@ export function Sidebar({
   const pathname = usePathname();
   const router = useRouter();
   const [isSwitching, startSwitch] = useTransition();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   function switchTo(workspaceId: string) {
     startSwitch(async () => {
@@ -94,8 +97,10 @@ export function Sidebar({
     form.submit();
   }
 
-  return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
+  const navigation = (
+    <aside className="flex h-full w-full min-h-0 flex-col border-r bg-sidebar text-sidebar-foreground" onClick={(event) => {
+      if ((event.target as HTMLElement).closest("a")) setMobileOpen(false);
+    }}>
       <div className="flex h-14 items-center gap-2 border-b px-4">
         <div className="flex size-7 items-center justify-center rounded-md bg-gradient-to-br from-primary to-primary/70 font-bold text-primary-foreground">
           Q
@@ -157,8 +162,9 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+                "flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
                 active
                   ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
                   : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
@@ -223,6 +229,23 @@ export function Sidebar({
       </div>
     </aside>
   );
+  return <>
+    <div className="hidden h-full w-64 shrink-0 lg:block">{navigation}</div>
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b px-3 lg:hidden">
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <SheetTrigger render={<Button variant="ghost" size="icon" aria-label="Open navigation" />}>
+          <Menu aria-hidden className="size-5" />
+        </SheetTrigger>
+        <SheetContent side="left" className="w-[min(20rem,90vw)] gap-0" aria-describedby={undefined}>
+          <SheetTitle className="sr-only">Application navigation</SheetTitle>
+          {navigation}
+        </SheetContent>
+      </Sheet>
+      <span className="min-w-0 flex-1 truncate text-sm font-semibold">{activeWorkspaceName}</span>
+      <Link href="/notifications" className="flex size-11 items-center justify-center" aria-label={`Notifications (${unreadCount} unread)`}>
+        <Bell className="size-5" aria-hidden />
+      </Link>
+    </header>
+  </>;
 }
-
 

@@ -42,11 +42,16 @@ import "server-only";
 import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, platformConnections, publishingJobs } from "@/db/schema";
+import { choosePostingSlot, type TimingPolicy } from "@/lib/autopilot/timing";
+import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
+import { settings } from "@/db/schema";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import { resolvePublishProviderForPlatform, type ContentPlatform, type PublishProvider } from "@/lib/publish/provider";
+import { mediaFormatError, orderVisuals, selectPublishMedia, type MediaKind, type MediaSelection, type VisualRef } from "@/lib/publishing/media";
 import {
   applyRefreshedToken,
   createPostForBuffer,
+  getBufferPostStatus,
   decodeBufferTokenEnvelope,
   listChannels,
   logBufferOAuthDiagnostic,
@@ -56,7 +61,7 @@ import {
   type BufferService,
   type BufferTokenEnvelope,
 } from "@/lib/buffer/client";
-import { publishPost } from "@/lib/meta/publish";
+import { publishFirstComment, publishPost } from "@/lib/meta/publish";
 import { createServiceClient } from "@/lib/supabase/service";
 import { desc } from "drizzle-orm";
 import { visualAssets } from "@/db/schema";
@@ -101,8 +106,68 @@ export type PublishResult =
        *  out). Threaded into publishing_jobs.result so the UI can say
        *  "First Comment: Skipped (unavailable on current Buffer plan)". */
       firstCommentSkipped?: boolean;
+      pendingDelivery?: boolean;
+      /** Meta first-comment result (separate request after the main post).
+       *  Absent for Buffer jobs, which keep `firstCommentSkipped`. */
+      comment?: PublishCommentState;
     }
   | { ok: false; reason: string; message: string };
+
+/** Meta first-comment lifecycle. The comment is a SEPARATE Graph API request
+ *  that runs after the main post succeeded, so it owns its own state machine
+ *  and its own idempotency key (providerCommentId). */
+export type PublishCommentStatus =
+  | "pending"
+  | "publishing"
+  | "published"
+  | "failed"
+  | "permission_required"
+  | "unsupported";
+
+export type PublishCommentState = {
+  status: PublishCommentStatus;
+  /** Meta comment id once created - the idempotency key that prevents a
+   *  duplicate comment on retry, worker requeue or server restart. */
+  providerCommentId: string | null;
+  error: string | null;
+  attemptedAt: string | null;
+  publishedAt: string | null;
+};
+
+/** Read the persisted comment state out of a publishing_jobs.result jsonb. */
+export function readCommentState(result: unknown): PublishCommentState | null {
+  if (typeof result !== "object" || result === null) return null;
+  const raw = (result as Record<string, unknown>).comment;
+  if (typeof raw !== "object" || raw === null) return null;
+  const c = raw as Record<string, unknown>;
+  const status = c.status;
+  if (
+    status !== "pending" &&
+    status !== "publishing" &&
+    status !== "published" &&
+    status !== "failed" &&
+    status !== "permission_required" &&
+    status !== "unsupported"
+  ) {
+    return null;
+  }
+  return {
+    status,
+    providerCommentId: typeof c.providerCommentId === "string" ? c.providerCommentId : null,
+    error: typeof c.error === "string" ? c.error : null,
+    attemptedAt: typeof c.attemptedAt === "string" ? c.attemptedAt : null,
+    publishedAt: typeof c.publishedAt === "string" ? c.publishedAt : null,
+  };
+}
+
+/** True when a stored comment state still needs work. `published` (already
+ *  created - never create a duplicate) and `unsupported` (terminal) do not. */
+export function commentNeedsPublish(state: PublishCommentState | null): boolean {
+  return (
+    state !== null &&
+    (state.status === "pending" || state.status === "publishing" || state.status === "failed")
+  );
+}
 
 export type ScheduleResult =
   | {
@@ -146,21 +211,28 @@ export function platformToBufferService(platform: ContentPlatform): BufferServic
 }
 
 /**
- * Pure predicate (unit-testable): did Buffer reject the mutation because the
- * first comment is a paid-plan feature, or due to unsupported firstComment /
- * Instagram metadata in Buffer's GraphQL schema?
- * Buffer surfaces paid-plan restrictions as a MutationError ("Invalid post: First
- * comment requires a paid plan.") and input schema validation failures as GraphQL
- * application errors (e.g. at "input.metadata.instagram" or referencing "firstComment").
- * Both mean Buffer created NOTHING, so retrying the identical payload without
- * the first comment cannot duplicate the post.
+ * Pure predicate (unit-testable): was this rejection caused SPECIFICALLY by the
+ * first-comment / unsupported-Instagram-metadata class of failure?
+ *
+ * Buffer surfaces a paid-plan restriction as a MutationError ("Invalid post:
+ * First comment requires a paid plan.") and an unsupported metadata field as a
+ * GraphQL application error naming firstComment / InstagramPostMetadata. Those
+ * are the only failures a stripped retry can fix - and Buffer created NOTHING
+ * on them, so retrying the identical payload without the comment cannot
+ * duplicate the post.
+ *
+ * A REQUIRED-field validation error is deliberately NOT matched: that is a
+ * malformed-payload bug (e.g. 'Field "type" of required type "PostType!" was
+ * not provided'), and dropping the comment cannot supply a missing required
+ * field - retrying it blindly would only hide the real defect.
  */
 export function isFirstCommentPlanError(message: string): boolean {
+  if (/was not provided|of required type|is required/i.test(message)) return false;
   return (
     /first[\s_-]?comment/i.test(message) ||
-    /metadata\.instagram/i.test(message) ||
     /InstagramPostMetadata/i.test(message) ||
-    /(unsupported|unknown|invalid).*instagram.*metadata/i.test(message)
+    /(unsupported|unknown|invalid|not defined|not supported)[^.]{0,40}instagram/i.test(message) ||
+    /instagram[^.]{0,40}(metadata|field)[^.]{0,40}(unsupported|unknown|invalid|not defined|not supported)/i.test(message)
   );
 }
 
@@ -474,6 +546,155 @@ export async function resolvePublishConnection(
   };
 }
 
+/**
+ * Publish (or retry) ONLY the first comment of an already-published Meta post.
+ *
+ * The main post is never touched here: it is addressed by the stored
+ * providerPostId, which is the same idempotency guard the main post uses. The
+ * comment has its own key (providerCommentId), so:
+ *   - an existing comment id is returned as-is (never created twice),
+ *   - `unsupported` is terminal,
+ *   - `pending` / `publishing` / `failed` are resumable (retry, worker requeue,
+ *     server restart between the post and the comment).
+ * The state is persisted to publishing_jobs.result.comment on every transition.
+ */
+async function publishMetaFirstCommentOnly(args: {
+  workspaceId: string;
+  jobId: string;
+  platform: ContentPlatform;
+  providerPostId: string;
+  firstComment: string | null;
+  previous: PublishCommentState | null;
+}): Promise<PublishCommentState> {
+  const db = getDb();
+  const nowIso = () => new Date().toISOString();
+
+  const persist = async (state: PublishCommentState): Promise<PublishCommentState> => {
+    await db.transaction(async tx => {
+      const [row] = await tx.select({ result: publishingJobs.result }).from(publishingJobs)
+        .where(eq(publishingJobs.id, args.jobId)).for("update");
+      const base = (row?.result ?? {}) as Record<string, unknown>;
+      await tx.update(publishingJobs).set({ result: { ...base, comment: state }, updatedAt: new Date() })
+        .where(eq(publishingJobs.id, args.jobId));
+    });
+    return state;
+  };
+
+  // Idempotency: never create a second comment for the same post.
+  if (args.previous?.providerCommentId) return args.previous;
+  if (args.previous?.status === "unsupported") return args.previous;
+
+  const text = (args.firstComment ?? "").trim();
+  if (text.length === 0) {
+    return (
+      args.previous ?? {
+        status: "unsupported",
+        providerCommentId: null,
+        error: "No first comment to publish.",
+        attemptedAt: nowIso(),
+        publishedAt: null,
+      }
+    );
+  }
+
+  // Claim the comment request while holding the publishing-job row lock. Two
+  // retry clicks or workers can therefore never send the same first comment
+  // concurrently. A crashed claim becomes retryable after two minutes.
+  const claim = await db.transaction(async tx => {
+    const [row] = await tx.select({ result: publishingJobs.result }).from(publishingJobs)
+      .where(eq(publishingJobs.id, args.jobId)).for("update");
+    const current = readCommentState(row?.result) ?? args.previous;
+    if (current?.providerCommentId || current?.status === "unsupported" || current?.status === "permission_required") {
+      return { claimed: false as const, state: current };
+    }
+    const attemptedAt = current?.attemptedAt ? Date.parse(current.attemptedAt) : Number.NaN;
+    if (current?.status === "publishing" && Number.isFinite(attemptedAt) && Date.now() - attemptedAt < 120_000) {
+      return { claimed: false as const, state: current };
+    }
+    const state: PublishCommentState = {
+      status: "publishing",
+      providerCommentId: null,
+      error: null,
+      attemptedAt: nowIso(),
+      publishedAt: null,
+    };
+    const base = (row?.result ?? {}) as Record<string, unknown>;
+    await tx.update(publishingJobs).set({ result: { ...base, comment: state }, updatedAt: new Date() })
+      .where(eq(publishingJobs.id, args.jobId));
+    return { claimed: true as const, state };
+  });
+  if (!claim.claimed) return claim.state;
+
+  // A comment belongs to the META post, so it always uses the Meta connection for
+  // this platform - never the Buffer fallback (a different provider entirely).
+  const [conn] = await db
+    .select()
+    .from(platformConnections)
+    .where(
+      and(
+        eq(platformConnections.workspaceId, args.workspaceId),
+        eq(platformConnections.platform, args.platform),
+        eq(platformConnections.provider, "meta"),
+      ),
+    );
+  if (!conn || !conn.encryptedToken) {
+    return persist({
+      status: "failed",
+      providerCommentId: null,
+      error: "No Meta connection available for the first comment - reconnect the account.",
+      attemptedAt: nowIso(),
+      publishedAt: null,
+    });
+  }
+  const token = decryptToken(conn.encryptedToken);
+  if (!token) {
+    return persist({
+      status: "failed",
+      providerCommentId: null,
+      error: "Stored Meta token could not be decrypted - reconnect the account.",
+      attemptedAt: nowIso(),
+      publishedAt: null,
+    });
+  }
+
+  const res = await publishFirstComment({
+    platform: args.platform,
+    pageToken: token,
+    postId: args.providerPostId,
+    message: text,
+  });
+
+  if (res.ok) {
+    return persist({
+      status: "published",
+      providerCommentId: res.commentId,
+      error: null,
+      attemptedAt: nowIso(),
+      publishedAt: nowIso(),
+    });
+  }
+  // A missing permission / App Review requirement is TERMINAL for the comment:
+  // report it honestly instead of retrying a request Meta will keep refusing.
+  const status: PublishCommentStatus =
+    res.reason === "unsupported"
+      ? "unsupported"
+      : res.reason === "permission_required"
+        ? "permission_required"
+        : "failed";
+  const error =
+    res.reason === "permission_required"
+      ? "Meta did not grant the permission required to comment. Reconnect Meta and accept the comment permissions (instagram_manage_comments for Instagram, pages_manage_engagement for Facebook); if the app is in Live mode these permissions also require App Review. Meta said: " +
+        res.message
+      : res.message;
+  return persist({
+    status,
+    providerCommentId: null,
+    error,
+    attemptedAt: nowIso(),
+    publishedAt: null,
+  });
+}
+
 /** Load the variant + item + latest visual + recipient (workspace creator).
  *  Returns a discriminated result so callers can fail fast before touching
  *  the provider. */
@@ -481,6 +702,7 @@ async function loadPublishContext(args: {
   workspaceId: string;
   contentItemId: string;
   contentVariantId: string;
+  allowPublished?: boolean;
 }): Promise<
   | {
       ok: true;
@@ -504,10 +726,10 @@ async function loadPublishContext(args: {
     .select()
     .from(contentItems)
     .where(eq(contentItems.id, variant.contentItemId));
-  if (!item) return { ok: false, reason: "not_found", message: "Content item not found." };
+  if (!item || item.workspaceId !== args.workspaceId) return { ok: false, reason: "not_found", message: "Content item not found." };
 
-  const variantPublishable = variant.status === "scheduled" || variant.status === "approved";
-  const itemPublishable = item.status === "scheduled" || item.status === "approved";
+  const variantPublishable = variant.status === "scheduled" || variant.status === "approved" || (args.allowPublished && variant.status === "published");
+  const itemPublishable = item.status === "scheduled" || item.status === "approved" || (args.allowPublished && item.status === "published");
   if (!variantPublishable || !itemPublishable) {
     return {
       ok: false,
@@ -534,7 +756,7 @@ async function loadPublishContext(args: {
 /** Compose caption text from item/variant + hashtags (shared by both
  *  providers so Meta and Buffer publish identical copy). */
 function composeMessage(item: typeof contentItems.$inferSelect, variant: typeof contentVariants.$inferSelect): string {
-  return [item?.caption ?? variant.caption, (variant.hashtags ?? []).map((h) => `#${h}`).join(" ")]
+  return [variant.caption ?? item?.caption, (variant.hashtags ?? []).map((h) => `#${h}`).join(" ")]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -599,7 +821,7 @@ async function publicVisualUrl(storagePath: string): Promise<string | null> {
   if (!baseUrl) return null;
   const url = `${baseUrl.replace(/\/+$/, "")}/storage/v1/object/public/brand-assets/${storagePath}`;
   try {
-    const res = await fetch(url, { method: "HEAD" });
+    const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(10_000), redirect: "error" });
     return res.ok ? url : null;
   } catch {
     return null;
@@ -618,7 +840,104 @@ async function publicVisualUrl(storagePath: string): Promise<string | null> {
  * the publish paths turn into a failed publish — "config" names the missing
  * env var, "unreachable" the storage/network problem.
  */
-async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
+/**
+ * Resolve the item's publishable media, in order.
+ *
+ * Uploaded media (kind "upload") is authoritative: EVERY ordered image is sent
+ * (so a carousel is a real carousel) or the single video is sent as a video.
+ * With no uploads the legacy single visual is used, so existing single-image
+ * publishing is unchanged. `mimeType` decides image vs video - never the file
+ * name. An asset whose URL cannot be signed fails the publish instead of
+ * silently publishing a different post.
+ */
+/**
+ * Select the item's publishable media, in order, WITHOUT signing anything.
+ *
+ * Uploaded media (kind "upload") is authoritative and is returned in full:
+ * every ordered image (a real carousel) or the single video (a reel). With no
+ * uploads the legacy newest non-slide visual is used, so existing single-image
+ * publishing is unchanged. `mimeType` decides image vs video - never the file
+ * name.
+ */
+export async function selectItemMedia(args: { workspaceId: string; contentItemId: string; format?: string }): Promise<MediaSelection> {
+  const db = getDb();
+  let rows = await db
+    .select({
+      storagePath: visualAssets.storagePath,
+      mimeType: visualAssets.mimeType,
+      slideIndex: visualAssets.slideIndex,
+      kind: visualAssets.kind,
+      createdAt: visualAssets.createdAt,
+    })
+    .from(visualAssets)
+    .where(
+      and(
+        eq(visualAssets.workspaceId, args.workspaceId),
+        eq(visualAssets.contentItemId, args.contentItemId),
+      ),
+    );
+
+  // Platform variants share the item but consume their own media family.
+  // Incompatible-only selections still reach the existing format error guard.
+  if (args.format) {
+    const compatible = rows.filter(r => r.mimeType?.startsWith(args.format === "reel" ? "video/" : "image/"));
+    if (compatible.length) rows = compatible;
+  }
+  // Deterministic tie order also covers older uploads saved with index zero.
+  rows.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() || a.storagePath.localeCompare(b.storagePath));
+  const uploads = orderVisuals(
+    rows
+      .filter((r) => r.kind === "upload")
+      .map((r) => ({ storagePath: r.storagePath, mimeType: r.mimeType, slideIndex: r.slideIndex, kind: r.kind })),
+  );
+
+  if (uploads.length > 0) return selectPublishMedia(uploads);
+
+  // Regenerating one slide replaces that slide, not the rest of the carousel.
+  const latestSlides = new Map<number, VisualRef>();
+  for (const row of rows) {
+    if (row.slideIndex != null) latestSlides.set(row.slideIndex, row);
+  }
+  if (latestSlides.size > 0) return selectPublishMedia(orderVisuals([...latestSlides.values()]));
+
+  const legacy = rows
+    .filter((r) => r.slideIndex === null || r.slideIndex === undefined)
+    .slice()
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+  const legacyRefs: VisualRef[] = legacy
+    ? [{ storagePath: legacy.storagePath, mimeType: legacy.mimeType ?? "image/png", slideIndex: null, kind: legacy.kind }]
+    : [];
+  return selectPublishMedia(legacyRefs);
+}
+
+/** Sign every selected asset. An unreachable asset fails the publish instead of
+ *  silently publishing a different post. */
+async function signItemMedia(selection: MediaSelection): Promise<
+  | { ok: true; kind: MediaKind; imageUrls: string[]; videoUrl: string | null }
+  | { ok: false; reason: string; message: string }
+> {
+  const urls: string[] = [];
+  for (const path of selection.paths) {
+    const signed = await signedUrlForVisual(path);
+    if (!signed.ok) return { ok: false, reason: "missing_image_url", message: signed.message };
+    urls.push(signed.url);
+  }
+  if (selection.kind === "video") {
+    return { ok: true, kind: selection.kind, imageUrls: [], videoUrl: urls[0] ?? null };
+  }
+  return { ok: true, kind: selection.kind, imageUrls: urls, videoUrl: null };
+}
+
+/** Select + sign (used by paths with no pre-minted URL). */
+async function resolvePublishMedia(args: { workspaceId: string; contentItemId: string; format?: string }): Promise<
+  | { ok: true; kind: MediaKind; imageUrls: string[]; videoUrl: string | null }
+  | { ok: false; reason: string; message: string }
+> {
+  const selection = await selectItemMedia(args);
+  const error = mediaFormatError(args.format, selection);
+  if (error) return { ok: false, reason: "no_visual", message: error };
+  return signItemMedia(selection);
+}async function signedUrlForVisual(storagePath: string): Promise<SignedVisual> {
   let serviceClient: ReturnType<typeof createServiceClient>;
   try {
     serviceClient = createServiceClient();
@@ -664,25 +983,72 @@ async function flipToPublished(args: {
       })
       .where(eq(publishingJobs.id, args.jobId));
   }
-  await db
-    .update(contentVariants)
-    .set({ status: "published", updatedAt: new Date() })
-    .where(eq(contentVariants.id, args.variantId));
-  const allPublished = (
-    await db
-      .select({ status: contentVariants.status })
-      .from(contentVariants)
-      .where(eq(contentVariants.contentItemId, args.itemId))
-  ).every((v) => v.status === "published");
-  if (allPublished) {
-    await db
-      .update(contentItems)
-      .set({ status: "published", publishedAt: new Date(), updatedAt: new Date() })
-      .where(eq(contentItems.id, args.itemId));
+  // Save the provider ID first: even if the following transaction fails, a
+  // retry can see acceptance and must not create another external post.
+  await db.transaction(async tx => {
+    await tx.select({ id: contentItems.id }).from(contentItems)
+      .where(and(eq(contentItems.id, args.itemId), eq(contentItems.workspaceId, args.workspaceId))).for("update");
+    await tx
+      .update(contentVariants)
+      .set({ status: "published", updatedAt: new Date() })
+      .where(eq(contentVariants.id, args.variantId));
+    const allPublished = (
+      await tx
+        .select({ status: contentVariants.status })
+        .from(contentVariants)
+        .where(eq(contentVariants.contentItemId, args.itemId))
+    ).every((v) => v.status === "published");
+    if (allPublished) {
+      await tx
+        .update(contentItems)
+        .set({ status: "published", publishedAt: new Date(), updatedAt: new Date() })
+        .where(eq(contentItems.id, args.itemId));
+    }
+  });
+}
+
+async function recordBufferDelivery(args: Parameters<typeof flipToPublished>[0]) {
+  if (args.result.status === "sent") return flipToPublished(args);
+  if (!args.jobId) throw new Error("Buffer delivery must have a persisted job.");
+  const failed = args.result.status === "error";
+  await getDb().update(publishingJobs).set({ status: failed ? "failed" : "processing", providerPostId: args.providerPostId,
+    result: { ...args.result, awaitingDelivery: !failed }, lastError: failed ? "Buffer reported a delivery error. Check this post in Buffer." : null,
+    updatedAt: new Date() }).where(eq(publishingJobs.id, args.jobId));
+}
+
+/** Poll accepted Buffer posts; a poll can never create or resend a post. */
+export async function reconcileBufferDeliveries(): Promise<void> {
+  const db = getDb();
+  const pending = await db.select().from(publishingJobs).where(and(eq(publishingJobs.provider, "buffer"), eq(publishingJobs.status, "processing"), sql`${publishingJobs.providerPostId} is not null`)).limit(20);
+  for (const job of pending) {
+    try {
+      const [connection] = await db.select().from(platformConnections).where(and(eq(platformConnections.workspaceId, job.workspaceId), eq(platformConnections.platform, job.platform), eq(platformConnections.provider, "buffer")));
+      const envelope = connection?.encryptedToken ? decodeBufferTokenEnvelope(decryptToken(connection.encryptedToken) ?? "") : null;
+      if (!envelope) continue;
+      const response = await getBufferPostStatus(envelope.accessToken, job.providerPostId!);
+      if (!response.ok) {
+        await db.update(publishingJobs).set({ lastError: `Delivery status unavailable: ${response.message}`, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+        continue;
+      }
+      await recordBufferDelivery({ workspaceId: job.workspaceId, itemId: job.contentItemId, variantId: job.contentVariantId,
+        providerPostId: job.providerPostId!, jobId: job.id, result: { ...job.result as Record<string, unknown>, status: response.data.status } });
+    } catch (error) { console.error("[buffer] Delivery reconciliation failed", { jobId: job.id, error }); }
   }
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
+
+function deliveryIsUncertain(reason: string): boolean {
+  return ["network", "invalid_response", "unknown_outcome"].includes(reason);
+}
+
+async function recordUncertainDelivery(jobId: string, detail: string): Promise<PublishResult> {
+  const message = `The provider's delivery result could not be confirmed. Check the connected account before retrying to avoid a duplicate post. ${detail}`;
+  await getDb().update(publishingJobs).set({ status: "failed", lastError: message,
+    result: sql`coalesce(${publishingJobs.result}, '{}'::jsonb) || '{"reconciliationRequired":true}'::jsonb`, updatedAt: new Date() })
+    .where(eq(publishingJobs.id, jobId));
+  return { ok: false, reason: "unknown_outcome", message };
+}
 
 /**
  * Publish a content variant immediately to the connected provider for its
@@ -738,7 +1104,20 @@ export async function publishNow(args: {
   // so only synthetic rows are transitioned here.
   let syntheticJobId: string | undefined;
   if (!args.jobId) {
-    const [row] = await db
+    const claim = await db.transaction(async tx => {
+      const [currentItem] = await tx.select().from(contentItems)
+        .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId))).for("update");
+      if (!currentItem || !["approved", "scheduled"].includes(currentItem.status)) {
+        return { error: "The content changed. Review and approve it before publishing." };
+      }
+      const existing = await tx.select().from(publishingJobs).where(and(
+        eq(publishingJobs.workspaceId, args.workspaceId), eq(publishingJobs.contentVariantId, args.contentVariantId)));
+      if (existing.some(job => job.status === "processing" || job.providerPostId ||
+        (job.result as Record<string, unknown> | null)?.reconciliationRequired)) {
+        return { error: "This post is already processing, accepted, or awaiting delivery verification. Check its publishing history before trying again." };
+      }
+      await tx.delete(publishingJobs).where(and(eq(publishingJobs.contentVariantId, args.contentVariantId), eq(publishingJobs.status, "pending")));
+      const [row] = await tx
       .insert(publishingJobs)
       .values({
         workspaceId: args.workspaceId,
@@ -752,12 +1131,17 @@ export async function publishNow(args: {
         result: { connectionId: connRes.connectionId, channelRef: connRes.channelRef },
       })
       .returning();
-    if (!row) return { ok: false, reason: "db_error", message: "Failed to create the publishing job." };
-    syntheticJobId = row.id;
+      if (!row) throw new Error("Failed to create the publishing job.");
+      return { id: row.id };
+    });
+    if (claim.error) return { ok: false, reason: "publish_conflict", message: claim.error };
+    syntheticJobId = claim.id;
   }
   /** Terminal-failure for the synthetic row (lastError = the real message);
    *  a no-op on the worker path (attemptPublish owns that row's failure). */
   const fail = async (reason: string, message: string): Promise<PublishResult> => {
+    const jobId = args.jobId ?? syntheticJobId;
+    if (jobId && deliveryIsUncertain(reason)) return recordUncertainDelivery(jobId, message);
     if (syntheticJobId) {
       await db
         .update(publishingJobs)
@@ -786,22 +1170,36 @@ export async function publishNow(args: {
     });
     if (!validation.ok) return fail("channel_invalid", validation.message);
 
-    // Media: Buffer attaches ONE image asset (oneOf-compliant). A visual that
-    // cannot get a reachable signed URL fails the publish — same honesty as
-    // the Meta path; silently dropping it would change what the post IS.
-    let mediaUrl: string | null = null;
-    if (ctxRes.visual?.storagePath) {
-      if (args.mediaUrlOverride) {
-        // Pre-minted by the calling server action (user session) — use it
-        // verbatim; mediaAttached stays honest (it IS the variant's visual).
-        mediaUrl = args.mediaUrlOverride;
+    // Media: every ordered asset. Buffer accepts several image assets (a real
+    // carousel) or one video asset (reel); an unreachable asset fails the
+    // publish rather than silently changing what the post IS.
+    let mediaUrls: string[] = [];
+    let videoUrl: string | null = null;
+    let mediaKind: MediaKind = "none";
+    const mediaSelection = await selectItemMedia({ workspaceId: args.workspaceId, contentItemId: ctxRes.item.id, format: ctxRes.variant.format });
+    const formatError = mediaFormatError(ctxRes.variant.format, mediaSelection);
+    if (formatError) return fail("no_visual", formatError);
+    if (args.mediaUrlOverride && mediaSelection.kind !== "none" && mediaSelection.paths.length === 1) {
+      // Pre-minted by the calling server action (user session): a single
+      // pre-signed URL for the variant's visual (legacy Calendar path). It
+      // SKIPS minting entirely (works with no service key) and is ignored when
+      // the variant has no media, exactly as before.
+      mediaKind = mediaSelection.kind;
+      if (mediaKind === "video") {
+        videoUrl = args.mediaUrlOverride;
+        mediaUrls = [];
       } else {
-        const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-        if (!signed.ok) return fail("missing_image_url", signed.message);
-        mediaUrl = signed.url;
+        mediaUrls = [args.mediaUrlOverride];
+        videoUrl = null;
+        mediaKind = "image";
       }
-    }
-    // firstComment: the variant's platform-specific first comment wins; the
+    } else {
+      const media = await signItemMedia(mediaSelection);
+      if (!media.ok) return fail(media.reason, media.message);
+      mediaUrls = media.imageUrls;
+      videoUrl = media.videoUrl;
+      mediaKind = media.kind;
+    }    // firstComment: the variant's platform-specific first comment wins; the
     // item-level one is the fallback. Sent inside the per-channel metadata
     // (metadata.<service>.firstComment) — never as a separate top-level field.
     const firstComment = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
@@ -812,7 +1210,8 @@ export async function publishNow(args: {
       mode: "shareNow" as PublishMode,
       contentKind,
       service: bufferService,
-      mediaUrl,
+      mediaUrls,
+      videoUrl,
       firstComment,
     };
     let accessToken = connRes.accessToken;
@@ -850,6 +1249,7 @@ export async function publishNow(args: {
     let firstCommentSkipped = false;
     if (!res.ok && res.reason === "rejected" && firstComment !== null && isFirstCommentPlanError(res.message)) {
       const stripped = await createPostForBuffer(accessToken, { ...argsForCall, firstComment: null });
+      if (!stripped.ok && deliveryIsUncertain(stripped.reason)) return fail(stripped.reason, stripped.message);
       if (stripped.ok) {
         res = stripped;
         firstCommentSkipped = true;
@@ -871,9 +1271,12 @@ export async function publishNow(args: {
       connectionId: connRes.connectionId,
       channelRef: connRes.channelRef,
     };
-    if (mediaUrl) result.mediaAttached = true; // image asset sent with the mutation
-    if (firstCommentSkipped) result.firstCommentSkipped = true;
-    await flipToPublished({
+    if (mediaUrls.length > 0 || videoUrl) result.mediaAttached = true;
+    if (mediaKind !== "none") {
+      result.mediaKind = mediaKind;
+      result.mediaCount = mediaUrls.length + (videoUrl ? 1 : 0);
+    }    if (firstCommentSkipped) result.firstCommentSkipped = true;
+    await recordBufferDelivery({
       workspaceId: args.workspaceId,
       itemId: ctxRes.item.id,
       variantId: ctxRes.variant.id,
@@ -881,30 +1284,45 @@ export async function publishNow(args: {
       jobId: args.jobId ?? syntheticJobId,
       result,
     });
+    if (res.data.status === "error") return { ok: false, reason: "rejected", message: "Buffer reported a delivery error. Check this post in Buffer before retrying." };
     return {
       ok: true,
       provider: "buffer",
+      pendingDelivery: res.data.status !== "sent",
       mode: "shareNow",
       providerPostId: res.data.id,
       scheduledAt,
-      mediaAttached: mediaUrl !== null,
+      mediaAttached: mediaUrls.length > 0 || videoUrl !== null,
       ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
     };
   }
 
-  // Meta path — imageUrl must be a reachable signed URL when a visual exists.
-  let imageUrl: string | null = null;
-  if (ctxRes.visual?.storagePath) {
-    if (args.mediaUrlOverride) {
-      // Same pre-minted override as the Buffer path — skip minting entirely.
-      imageUrl = args.mediaUrlOverride;
+  // Meta path: an ordered image set (carousel) or one reel video URL. An
+  // unreachable asset fails the publish - never a silently different post.
+  let imageUrls: string[] = [];
+  let videoUrl: string | null = null;
+  let mediaKind: MediaKind = "none";
+  const mediaSelection = await selectItemMedia({ workspaceId: args.workspaceId, contentItemId: ctxRes.item.id, format: ctxRes.variant.format });
+  const formatError = mediaFormatError(ctxRes.variant.format, mediaSelection);
+  if (formatError) return fail("no_visual", formatError);
+  if (args.mediaUrlOverride && mediaSelection.kind !== "none" && mediaSelection.paths.length === 1) {
+    // Same pre-minted override as the Buffer path - skips minting entirely.
+    mediaKind = mediaSelection.kind;
+    if (mediaKind === "video") {
+      videoUrl = args.mediaUrlOverride;
+      imageUrls = [];
     } else {
-      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-      if (!signed.ok) return fail("missing_image_url", signed.message);
-      imageUrl = signed.url;
+      imageUrls = [args.mediaUrlOverride];
+      videoUrl = null;
+      mediaKind = "image";
     }
-  }
-  const [conn] = await db
+  } else {
+    const media = await signItemMedia(mediaSelection);
+    if (!media.ok) return fail(media.reason, media.message);
+    imageUrls = media.imageUrls;
+    videoUrl = media.videoUrl;
+    mediaKind = media.kind;
+  }  const [conn] = await db
     .select()
     .from(platformConnections)
     .where(and(
@@ -919,25 +1337,87 @@ export async function publishNow(args: {
     igUserId: connMeta.igUserId ?? null,
     platform: ctxRes.variant.platform,
     message,
-    imageUrl,
+    imageUrl: imageUrls[0] ?? null,
+    imageUrls,
+    videoUrl,
+    contentKind: deriveContentKind(ctxRes.variant.format),
   });
-  if (!result.ok) return fail(result.reason, result.message);
+  if (!result.ok) {
+    // Meta auth/permission failures create NOTHING on the platform, so this is
+    // the one failure class where a later attempt may safely go through a
+    // healthy Buffer connection. Record the real health on the Meta row so
+    // provider routing (resolvePublishProviderForPlatform) selects Buffer for
+    // the next attempt (user Retry / worker requeue) instead of retrying a dead
+    // token. No cross-provider publish happens inside this call, so a post can
+    // never be published twice.
+    if (/expired|invalidated|reconnect|permission/i.test(result.message)) {
+      await db
+        .update(platformConnections)
+        .set({
+          status: /permission/i.test(result.message) ? "error" : "expired",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(platformConnections.workspaceId, args.workspaceId),
+            eq(platformConnections.platform, ctxRes.variant.platform),
+            eq(platformConnections.provider, "meta"),
+          ),
+        );
+    }
+    return fail(result.reason, result.message);
+  }
   const scheduledAt = new Date();
+  const firstCommentText = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
+  const hasFirstComment = typeof firstCommentText === "string" && firstCommentText.trim().length > 0;
+  const commentJobId = args.jobId ?? syntheticJobId;
   await flipToPublished({
     workspaceId: args.workspaceId,
     itemId: ctxRes.item.id,
     variantId: ctxRes.variant.id,
     providerPostId: result.postId,
-    jobId: args.jobId ?? syntheticJobId,
-    result: { postId: result.postId, permalink: result.permalink, connectionId: connRes.connectionId, channelRef: connRes.channelRef },
+    jobId: commentJobId,
+    result: {
+      postId: result.postId,
+      permalink: result.permalink,
+      connectionId: connRes.connectionId,
+      channelRef: connRes.channelRef,
+      // The main post is terminal-success; the comment is a SEPARATE step with its
+      // own lifecycle, starting at "pending" so a crash between the post and the
+      // comment stays resumable (retryFailedPublish's comment-only path).
+      ...(hasFirstComment && commentJobId
+        ? {
+            comment: {
+              status: "pending",
+              providerCommentId: null,
+              error: null,
+              attemptedAt: null,
+              publishedAt: null,
+            },
+          }
+        : {}),
+    },
   });
+  // The post is published at this point: a comment failure is recorded on the
+  // comment state and NEVER un-publishes the post.
+  const comment = hasFirstComment && commentJobId
+    ? await publishMetaFirstCommentOnly({
+        workspaceId: args.workspaceId,
+        jobId: commentJobId,
+        platform: ctxRes.variant.platform,
+        providerPostId: result.postId,
+        firstComment: firstCommentText,
+        previous: null,
+      })
+    : undefined;
   return {
     ok: true,
     provider: "meta",
     mode: "shareNow",
     providerPostId: result.postId,
+    ...(comment ? { comment } : {}),
     scheduledAt,
-    mediaAttached: imageUrl ? true : false,
+    mediaAttached: imageUrls.length > 0 || videoUrl !== null,
   };
 }
 
@@ -957,13 +1437,12 @@ export async function schedulePost(args: {
   contentVariantId: string;
   platform: ContentPlatform;
   scheduledAt: Date;
+  autoTiming?: TimingPolicy & { times: string[]; source: string };
 }): Promise<ScheduleResult> {
   const db = getDb();
-  // Past-time guard lives in `scheduleItem` (calendar-day granularity in the
-  // workspace timezone — same-day bookings at an earlier wall-clock stay
-  // allowed). `schedulePost` itself just enforces a strict-future invariant;
-  // callers that want calendar-day semantics must pass `args.scheduledAt`
-  // through their own guard.
+  if (!Number.isFinite(args.scheduledAt.getTime()) || args.scheduledAt.getTime() <= Date.now()) {
+    return { ok: false, reason: "invalid_time", message: "Choose a valid time in the future." };
+  }
   const ctxRes = await loadPublishContext({
     workspaceId: args.workspaceId,
     contentItemId: args.contentItemId,
@@ -981,63 +1460,89 @@ export async function schedulePost(args: {
   if (!connRes.ok) return { ok: false, reason: connRes.reason, message: connRes.message };
   const provider: PublishProvider = connRes.provider;
 
-  // Cancel any pre-existing pending job for this variant — reschedule
-  // semantics, matching scheduleItem.
-  await db
-    .delete(publishingJobs)
-    .where(and(eq(publishingJobs.contentVariantId, args.contentVariantId), eq(publishingJobs.status, "pending")));
+  return db.transaction(async tx => {
+    if (args.autoTiming) {
+      const [autoSettings] = await tx.select().from(settings).where(and(eq(settings.workspaceId, args.workspaceId), eq(settings.key, "autopilot"))).for("update");
+      const config = autopilotSettingsSchema.safeParse(autoSettings?.value);
+      if (!config.success || !config.data.enabled || config.data.requireApproval || !config.data.autoSchedule) return { ok: false as const, reason: "not_approved", message: "Auto Run scheduling was disabled or now requires approval." };
+    }
+    // Serialize Calendar writers so overlapping Auto Runs see committed slots.
+    await tx.select({ id: workspaces.id }).from(workspaces).where(eq(workspaces.id, args.workspaceId)).for("update");
+    if (args.autoTiming) {
+      const calendar = await tx.select({ scheduledAt: publishingJobs.scheduledAt, contentItemId: publishingJobs.contentItemId }).from(publishingJobs)
+        .where(and(eq(publishingJobs.workspaceId, args.workspaceId), eq(publishingJobs.platform, args.platform),
+          sql`${publishingJobs.status} in ('pending', 'processing', 'published')`, sql`${publishingJobs.contentItemId} <> ${args.contentItemId}`,
+          sql`${publishingJobs.scheduledAt} >= now() - interval '1 day'`));
+      args = { ...args, scheduledAt: choosePostingSlot(args.autoTiming, args.autoTiming.times, calendar.map(j => new Date(j.scheduledAt))) };
+    }
+    const [item] = await tx.select().from(contentItems).where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId))).for("update");
+    const [variant] = await tx.select().from(contentVariants).where(and(eq(contentVariants.id, args.contentVariantId), eq(contentVariants.contentItemId, args.contentItemId), eq(contentVariants.workspaceId, args.workspaceId)));
+    if (!item || !variant || !["approved", "scheduled"].includes(item.status) || !["approved", "scheduled"].includes(variant.status) || variant.platform !== args.platform) {
+      return { ok: false as const, reason: "not_publishable", message: "The content changed. Review and approve it before scheduling." };
+    }
+    const active = await tx.select().from(publishingJobs).where(eq(publishingJobs.contentVariantId, args.contentVariantId));
+    if (active.some(job => job.status === "processing" || job.providerPostId || (job.result as Record<string, unknown> | null)?.reconciliationRequired)) {
+      return { ok: false as const, reason: "processing", message: "This post is already accepted or has an unconfirmed publishing result. Verify delivery before rescheduling." };
+    }
+    // Cancel any pre-existing pending job for this variant — reschedule
+    // semantics, matching scheduleItem.
+    await tx
+      .delete(publishingJobs)
+      .where(and(eq(publishingJobs.contentVariantId, args.contentVariantId), eq(publishingJobs.status, "pending")));
 
-  const [job] = await db
-    .insert(publishingJobs)
-    .values({
-      workspaceId: args.workspaceId,
-      contentItemId: args.contentItemId,
-      contentVariantId: args.contentVariantId,
-      platform: args.platform,
-      provider,
-      scheduledAt: args.scheduledAt,
-      status: "pending",
-    })
-    .returning();
-  if (!job) return { ok: false, reason: "db_error", message: "Failed to create the publishing job." };
+    const [job] = await tx
+      .insert(publishingJobs)
+      .values({
+        workspaceId: args.workspaceId,
+        contentItemId: args.contentItemId,
+        contentVariantId: args.contentVariantId,
+        platform: args.platform,
+        provider,
+        scheduledAt: args.scheduledAt,
+        status: "pending",
+        ...(args.autoTiming ? { result: { schedulingSource: args.autoTiming.source, timezone: args.autoTiming.timezone, candidateTimes: args.autoTiming.times } } : {}),
+      })
+      .returning();
+    if (!job) throw new Error("Failed to create the publishing job.");
 
-  await db
-    .update(contentVariants)
-    .set({ status: "scheduled", updatedAt: new Date() })
-    .where(eq(contentVariants.id, args.contentVariantId));
+    await tx
+      .update(contentVariants)
+      .set({ status: "scheduled", updatedAt: new Date() })
+      .where(eq(contentVariants.id, args.contentVariantId));
 
-  // Partial-schedule visibility: the calendar grid keys off
-  // contentItems.scheduledAt, so it must be set as soon as ANY variant of the
-  // item is scheduled — the MIN over the item's still-pending publish jobs —
-  // not only when every variant lands. (Live defect: a facebook variant
-  // `scheduled` next to an instagram `approved` left item.scheduledAt NULL
-  // and the item invisible on the grid.) item.status still flips to
-  // `scheduled` only when EVERY variant is scheduled (current rule).
-  const allScheduled = (
-    await db
-      .select({ status: contentVariants.status })
-      .from(contentVariants)
-      .where(eq(contentVariants.contentItemId, args.contentItemId))
-  ).every((v) => v.status === "scheduled");
-  const pendingJobs = await db
-    .select({ scheduledAt: publishingJobs.scheduledAt })
-    .from(publishingJobs)
-    .where(and(eq(publishingJobs.contentItemId, args.contentItemId), eq(publishingJobs.status, "pending")));
-  const pendingTimes = pendingJobs
-    .map((j) => new Date(j.scheduledAt).getTime())
-    .filter((t) => !Number.isNaN(t));
-  // The job inserted above is pending, so pendingTimes is non-empty in
-  // practice; args.scheduledAt is the honest fallback for this variant.
-  const earliestScheduledAt = pendingTimes.length > 0 ? new Date(Math.min(...pendingTimes)) : args.scheduledAt;
-  await db
-    .update(contentItems)
-    .set({
-      ...(allScheduled ? { status: "scheduled" as const } : {}),
-      scheduledAt: earliestScheduledAt,
-      updatedAt: new Date(),
-    })
-    .where(eq(contentItems.id, args.contentItemId));
-  return { ok: true, jobId: job.id, scheduledAt: args.scheduledAt, provider, channelRef: connRes.channelRef };
+    // Partial-schedule visibility: the calendar grid keys off
+    // contentItems.scheduledAt, so it must be set as soon as ANY variant of the
+    // item is scheduled — the MIN over the item's still-pending publish jobs —
+    // not only when every variant lands. (Live defect: a facebook variant
+    // `scheduled` next to an instagram `approved` left item.scheduledAt NULL
+    // and the item invisible on the grid.) item.status still flips to
+    // `scheduled` only when EVERY variant is scheduled (current rule).
+    const allScheduled = (
+      await tx
+        .select({ status: contentVariants.status })
+        .from(contentVariants)
+        .where(eq(contentVariants.contentItemId, args.contentItemId))
+    ).every((v) => v.status === "scheduled");
+    const pendingJobs = await tx
+      .select({ scheduledAt: publishingJobs.scheduledAt })
+      .from(publishingJobs)
+      .where(and(eq(publishingJobs.contentItemId, args.contentItemId), eq(publishingJobs.status, "pending")));
+    const pendingTimes = pendingJobs
+      .map((j) => new Date(j.scheduledAt).getTime())
+      .filter((t) => !Number.isNaN(t));
+    // The job inserted above is pending, so pendingTimes is non-empty in
+    // practice; args.scheduledAt is the honest fallback for this variant.
+    const earliestScheduledAt = pendingTimes.length > 0 ? new Date(Math.min(...pendingTimes)) : args.scheduledAt;
+    await tx
+      .update(contentItems)
+      .set({
+        ...(allScheduled ? { status: "scheduled" as const } : {}),
+        scheduledAt: earliestScheduledAt,
+        updatedAt: new Date(),
+      })
+      .where(eq(contentItems.id, args.contentItemId));
+    return { ok: true as const, jobId: job.id, scheduledAt: args.scheduledAt, provider, channelRef: connRes.channelRef };
+  });
 }
 
 /**
@@ -1069,22 +1574,31 @@ export async function retryFailedPublish(args: {
     .where(and(eq(publishingJobs.id, args.jobId), eq(publishingJobs.workspaceId, args.workspaceId)));
   if (!job) return { ok: false, reason: "not_found", message: "Publishing job not found." };
 
-  // Idempotency guard: providerPostId set means the platform accepted the
-  // post on a prior attempt — refuse to re-fire.
-  if (job.providerPostId) {
+  // Idempotency guard: providerPostId set means the platform accepted the post on
+  // a prior attempt, so the MAIN post must never be re-created. The one exception
+  // is a first comment that is still pending/publishing/failed: it is a separate
+  // request, so it is retried on its own (comment-only) below without touching
+  // the post. This is also the recovery path for a restart between the two.
+  const storedComment = readCommentState(job.result);
+  const commentOnlyRetry = Boolean(job.providerPostId) && commentNeedsPublish(storedComment);
+  if (job.providerPostId && !commentOnlyRetry) {
     return { ok: false, reason: "already_published", message: "This post was already accepted by the platform." };
   }
-  if (job.status === "published") {
+  if (job.status === "published" && !commentOnlyRetry) {
     return { ok: false, reason: "already_published", message: "This job is already marked as published." };
   }
   if (job.status === "cancelled") {
     return { ok: false, reason: "cancelled", message: "This job was cancelled." };
+  }
+  if ((job.result as Record<string, unknown> | null)?.reconciliationRequired) {
+    return { ok: false, reason: "unknown_outcome", message: "The previous attempt has an unconfirmed delivery outcome. Verify it on the provider before retrying." };
   }
 
   const ctxRes = await loadPublishContext({
     workspaceId: args.workspaceId,
     contentItemId: job.contentItemId,
     contentVariantId: job.contentVariantId,
+    allowPublished: commentOnlyRetry,
   });
   if (!ctxRes.ok) {
     await db
@@ -1092,6 +1606,30 @@ export async function retryFailedPublish(args: {
       .set({ status: "failed", lastError: ctxRes.message, updatedAt: new Date() })
       .where(eq(publishingJobs.id, job.id));
     return { ok: false, reason: ctxRes.reason, message: ctxRes.message };
+  }
+
+  if (commentOnlyRetry) {
+    // COMMENT-ONLY retry: the main post is already accepted (providerPostId is its
+    // idempotency key and is left untouched), so only the first comment is
+    // attempted. Nothing here can republish the post.
+    const retryCommentText = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
+    const comment = await publishMetaFirstCommentOnly({
+      workspaceId: args.workspaceId,
+      jobId: job.id,
+      platform: ctxRes.variant.platform,
+      providerPostId: job.providerPostId as string,
+      firstComment: retryCommentText,
+      previous: storedComment,
+    });
+    return {
+      ok: true,
+      provider: job.provider === "buffer" ? "buffer" : "meta",
+      mode: "shareNow",
+      providerPostId: job.providerPostId as string,
+      scheduledAt: new Date(),
+      mediaAttached: false,
+      comment,
+    };
   }
 
   // Transient retryability: Buffer reasons network/rate_limited/invalid_response
@@ -1146,18 +1684,21 @@ export async function retryFailedPublish(args: {
       await db.update(publishingJobs).set({ status: "failed", lastError: validation.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
       return { ok: false, reason: "channel_invalid", message: validation.message };
     }
-    // Media: same honesty as publishNow — an unreachable visual fails the
-    // retry instead of silently publishing a different post.
-    let mediaUrl: string | null = null;
-    if (ctxRes.visual?.storagePath) {
-      const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-      if (!signed.ok) {
-        await db.update(publishingJobs).set({ status: "failed", lastError: signed.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
-        return { ok: false, reason: "missing_image_url", message: signed.message };
+    // Media: same honesty as publishNow - every ordered asset is sent, and an
+    // unreachable one fails the retry instead of publishing something else.
+    let mediaUrls: string[] = [];
+    let videoUrl: string | null = null;
+    let mediaKind: MediaKind = "none";
+    {
+      const media = await resolvePublishMedia({ workspaceId: args.workspaceId, contentItemId: ctxRes.item.id, format: ctxRes.variant.format });
+      if (!media.ok) {
+        await db.update(publishingJobs).set({ status: "failed", lastError: media.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+        return { ok: false, reason: media.reason, message: media.message };
       }
-      mediaUrl = signed.url;
-    }
-    let attempt = 0;
+      mediaUrls = media.imageUrls;
+      videoUrl = media.videoUrl;
+      mediaKind = media.kind;
+    }    let attempt = 0;
     let lastReason = "unknown";
     let lastMessage = "";
     const bufferService = platformToBufferService(connRes.platform);
@@ -1171,7 +1712,8 @@ export async function retryFailedPublish(args: {
         mode: "shareNow" as PublishMode, // retry fires NOW
         contentKind,
         service: bufferService,
-        mediaUrl,
+        mediaUrls,
+        videoUrl,
         firstComment,
       };
       let res = await createPostForBuffer(accessToken, callArgs);
@@ -1194,6 +1736,7 @@ export async function retryFailedPublish(args: {
       let firstCommentSkipped = false;
       if (!res.ok && res.reason === "rejected" && firstComment !== null && isFirstCommentPlanError(res.message)) {
         const stripped = await createPostForBuffer(accessToken, { ...callArgs, firstComment: null });
+        if (!stripped.ok && deliveryIsUncertain(stripped.reason)) return recordUncertainDelivery(job.id, stripped.message);
         if (stripped.ok) {
           res = stripped;
           firstCommentSkipped = true;
@@ -1212,9 +1755,13 @@ export async function retryFailedPublish(args: {
           connectionId: connRes.connectionId,
           channelRef: connRes.channelRef,
         };
-        if (mediaUrl) result.mediaAttached = true;
+        if (mediaUrls.length > 0 || videoUrl) result.mediaAttached = true;
+        if (mediaKind !== "none") {
+          result.mediaKind = mediaKind;
+          result.mediaCount = mediaUrls.length + (videoUrl ? 1 : 0);
+        }
         if (firstCommentSkipped) result.firstCommentSkipped = true;
-        await flipToPublished({
+        await recordBufferDelivery({
           workspaceId: args.workspaceId,
           itemId: ctxRes.item.id,
           variantId: ctxRes.variant.id,
@@ -1222,20 +1769,23 @@ export async function retryFailedPublish(args: {
           jobId: job.id,
           result,
         });
+        if (res.data.status === "error") return { ok: false, reason: "rejected", message: "Buffer reported a delivery error. Check this post in Buffer before retrying." };
         return {
           ok: true,
           provider: "buffer",
+          pendingDelivery: res.data.status !== "sent",
           mode: "shareNow",
           providerPostId: res.data.id,
           scheduledAt,
-          mediaAttached: mediaUrl !== null,
+          mediaAttached: mediaUrls.length > 0 || videoUrl !== null,
           ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
         };
       }
       lastReason = res.reason;
       lastMessage = res.message;
+      if (deliveryIsUncertain(res.reason)) return recordUncertainDelivery(job.id, res.message);
       if (res.reason === "auth") break; // permanent: refresh+retry already exhausted
-      const retryable = res.reason === "network" || res.reason === "rate_limited" || res.reason === "invalid_response";
+      const retryable = res.reason === "rate_limited";
       if (!retryable) break;
       // Backoff: exponential (base * 2^(attempt-1)).
       const sleepMs = baseBackoffMs * Math.pow(2, attempt - 1);
@@ -1266,17 +1816,18 @@ export async function retryFailedPublish(args: {
     return { ok: false, reason, message: lastMessage };
   }
 
-  // Meta retry path
-  let imageUrl: string | null = null;
-  if (ctxRes.visual?.storagePath) {
-    const signed = await signedUrlForVisual(ctxRes.visual.storagePath);
-    if (!signed.ok) {
-      await db.update(publishingJobs).set({ status: "failed", lastError: signed.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
-      return { ok: false, reason: "missing_image_url", message: signed.message };
+  // Meta retry path: same ordered media resolution as publishNow.
+  let imageUrls: string[] = [];
+  let videoUrl: string | null = null;
+  {
+    const media = await resolvePublishMedia({ workspaceId: args.workspaceId, contentItemId: ctxRes.item.id, format: ctxRes.variant.format });
+    if (!media.ok) {
+      await db.update(publishingJobs).set({ status: "failed", lastError: media.message, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+      return { ok: false, reason: media.reason, message: media.message };
     }
-    imageUrl = signed.url;
-  }
-  const [conn] = await db
+    imageUrls = media.imageUrls;
+    videoUrl = media.videoUrl;
+  }  const [conn] = await db
     .select()
     .from(platformConnections)
     .where(and(
@@ -1291,30 +1842,61 @@ export async function retryFailedPublish(args: {
     igUserId: connMeta.igUserId ?? null,
     platform: ctxRes.variant.platform,
     message,
-    imageUrl,
+    imageUrl: imageUrls[0] ?? null,
+    imageUrls,
+    videoUrl,
+    contentKind: deriveContentKind(ctxRes.variant.format),
   });
   if (!result.ok) {
+    if (deliveryIsUncertain(result.reason)) return recordUncertainDelivery(job.id, result.message);
     await db
       .update(publishingJobs)
       .set({ status: "failed", lastError: result.message, updatedAt: new Date() })
       .where(eq(publishingJobs.id, job.id));
     return { ok: false, reason: result.reason, message: result.message };
   }
+  const retryCommentText = ctxRes.variant.firstComment ?? ctxRes.item.firstComment ?? null;
+  const retryHasComment = typeof retryCommentText === "string" && retryCommentText.trim().length > 0;
   await flipToPublished({
     workspaceId: args.workspaceId,
     itemId: ctxRes.item.id,
     variantId: ctxRes.variant.id,
     providerPostId: result.postId,
     jobId: job.id,
-    result: { postId: result.postId, permalink: result.permalink },
+    result: {
+      postId: result.postId,
+      permalink: result.permalink,
+      ...(retryHasComment
+        ? {
+            comment: {
+              status: "pending",
+              providerCommentId: null,
+              error: null,
+              attemptedAt: null,
+              publishedAt: null,
+            },
+          }
+        : {}),
+    },
   });
+  const comment = retryHasComment
+    ? await publishMetaFirstCommentOnly({
+        workspaceId: args.workspaceId,
+        jobId: job.id,
+        platform: ctxRes.variant.platform,
+        providerPostId: result.postId,
+        firstComment: retryCommentText,
+        previous: null,
+      })
+    : undefined;
   return {
     ok: true,
     provider: "meta",
     mode: "shareNow",
     providerPostId: result.postId,
+    ...(comment ? { comment } : {}),
     scheduledAt: new Date(),
-    mediaAttached: imageUrl ? true : false,
+    mediaAttached: imageUrls.length > 0 || videoUrl !== null,
   };
 }
 

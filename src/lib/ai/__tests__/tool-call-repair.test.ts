@@ -5,7 +5,7 @@ import type {
   LanguageModelV2CallOptions,
   LanguageModelV2StreamPart,
 } from "@ai-sdk/provider";
-import { agentSteps, brands, contentItems } from "@/db/schema";
+import { agentRuns, agentSteps, brands, contentItems } from "@/db/schema";
 import { buildAgentTools } from "@/lib/ai/tools";
 import { repairWrappedToolCall } from "@/lib/ai/stream-errors";
 
@@ -28,6 +28,7 @@ import { repairWrappedToolCall } from "@/lib/ai/stream-errors";
 // follow-up step → final text — runs hermetically.
 
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
+vi.mock("@/lib/workspace", () => ({ getMembership: vi.fn(async () => ({ role: "editor" })) }));
 
 // create_content's generation backend is mocked out: the contract under test
 // is the tool-call validation/repair path and the agent's continuation after
@@ -55,7 +56,7 @@ function makeFakeDb(stepRows: StepRow[]) {
   const db = {
     select: () => ({
       from: (table: unknown) => {
-        const data: unknown[] = table === brands ? brandRows : table === contentItems ? contentRows : [];
+        const data: unknown[] = table === agentRuns ? [{ status: "running" }] : table === brands ? brandRows : table === contentItems ? contentRows : [];
         const thenable = Promise.resolve(data) as Promise<unknown[]> & {
           where: () => Promise<unknown[]>;
           orderBy: () => Promise<unknown[]>;

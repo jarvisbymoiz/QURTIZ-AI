@@ -29,7 +29,7 @@ export type ScheduleOutcome =
  * deliberately excluded: they are already live and must never receive a new
  * publish job or be flipped back to `scheduled` (that would double-post).
  */
-const SCHEDULABLE_VARIANT_STATUSES = ["ready_for_review", "approved", "scheduled"] as const;
+const SCHEDULABLE_VARIANT_STATUSES = ["approved", "scheduled"] as const;
 
 /**
  * Schedule a content item: creates one publishing job per variant and flips
@@ -71,15 +71,18 @@ export async function scheduleItem(args: {
     .from(contentItems)
     .where(and(eq(contentItems.id, args.itemId), eq(contentItems.workspaceId, args.workspaceId)));
   if (!item) return { ok: false, reason: "not_found", message: "Content item not found." };
-  if (!["ready_for_review", "approved", "scheduled"].includes(item.status)) {
+  if (!["approved", "scheduled"].includes(item.status)) {
     return {
       ok: false,
       reason: "not_reviewable",
-      message: "Content must be in Ready for Review or Approved before scheduling (review it first).",
+      message: "Approve this content before scheduling it.",
     };
   }
 
   const scheduledAt = args.timeStr ? parseZonedDateTime(args.dateIso, timeStr, args.timezone) : defaultSlotFor(args.dateIso, args.timezone);
+  if (!Number.isFinite(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now()) {
+    return { ok: false, reason: "past_date", message: "Choose a valid future date and time." };
+  }
 
   const variants = await db
     .select({ id: contentVariants.id, platform: contentVariants.platform, status: contentVariants.status })

@@ -1,7 +1,7 @@
 ﻿"use server";
 
 import { revalidatePath } from "next/cache";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { generateText } from "ai";
 import { getDb } from "@/db";
@@ -58,8 +58,9 @@ export async function removeCompetitorAction(id: string): Promise<ActionResult> 
 }
 
 export async function refreshCompetitorAction(id: string): Promise<ActionResult> {
-  const ctx = await getActiveContext("brand:read");
+  const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+  if (!rateLimit(`competitor:${ctx.workspaceId}`, 6, 10 * 60_000).allowed) return { ok: false, error: "Competitor refresh limit reached. Try again later." };
 
   const db = getDb();
   const rows = await db
@@ -153,6 +154,14 @@ export async function updateAutopilotSettingsAction(input: {
   nicheFocus?: string;
   maxPostsPerRun: number;
   runTimes?: string[];
+  platforms?: ("facebook" | "instagram")[];
+  formats?: ("single_image" | "carousel" | "reel" | "story" | "text_post")[];
+  autoSchedule?: boolean;
+  generateImages?: boolean;
+  runDays?: number[];
+  fallbackTimes?: string[];
+  minGapMinutes?: number;
+  maxPostsPerDay?: number;
 }): Promise<ActionResult> {
   const ctx = await getActiveContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
@@ -174,14 +183,16 @@ export async function updateAutopilotSettingsAction(input: {
   if (existing.length > 0) {
     await db
       .update(settings)
-      .set({ value: parsed.data as unknown as Record<string, unknown>, updatedAt: new Date() })
+      .set({ value: sql`coalesce(${settings.value}, '{}'::jsonb) || ${JSON.stringify(parsed.data)}::jsonb || case when ${settings.value}->>'enabled' is distinct from 'true' and ${parsed.data.enabled} then jsonb_build_object('enabledSince', ${new Date().toISOString()}::text) else '{}'::jsonb end`, updatedAt: new Date() })
       .where(and(eq(settings.workspaceId, ctx.workspaceId), eq(settings.key, "autopilot")));
   } else {
     await db.insert(settings).values({
       workspaceId: ctx.workspaceId,
       key: "autopilot",
-      value: parsed.data as unknown as Record<string, unknown>,
-    });
+      value: { ...parsed.data, enabledSince: new Date().toISOString() },
+    }).onConflictDoUpdate({ target: [settings.workspaceId, settings.key], set: {
+      value: sql`coalesce(${settings.value}, '{}'::jsonb) || ${JSON.stringify(parsed.data)}::jsonb || case when ${settings.value}->>'enabled' is distinct from 'true' and ${parsed.data.enabled} then jsonb_build_object('enabledSince', ${new Date().toISOString()}::text) else '{}'::jsonb end`, updatedAt: new Date(),
+    } });
   }
 
   revalidatePath("/settings");

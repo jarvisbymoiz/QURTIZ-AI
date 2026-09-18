@@ -577,7 +577,7 @@ export type BufferPostType = "post" | "story" | "reel";
  * the legacy top-level `metadata: { type }` shape is INVALID).
  */
 export const CREATE_POST_MUTATION =
-  "mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }";
+  "mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id text dueAt status } } ... on MutationError { message } } }";
 
 /**
  * The exact variables JSON sent with CREATE_POST_MUTATION. Enums are JSON
@@ -594,10 +594,18 @@ export type CreatePostInputVariables = {
     mode: BufferShareModeValue;
     schedulingType: BufferSchedulingTypeValue;
     needsApproval: boolean;
-    assets: Array<{ image: { url: string } }>;
+    /** oneOf AssetInput per entry, in publish order: a carousel sends several
+     *  image assets, a reel sends exactly one video asset. */
+    assets: Array<{ image: { url: string } } | { video: { url: string } }>;
     metadata?:
       | { facebook: { type: BufferPostTypeFacebookValue; firstComment?: string } }
-      | { instagram: { firstComment?: string } };
+      | {
+          instagram: {
+            type: BufferPostTypeInstagramValue;
+            shouldShareToFeed: boolean;
+            firstComment?: string;
+          };
+        };
     /** ONLY present for customScheduled — NEVER for shareNow. */
     dueAt?: string;
     aiAssisted?: boolean;
@@ -618,12 +626,18 @@ export type CreatePostInputVariables = {
  * stale caller or JS consumer must fail HERE, before the wire, not with an
  * opaque Buffer enum error).
  *
- * Instagram metadata schema:
- *   - `InstagramPostMetadataInput` does NOT define a `type` field (that is
- *     Facebook-only).
- *   - `firstComment` is supported when present; if no firstComment is
- *     provided, `metadata.instagram` is omitted to avoid sending unsupported
- *     or empty input fields to Buffer's GraphQL server.
+ * Instagram metadata schema (verified against Buffer's CURRENT public schema,
+ * developers.buffer.com/types/InstagramPostMetadataInput.html):
+ *   - `type` (PostType!) and `shouldShareToFeed` (Boolean!) are REQUIRED on
+ *     `InstagramPostMetadataInput`, so Instagram metadata must ALWAYS carry
+ *     both. Omitting either makes Buffer reject the WHOLE mutation with
+ *     'Field "shouldShareToFeed" of required type "Boolean!" was not provided'
+ *     and 'Field "type" of required type "PostType!" was not provided'.
+ *     The canonical documented payload is
+ *     metadata: { instagram: { type: post, shouldShareToFeed: true } }.
+ *   - `firstComment` (String) IS supported on Instagram and is sent whenever it
+ *     is non-empty. It is the only optional field the publish service may strip
+ *     and retry without (see lib/publishing/service.ts).
  */
 export function buildCreatePostVariables(args: {
   channelId: string;
@@ -634,6 +648,10 @@ export function buildCreatePostVariables(args: {
   dueAt?: string;
   firstComment?: string | null;
   mediaUrl?: string | null;
+  /** Ordered image URLs for a carousel (preferred when present). */
+  mediaUrls?: string[] | null;
+  /** Reel video URL - sent as a video asset, never as an image. */
+  videoUrl?: string | null;
   aiAssisted?: boolean;
 }): CreatePostInputVariables {
   if (args.contentKind !== "post" && args.contentKind !== "reel" && args.contentKind !== "story") {
@@ -649,9 +667,20 @@ export function buildCreatePostVariables(args: {
   if (args.service === "facebook") {
     metadata = { facebook: { type: args.contentKind, ...firstComment } };
   } else if (args.service === "instagram") {
-    if (firstComment.firstComment) {
-      metadata = { instagram: { firstComment: firstComment.firstComment } };
-    }
+    // Buffer's CURRENT InstagramPostMetadataInput REQUIRES `type` (PostType!)
+    // and `shouldShareToFeed` (Boolean!) - omitting either rejects the whole
+    // mutation. `type` is the channel-specific post kind; stories never appear
+    // in the feed, so shouldShareToFeed is false for them and true otherwise.
+    // `firstComment` stays the only optional field.
+    const instagramType: BufferPostTypeInstagramValue =
+      args.contentKind === "story" ? "story" : args.contentKind === "reel" ? "reel" : "post";
+    metadata = {
+      instagram: {
+        type: instagramType,
+        shouldShareToFeed: instagramType !== "story",
+        ...(firstComment.firstComment ? { firstComment: firstComment.firstComment } : {}),
+      },
+    };
   }
   const input: CreatePostInputVariables["input"] = {
     channelId: args.channelId,
@@ -662,7 +691,13 @@ export function buildCreatePostVariables(args: {
     // oneOf AssetInput: exactly one key per asset. Text-only → []; a visual
     // attaches as a single image asset keyed by url (the one unverified
     // subshape — Buffer field errors surface verbatim if it complains).
-    assets: args.mediaUrl ? [{ image: { url: args.mediaUrl } }] : [],
+    assets: args.videoUrl
+      ? [{ video: { url: args.videoUrl } }]
+      : args.mediaUrls && args.mediaUrls.length > 0
+        ? args.mediaUrls.map((url) => ({ image: { url } }))
+        : args.mediaUrl
+          ? [{ image: { url: args.mediaUrl } }]
+          : [],
     ...(metadata ? { metadata } : {}),
   };
   if (args.mode === "customScheduled") {
@@ -781,6 +816,10 @@ export async function createPostForBuffer(
     service: BufferService;
     dueAt?: Date;
     mediaUrl?: string | null;
+    /** Ordered carousel image URLs (Buffer accepts several image assets). */
+    mediaUrls?: string[] | null;
+    /** Reel video URL -> one video asset. */
+    videoUrl?: string | null;
     firstComment?: string | null;
     aiAssisted?: boolean;
   },
@@ -795,10 +834,12 @@ export async function createPostForBuffer(
     dueAt: dueAtIso,
     firstComment: args.firstComment ?? null,
     mediaUrl: args.mediaUrl ?? null,
+    mediaUrls: args.mediaUrls ?? null,
+    videoUrl: args.videoUrl ?? null,
     aiAssisted: args.aiAssisted,
   });
   const res = await bufferGraphQL<{
-    createPost?: { post?: { id?: unknown; dueAt?: unknown } | null; message?: unknown } | null;
+    createPost?: { post?: { id?: unknown; dueAt?: unknown; status?: unknown } | null; message?: unknown } | null;
   }>(accessToken, "CreatePost", CREATE_POST_MUTATION, variables);
   if (!res.ok) return res;
   const payload = res.data.createPost;
@@ -813,7 +854,17 @@ export async function createPostForBuffer(
     payload?.post && typeof payload.post.dueAt === "string" && payload.post.dueAt.length > 0
       ? payload.post.dueAt
       : (dueAtIso ?? null);
-  return { ok: true, data: { id, status: args.mode === "shareNow" ? "sent" : "queued", dueAt } };
+  const status = typeof payload?.post?.status === "string" ? payload.post.status : "unknown";
+  return { ok: true, data: { id, status, dueAt } };
+}
+
+/** Status is provider truth, never inferred from the requested share mode. */
+export async function getBufferPostStatus(accessToken: string, id: string): Promise<BufferApiResult<{ id: string; status: string }>> {
+  const result = await bufferGraphQL<{ post?: { id?: string; status?: string } }>(accessToken, "GetPostStatus",
+    "query GetPostStatus($input: PostInput!) { post(input: $input) { id status } }", { input: { id } });
+  if (!result.ok) return result;
+  if (result.data.post?.id !== id || typeof result.data.post.status !== "string") return { ok: false, reason: "invalid_response", message: "Buffer did not return the requested post status." };
+  return { ok: true, data: { id, status: result.data.post.status } };
 }
 
 /** Backwards-compatible scheduled-only alias for legacy callers. New code

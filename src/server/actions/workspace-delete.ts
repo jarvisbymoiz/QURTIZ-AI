@@ -88,7 +88,7 @@ export async function sendWorkspaceDeleteOtpAction(): Promise<ActionResult & { e
  * Signs the short-lived marker into an httpOnly cookie the final delete action
  * requires.
  */
-export async function authorizeWorkspaceDeleteAction(): Promise<ActionResult> {
+export async function authorizeWorkspaceDeleteAction(password: string): Promise<ActionResult> {
   const ctx = await getActiveContext("workspace:manage");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
@@ -105,6 +105,14 @@ export async function authorizeWorkspaceDeleteAction(): Promise<ActionResult> {
   if (!row) return { ok: false, error: "Workspace not found." };
   if (row.createdBy !== user.id) {
     return { ok: false, error: "Only the workspace owner can delete it." };
+  }
+
+  if (typeof password !== "string" || !password || password.length > 1024 || !user.email) {
+    return { ok: false, error: "Enter your account password." };
+  }
+  const verified = await supabase.auth.signInWithPassword({ email: user.email, password });
+  if (verified.error || verified.data.user?.id !== user.id) {
+    return { ok: false, error: "Password verification failed." };
   }
 
   const cookieStore = await cookies();

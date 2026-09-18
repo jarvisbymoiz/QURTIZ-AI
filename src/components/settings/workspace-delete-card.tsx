@@ -267,14 +267,7 @@ export function WorkspaceDeleteCard({
     if (!password) return;
     setPwBusy(true);
     try {
-      const supabase = createClient();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        toast.error(error.message);
-        return;
-      }
-      // Password verified → mint the short-lived marker cookie server-side.
-      const auth = await authorizeWorkspaceDeleteAction();
+      const auth = await authorizeWorkspaceDeleteAction(password);
       if (!auth.ok) {
         toast.error(auth.error);
         return;

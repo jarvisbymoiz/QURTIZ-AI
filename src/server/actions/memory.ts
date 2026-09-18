@@ -1,11 +1,12 @@
 ﻿"use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandMemory } from "@/db/schema";
 import { addMemorySchema, updateMemorySchema } from "@/lib/validation";
 import { getSessionUser, getMembership, resolveActionWorkspace } from "@/lib/workspace";
+import { saveAgentMemory } from "@/lib/ai/persistent-memory";
 import { can } from "@/lib/permissions";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -37,14 +38,7 @@ export async function addMemoryAction(formData: FormData): Promise<ActionResult>
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
 
-  const db = getDb();
-  await db.insert(brandMemory).values({
-    workspaceId,
-    type: parsed.data.type,
-    content: parsed.data.content,
-    source: "manual",
-    createdBy: user.id,
-  });
+  await saveAgentMemory({ userId: user.id, workspaceId }, { scope: "workspace", type: parsed.data.type, content: parsed.data.content, category: "general" }, "manual");
 
   revalidatePath("/brand-brain");
   return { ok: true };
@@ -79,7 +73,7 @@ export async function updateMemoryAction(
   await db
     .update(brandMemory)
     .set(patch)
-    .where(and(eq(brandMemory.id, parsed.data.id), eq(brandMemory.workspaceId, workspaceId)));
+    .where(and(eq(brandMemory.id, parsed.data.id), eq(brandMemory.workspaceId, workspaceId), isNull(brandMemory.supersededAt)));
 
   revalidatePath("/brand-brain");
   return { ok: true };
@@ -100,7 +94,7 @@ export async function deleteMemoryAction(id: string): Promise<ActionResult> {
   const db = getDb();
   await db
     .delete(brandMemory)
-    .where(and(eq(brandMemory.id, id), eq(brandMemory.workspaceId, workspaceId)));
+    .where(and(eq(brandMemory.id, id), eq(brandMemory.workspaceId, workspaceId), isNull(brandMemory.supersededAt)));
 
   revalidatePath("/brand-brain");
   return { ok: true };

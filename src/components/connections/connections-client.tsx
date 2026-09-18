@@ -283,7 +283,7 @@ export function ConnectionsClient({
           <CardDescription>
             All posts scheduled from Content Studio, AI Chat, Bulk or Autopilot publish through {PROVIDER_LABEL[provider]}
             {provider === "meta" ? ", directly via your connected Facebook/Instagram accounts" : ", queued through your Buffer account"}.
-            Scheduled posts keep the provider that was active when they were scheduled.
+            At publish time, Qurtiz re-checks account health and uses Meta first, with Buffer as the fallback when available.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -563,4 +563,3 @@ function ProviderSection({
 function cnDefault(status: string): string {
   return status === "connected" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500" : "";
 }
-

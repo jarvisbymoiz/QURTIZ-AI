@@ -65,6 +65,7 @@ export async function generateVisual(args: {
   contentItemId: string;
   mode: VisualMode;
   slideIndex?: number;
+  variantId?: string;
   storage?: SupabaseClient;
 }): Promise<VisualGenResult> {
   const db = getDb();
@@ -77,8 +78,13 @@ export async function generateVisual(args: {
   const [variant] = await db
     .select()
     .from(contentVariants)
-    .where(eq(contentVariants.contentItemId, args.contentItemId))
+    .where(and(eq(contentVariants.contentItemId, args.contentItemId), eq(contentVariants.workspaceId, args.workspaceId),
+      args.variantId ? eq(contentVariants.id, args.variantId) : undefined))
     .limit(1);
+  if (args.variantId && !variant) return { ok: false, reason: "not_found", message: "Content variant not found." };
+  const slide = Array.isArray(variant?.slides)
+    ? (variant.slides as { index: number; visualPrompt?: string; headline?: string }[]).find(entry => entry.index === args.slideIndex)
+    : undefined;
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, args.workspaceId));
   const identity = (brand?.visualIdentity ?? {}) as Record<string, string | undefined>;
 
@@ -123,7 +129,7 @@ export async function generateVisual(args: {
         .join(" ");
 
       const result = await generateImage({
-        prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${variant?.slides && Array.isArray(variant.slides) && variant.slides[args.slideIndex ?? -1]?.visualPrompt ? variant.slides[args.slideIndex ?? -1].visualPrompt : item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
+        prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${slide?.visualPrompt ?? item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
         references: refs,
         provider: target.provider,
         apiKey: target.apiKey,
@@ -155,7 +161,7 @@ export async function generateVisual(args: {
       png = await renderTemplateVisual({
         primaryColor: identity.primaryColor ?? "#6366f1",
         secondaryColor: identity.secondaryColor ?? "#0ea5e9",
-        headline: item.hook ?? item.topic,
+        headline: slide?.headline ?? item.hook ?? item.topic,
         subline: (item.mainCopy ?? "").slice(0, 160),
         cta: item.cta ?? "",
         brandName: brand?.businessName ?? "",
@@ -174,6 +180,7 @@ export async function generateVisual(args: {
         kind: args.mode,
         storagePath,
         mimeType: "image/png",
+        slideIndex: args.slideIndex ?? null,
         meta: { model: usedModel },
       })
       .returning();

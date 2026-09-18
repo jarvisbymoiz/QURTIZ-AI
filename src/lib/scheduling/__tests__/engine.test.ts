@@ -73,7 +73,10 @@ function extractEqForColumn(condition: unknown, wantedColumn: string): string | 
       }
     }
     const inner = (c as { queryChunks?: unknown[] }).queryChunks;
-    if (Array.isArray(inner)) stack.push(...inner);
+    if (Array.isArray(inner)) {
+      const nested = extractEqForColumn(c, wantedColumn);
+      if (nested !== null) return nested;
+    }
   }
   return null;
 }
@@ -110,7 +113,7 @@ function makeDb(overrides: { item?: Row; variants?: Row[]; connections?: Row[] }
 
   function rowsFor(table: unknown, whereCondition?: unknown): Row[] {
     const rows = (() => {
-      if (table === contentItems) return overrides.item ? [overrides.item] : [];
+      if (table === contentItems) return overrides.item ? [{ workspaceId: "ws-1", ...overrides.item }] : [];
       if (table === contentVariants) return overrides.variants ?? [];
       if (table === platformConnections) return connections;
       return [];
@@ -132,6 +135,7 @@ function makeDb(overrides: { item?: Row; variants?: Row[]; connections?: Row[] }
   }
 
   const db = {
+    transaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => callback(db),
     select: vi.fn(() => ({
       from: (table: unknown) => {
         const chain = {
@@ -139,7 +143,9 @@ function makeDb(overrides: { item?: Row; variants?: Row[]; connections?: Row[] }
           where: (cond?: unknown) => {
             const promise = Promise.resolve(rowsFor(table, cond)) as Promise<Row[]> & {
               orderBy?: () => { limit: () => Promise<Row[]> };
+              for: () => Promise<Row[]>;
             };
+            promise.for = () => promise;
             promise.orderBy = () => ({ limit: async () => [] });
             return promise;
           },
@@ -298,7 +304,7 @@ describe("scheduleItem past-date guard", () => {
     expect(calls).toHaveLength(0); // guard fires before any read or write
   });
 
-  it("accepts today even at an earlier wall-clock time (calendar-day guard only)", async () => {
+  it("rejects an earlier time today without inserting a publish job", async () => {
     const { db, calls } = reviewableDb();
     mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
 
@@ -310,10 +316,10 @@ describe("scheduleItem past-date guard", () => {
       timezone: TZ,
     });
 
-    expect(res.ok).toBe(true);
-    if (!res.ok) return;
-    expect(res.scheduledAt.toISOString()).toBe(parseZonedDateTime(TODAY, "00:01", TZ).toISOString());
-    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(1);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.reason).toBe("past_date");
+    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(0);
   });
 
   it("accepts a future date at the default slot", async () => {

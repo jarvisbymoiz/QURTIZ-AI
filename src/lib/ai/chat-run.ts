@@ -41,3 +41,11 @@ export type ChatRunStatusResponse = {
   error: string | null;
   steps: { name: string; createdAt: string; ok: boolean }[];
 };
+
+/** The SDK completed the tool call even when the business operation failed. */
+export function toolPartState(part: { state?: string; output?: unknown }): string | undefined {
+  if (part.state !== "output-available" || !part.output || typeof part.output !== "object") return part.state;
+  const output = part.output as Record<string, unknown>;
+  return typeof output.error === "string" || ["ok", "created", "scheduled", "generated", "saved"].some(key => output[key] === false)
+    ? "output-error" : part.state;
+}

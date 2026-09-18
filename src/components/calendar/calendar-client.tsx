@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -109,6 +109,10 @@ export function CalendarClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekOffset]);
 
+  const mobileDates = calView === "month"
+    ? (monthView.cells.filter((date): date is Date => date !== null))
+    : weekDates;
+
   const scheduledByDay = useMemo(() => {
     const map = new Map<string, Item[]>();
     for (const item of items) {
@@ -173,7 +177,11 @@ export function CalendarClient({
       try {
         const r = await publishNowAction({ itemId: item.id, variantId: variant.id, platform: variant.platform });
         if (r.ok) {
-          if (r.firstCommentSkipped) {
+          if (r.pendingDelivery) {
+            toast.info("Buffer accepted the post. Delivery is awaiting confirmation.", {
+              description: r.firstCommentSkipped ? "First Comment was skipped because it is unavailable on the current Buffer plan." : undefined,
+            });
+          } else if (r.firstCommentSkipped) {
             // The post IS live — only its optional first comment was dropped
             // (Buffer paid-plan feature). Disclose both parts, never a plain
             // success that hides the fallback.
@@ -186,8 +194,15 @@ export function CalendarClient({
               ),
             });
           } else {
+            // The post is live; the first comment is a SEPARATE request, so its
+            // real status is disclosed instead of being silently dropped.
+            const commentNote = r.comment
+              ? r.comment.status === "published"
+                ? " First Comment: published."
+                : ` First Comment: ${r.comment.status}${r.comment.error ? ` - ${r.comment.error}` : ""}.`
+              : "";
             toast.success(
-              `Published to ${variant.platform === "facebook" ? "Facebook" : "Instagram"} — post id ${r.providerPostId}.`,
+              `Published to ${variant.platform === "facebook" ? "Facebook" : "Instagram"} — post id ${r.providerPostId}.${commentNote}`,
             );
           }
           setSelected(null);
@@ -310,7 +325,7 @@ export function CalendarClient({
 
       <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
         {calView === "month" ? (
-        <Card>
+        <Card className="hidden sm:block">
           <CardContent className="p-2">
             <div className="grid grid-cols-7 gap-1 px-1 pb-1 pt-2 text-center text-xs font-medium text-muted-foreground">
               {DOW.map((d) => <div key={d}>{d}</div>)}
@@ -350,7 +365,7 @@ export function CalendarClient({
           </CardContent>
         </Card>
         ) : (
-        <Card>
+        <Card className="hidden sm:block">
           <CardContent className="p-2">
             <div className="grid grid-cols-7 gap-1 px-1 pb-1 pt-2 text-center text-xs font-medium text-muted-foreground">
               {DOW.map((d) => <div key={d}>{d}</div>)}
@@ -391,13 +406,39 @@ export function CalendarClient({
         </Card>
         )}
 
+        <Card className="sm:hidden">
+          <CardContent className="space-y-2 p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {calView === "month" ? "Month agenda" : "Week agenda"}
+            </p>
+            {mobileDates.map((date) => {
+              const iso = dayIso(date, timezone);
+              const dayItems = scheduledByDay.get(iso) ?? [];
+              if (dayItems.length === 0) return null;
+              return (
+                <section key={iso} className="space-y-1.5 rounded-lg border p-2.5" aria-label={iso}>
+                  <div className="text-xs font-medium">
+                    {date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                  </div>
+                  {dayItems.map(renderDayItem)}
+                </section>
+              );
+            })}
+            {mobileDates.every((date) => (scheduledByDay.get(dayIso(date, timezone)) ?? []).length === 0) ? (
+              <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                No posts are scheduled in this {calView}.
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+
         {/* Unscheduled queue */}
         <Card className="h-fit">
           <CardContent className="space-y-2 p-3">
             <div className="flex items-center gap-2 text-sm font-medium">
               <ListChecks className="size-4" aria-hidden /> Approved to schedule ({unscheduledQueue.length})
             </div>
-            <p className="text-xs text-muted-foreground">Drag onto a day, then pick a time.</p>
+            <p className="text-xs text-muted-foreground">Drag onto a day, or tap a post to choose its date and time.</p>
             {unscheduledQueue.length === 0 ? (
               <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
                 No approved posts. Approve content in the Studio, then drag it here onto a day.
@@ -405,18 +446,21 @@ export function CalendarClient({
             ) : (
               <div className="max-h-[60vh] space-y-1.5 overflow-y-auto scrollbar-hide">
                 {unscheduledQueue.map((item) => (
-                  <div
+                  <button
+                    type="button"
                     key={item.id}
                     draggable={editable}
                     onDragStart={(e) => e.dataTransfer.setData("text/qurtiz-item", item.id)}
-                    className="cursor-grab rounded-md border p-2 text-xs hover:bg-accent"
+                    onClick={() => openScheduleDraft(item, dayIso(today, timezone))}
+                    disabled={!editable}
+                    className="w-full cursor-grab rounded-md border p-2 text-left text-xs hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
                     title={item.topic}
                   >
                     <div className="flex items-center gap-1.5">
                       <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[item.status])} />
                       <span className="truncate">{item.topic}</span>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}

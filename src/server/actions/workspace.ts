@@ -121,6 +121,10 @@ export async function updateWorkspaceAction(formData: FormData): Promise<ActionR
 
 /** Used by onboarding check + dashboard. Exported for server components. */
 export async function countMembers(workspaceId: string): Promise<number> {
+  const user = await getSessionUser();
+  if (!user || !(await getMembership(user.id, workspaceId))) {
+    throw new Error("You do not have access to this workspace.");
+  }
   const db = getDb();
   const rows = await db
     .select({ id: workspaceMembers.id })
@@ -149,4 +153,3 @@ export async function requireRoleForActiveWorkspace(
 
   return { userId: user.id, workspaceId, role: membership.role };
 }
-

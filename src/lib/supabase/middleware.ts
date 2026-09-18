@@ -21,6 +21,8 @@ function isPublic(pathname: string): boolean {
  * Must stay edge-runtime safe: no Node APIs here.
  */
 export async function updateSession(request: NextRequest) {
+  // Machine endpoint authenticates its bearer secret in the route itself.
+  if (request.nextUrl.pathname === "/api/cron/publish") return NextResponse.next({ request });
   let supabaseResponse = NextResponse.next({ request });
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;

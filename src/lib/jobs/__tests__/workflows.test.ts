@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { publishingJobs } from "@/db/schema";
+import { campaigns, jobs, notifications, publishingJobs } from "@/db/schema";
 
 /**
  * Hermetic worker tests for `attemptPublish` (lib/jobs/workflows.ts).
@@ -36,7 +36,7 @@ vi.mock("@/lib/visuals/generate", () => ({ generateVisual: vi.fn() }));
 
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
-const { attemptPublish } = await import("@/lib/jobs/workflows");
+const { attemptPublish, recoverStuckGenerationJobs } = await import("@/lib/jobs/workflows");
 const { publishNow } = await import("@/lib/publishing/service");
 const { resolvePublishProviderForPlatform } = await import("@/lib/publish/provider");
 const mockedPublishNow = vi.mocked(publishNow);
@@ -104,6 +104,16 @@ beforeEach(() => {
 });
 
 describe("attemptPublish — provider re-resolution at fire time", () => {
+  it("does not replay a lost provider response", async () => {
+    const { db, updates, inserts } = makeAttemptDb(JOB);
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue({ ok: false, reason: "unknown_outcome", message: "Network timed out; delivery requires verification." });
+    await attemptPublish("pj-1");
+    expect(mockedPublishNow).toHaveBeenCalledTimes(1);
+    expect(updates.some(write => write.values.status === "pending")).toBe(false);
+    expect(inserts[0].kind).toBe("publishing_failed");
+  });
   it("re-resolves the provider from the ACTIVE connection and UPDATEs the stale job stamp (meta-stamped + live buffer → buffer)", async () => {
     const { db, updates, inserts } = makeAttemptDb(JOB);
     mockedGetDb.mockReturnValue(db as never);
@@ -173,5 +183,56 @@ describe("attemptPublish — firstComment skipped note", () => {
     expect(inserts[0].kind).toBe("publishing_completed");
     expect(String(inserts[0].body)).toContain("First Comment: Skipped (unavailable on current Buffer plan)");
     expect(inserts[0].userId).toBe("user-1"); // workspace creator, not the ws UUID
+  });
+});
+
+describe("recoverStuckGenerationJobs", () => {
+  it("fails the stale job, cancels its generating campaign, and notifies the initiating user", async () => {
+    const staleJob = {
+      id: "job-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      type: "campaign",
+      status: "running",
+      input: { campaignId: "campaign-1" },
+      result: { createdIds: ["item-1"] },
+      updatedAt: new Date(0),
+    };
+    const updates: Array<{ table: unknown; values: Row }> = [];
+    const inserts: Array<{ table: unknown; values: Row }> = [];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [staleJob] }),
+        }),
+      }),
+      update: (table: unknown) => ({
+        set: (values: Row) => ({
+          where: () => {
+            updates.push({ table, values });
+            const result = Promise.resolve([]) as unknown as Promise<Row[]> & { returning: () => Promise<Row[]> };
+            result.returning = async () => table === jobs ? [{ id: staleJob.id }] : [];
+            return result;
+          },
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: async (values: Row) => { inserts.push({ table, values }); },
+      }),
+    };
+    mockedGetDb.mockReturnValue(db as never);
+
+    await recoverStuckGenerationJobs();
+
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: jobs, values: expect.objectContaining({ status: "failed" }) }),
+      expect.objectContaining({ table: campaigns, values: expect.objectContaining({ status: "cancelled" }) }),
+    ]));
+    expect(inserts).toEqual([
+      expect.objectContaining({
+        table: notifications,
+        values: expect.objectContaining({ userId: "user-1", title: "Campaign generation stopped" }),
+      }),
+    ]);
   });
 });

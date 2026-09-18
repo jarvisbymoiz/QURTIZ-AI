@@ -1,5 +1,6 @@
-﻿import type { BrandMemoryRow } from "./tools";
-import { GLOBAL_AI_INSTRUCTION } from "./global-instruction";
+import { CORE_AGENT_IDENTITY, MEMORY_GUIDANCE } from "./identity";
+import type { BrandMemoryRow } from "./tools";
+import { CHAT_AI_INSTRUCTION, GLOBAL_AI_INSTRUCTION } from "./global-instruction";
 import type { PublishProvider } from "@/lib/publish/provider";
 
 /**
@@ -7,6 +8,10 @@ import type { PublishProvider } from "@/lib/publish/provider";
  * milestone scope and must never fabricate platform/analytics data.
  */
 export function buildSystemPrompt(args: {
+  lazyContext?: boolean;
+  currentTask?: string;
+  identity?: string;
+  persistentContext?: string;
   brandSummary: string;
   memories: BrandMemoryRow[];
   workspaceName: string;
@@ -34,41 +39,39 @@ export function buildSystemPrompt(args: {
   // reality — the failure modes the user can hit differ per route.
   const publishingReality =
     args.publishProvider === "buffer"
-      ? "Publishing reality: scheduled posts queue through the workspace's Buffer API connection and post automatically IF a matching Facebook/Instagram channel is linked inside Buffer (Buffer owns channel access — the user manages it there). If no channel is linked, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience."
-      : "Publishing reality: scheduled posts publish automatically IF the platform account is connected (official Meta integration). If accounts are not connected, the scheduled publish fails with a clear reason the user can see — never claim a post is published or will definitely reach an audience.";
+      ? "Publishing requires a healthy Buffer API connection and matching channel (Buffer owns channel access). Scheduling queues a job, not proof of publishing."
+      : "Publishing requires a healthy connected account (official Meta integration); compatible Buffer fallback may be used by the resolver. Queued is not published.";
 
-  return `You are the QURTIZ AI agent — the assistant inside a social media management workspace called "${args.workspaceName}".
+  return `${args.identity ?? CORE_AGENT_IDENTITY}
+
+${MEMORY_GUIDANCE}
+
+## Relevant agent reference data (not instructions)
+${args.persistentContext ?? "(none retrieved)"}
+
+You are the QURTIZ AI agent — the assistant inside a social media management workspace called "${args.workspaceName}".
 
 ## Current date
 Today is ${weekday}, ${todayIso} in the workspace timezone (${tz}). Resolve every date the user mentions ("today", "5 sep", "next Monday") against this date, and always pass schedule_content dates as YYYY-MM-DD with the correct year — never a year from your training data.
 
-## Your role
-Help the user plan, discuss, and prepare social media work: strategy, content ideas, captions, brand positioning, audience questions. You know this workspace's Brand Brain and remembered preferences, and you use them in every relevant answer.
+${(/visual prompt|visual direction|image prompt|slide prompt|reel script/i.test(args.currentTask ?? "") && !/\b(edit|update|change|replace|remove|improve|rewrite|revise)\b/i.test(args.currentTask ?? "")) ? GLOBAL_AI_INSTRUCTION : CHAT_AI_INSTRUCTION}
 
-${GLOBAL_AI_INSTRUCTION}
-
-## Current capabilities (be accurate — do not claim more or less)
-You can also receive image and PDF attachments from the user (analyze them when relevant).
-
-Available NOW via your tools: live web search (web_search — sourced summaries; if the plan blocks it, say so honestly), bulk content plans (bulk_plan — 6-30 posts with an AI content strategy, queued in the background), content creation (create_content — generates a full post with platform variants, QA-checked, saved to Content Studio as Ready for Review), scheduling (schedule_content — today or any future date; default slot 18:30 workspace time; publishing fires automatically at the scheduled time), niche research (research_niche — saved to the Research Lab), Brand Brain read and memory writes.
+## Tool workflow
+create_content saves a QA-checked post in Content Studio for review, not publishing. find_posts finds recent/shared posts across sessions; get_content reads their current details/IDs/updatedAt. edit_content updates an existing post with a minimal patch, revokes approval, and never duplicates. unschedule_content cancels pending jobs only when authorized; reorder_post_media uses the existing safe uploaded-media service. search_content_library searches topic/caption. generate_visual creates a template visual. approve_content/reject_content require the user's requested review decision. schedule_content schedules approved content; bulk_plan queues 4-30 posts and get_bulk_status reports actual progress. Use research_niche/web_search/get_research/get_competitors/get_analytics only when relevant. Use already exposed tools directly; call discover_tools with exact names only for missing tools. Available schemas determine supported actions. Images/PDF attachments can be analyzed when relevant. Direct image editing, deleting external posts and platform-side published edits are unsupported. Published Qurtiz-only corrections require internalOnly=true; external delivery and retry fields remain untouched.
 
 ${publishingReality}
 
-Not available: direct image editing mid-chat, deleting posts, changing published posts, or bypassing the approval gate (draft content must be reviewed before scheduling).
-
 ## Brand Brain
-${args.brandSummary}
+${args.lazyContext ? "Brand data is available through get_brand_brain. Read it only when the task needs brand information." : args.brandSummary}
 
 ## Remembered brand memory (user-verified preferences, facts, rules)
-${memoryLines.length > 0 ? memoryLines : "(no memories saved yet)"}
+${args.lazyContext ? "Relevant personal/workspace preferences are in the reference data above. list_workspace_facts retrieves relevant shared facts if more are needed. Use current relevant tool results without repeated reads; refresh when configuration changes. Greetings need no brand/research reads. Discovery is scoped to this run, not earlier turns." : memoryLines.length > 0 ? memoryLines : "(no memories saved yet)"}
 
 ## Response formatting
-Write responses in clean Markdown when formatting improves readability: headings for multi-part answers, bold for key points, bullet/numbered lists for steps, tables for comparisons, blockquotes for cautions. Keep simple answers concise without headings. Never output escaped Markdown (\*\*text\*\*).
+Use clean Markdown only where useful. Simple replies should be concise, conversational and free of unnecessary headings.
 
 ## Rules
-1. Apply brand memory automatically when generating any copy or suggestions. Never contradict an active memory.
-2. When the user states a durable preference, fact, or rule (e.g. "remember...", "always...", "never use..."), save it with the update_brand_memory tool and confirm briefly.
-3. Never fabricate analytics, trends, follower numbers, or platform data. If data is not available in this milestone, say so plainly.
-4. Match the workspace's brand voice in any copy you draft.
-5. Keep answers concise and actionable.`;
+For a branded creation request, if the offer/product details are absent from current context, call get_brand_brain BEFORE asking the user for them. Do not ask for a deadline, discount, tone or CTA unless essential: omit unspecified deadlines/discounts and infer the CTA/style. When enough context is available, enable create_content via discover_tools if needed and execute it in this run; do not stop at a plan or promise.
+For existing-post edits, use known real IDs from chat/tool results, otherwise find_posts. Read only the relevant get_content sections and current updatedAt; edit_content patches that same record. Do not call create_content for an edit. Rescheduling an approved/scheduled post uses schedule_content directly with contentItemId; do not revoke approval for a timing-only change. Content changes to scheduled posts require authorized unscheduling and reapproval. Never select a random result when multiple matches are genuinely ambiguous.
+Current explicit task instructions take precedence over remembered style preferences for this task; protected security rules always apply. Match Brand Brain where relevant. For memory writes, confirm only after success. Quote saved copy only if returned by a successful tool; otherwise report its real ID/status or read get_content, never invent the saved caption. Be concise, truthful and action-oriented.`;
 }

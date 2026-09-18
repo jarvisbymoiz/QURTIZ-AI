@@ -47,8 +47,8 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     serverActions: {
-      // Visual/brand-asset uploads go through Server Actions as FormData
-      // (uploadVisualUploadAction, brand assets). Default limit is 1 MB.
+      // Brand assets use FormData. Studio media uploads directly to storage
+      // through signed tickets so video bytes bypass the action body limit.
       bodySizeLimit: "10mb",
     },
   },

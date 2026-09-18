@@ -5,11 +5,11 @@ import { platformConnections, settings } from "@/db/schema";
 /**
  * Workspace-wide publishing provider routing.
  *
- * The product holds one toggle: every publishing job created for the
- * workspace is stamped with the provider that was active AT CREATION TIME
- * (jobs snapshot the provider — flipping the toggle later never reroutes
- * already-queued jobs). When the settings key is absent the provider is
- * "meta", so existing behavior is unchanged.
+ * The product holds one preference toggle. New jobs record the best route at
+ * creation time for visibility, and the worker resolves connection health
+ * again at execution time so scheduled work can use Meta-first/Buffer-fallback
+ * without retaining a stale route. When the settings key is absent the
+ * provider is "meta", so existing behavior is unchanged.
  *
  * The settings shape mirrors the autopilot pattern (settings table,
  * workspaceId + key → jsonb value): key "publishing" → { provider }.
@@ -20,8 +20,8 @@ import { platformConnections, settings } from "@/db/schema";
  * below is the single source of truth: it returns the provider of the
  * connected row (status='connected') for that (workspace, platform), falling
  * back to the workspace toggle, and finally to "meta". Both scheduleItem and
- * the agent's schedule_content tool call it so that the job's snapshotted
- * `provider` matches the connection the worker will actually pick up.
+ * the agent's schedule_content tool and the publish worker call it so the
+ * stored `provider` tracks the connection actually selected for delivery.
  */
 
 export type PublishProvider = "meta" | "buffer";
@@ -80,21 +80,36 @@ export async function resolvePublishProviderForPlatform(
 ): Promise<PublishProvider> {
   const db = getDb();
   const conns = await db
-    .select({ provider: platformConnections.provider })
+    .select({ provider: platformConnections.provider, status: platformConnections.status })
     .from(platformConnections)
     .where(
       and(
         eq(platformConnections.workspaceId, workspaceId),
         eq(platformConnections.platform, platform),
-        eq(platformConnections.status, "connected"),
       ),
     );
-  // The first connected row wins. Per the (workspaceId, platform, provider)
-  // unique index, multiple rows can only differ by `provider` — they all
-  // represent valid connections for this (workspace, platform), and any of
-  // them is a correct stamp (the worker filters by this exact provider).
-  const conn = conns[0];
-  if (conn && isPublishProvider(conn.provider)) return conn.provider;
+
+  // Only rows whose stored health says "connected" are eligible. `status` is the
+  // health signal: it is written by the OAuth save flow, by the on-demand health
+  // check, and by a real auth failure (connected | expired | error).
+  const healthy = new Set<PublishProvider>();
+  for (const row of conns) {
+    if (row.status === "connected" && isPublishProvider(row.provider)) healthy.add(row.provider);
+  }
+
+  // PROVIDER PRIORITY - Meta is PRIMARY, Buffer is the FALLBACK:
+  //   - a healthy Meta connection ALWAYS wins, even when Buffer is also healthy;
+  //   - Buffer is used only when Meta is missing, expired, in error or otherwise
+  //     not connected for THIS platform.
+  // Evaluated on every call, so scheduling and every execution resolve against
+  // the latest healthy connection: a Meta connection that recovers takes over
+  // again, and one that expires hands over to a healthy Buffer.
+  if (healthy.has("meta")) return "meta";
+  if (healthy.has("buffer")) return "buffer";
+
+  // Neither provider is healthy: return the workspace toggle so the caller
+  // surfaces ONE clear, real failure (resolvePublishConnection then reports
+  // not_connected) instead of silently selecting a dead connection.
   return getWorkspacePublishProvider(workspaceId);
 }
 

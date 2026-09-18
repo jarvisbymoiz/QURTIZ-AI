@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
 import {
+  FALLBACK_SLOT_TIME,
   autopilotClaimKey,
   isAutopilotDue,
   pickEngagementSlot,
@@ -56,6 +57,17 @@ describe("autopilotSettingsSchema (runTimes)", () => {
     expect(autopilotSettingsSchema.safeParse({ enabled: true, maxPostsPerRun: 4 }).success).toBe(false);
     expect(autopilotSettingsSchema.safeParse({ enabled: true, maxPostsPerRun: 0 }).success).toBe(false);
     expect(autopilotSettingsSchema.safeParse({ enabled: true, maxPostsPerRun: 3 }).success).toBe(true);
+  });
+});
+
+describe("Auto Run execution settings", () => {
+  it("persists all execution options with explicit custom timing", () => {
+    const value = {enabled:true, requireApproval:false, maxPostsPerRun:3, platforms:["facebook"], formats:["carousel","reel"],
+      autoSchedule:false,generateImages:false,runDays:[1,3,5],runTimes:["08:15","16:45"],fallbackTimes:["10:20","15:40"],minGapMinutes:180,maxPostsPerDay:2};
+    expect(autopilotSettingsSchema.parse(value)).toMatchObject(value);
+  });
+  it.each([{platforms:[]},{formats:[]},{runDays:[]},{runDays:[7]},{fallbackTimes:[]},{fallbackTimes:["18:60"]},{minGapMinutes:0},{maxPostsPerDay:0}])("rejects unsafe or unusable scheduling configuration: %j", overrides => {
+    expect(autopilotSettingsSchema.safeParse({enabled:true,...overrides}).success).toBe(false);
   });
 });
 
@@ -124,16 +136,16 @@ describe("pickEngagementSlot", () => {
   });
 
   it("falls back when fewer than 3 metrics rows exist", () => {
-    expect(pickEngagementSlot(hours, 2)).toBe("18:30");
-    expect(pickEngagementSlot(hours, 0)).toBe("18:30");
+    expect(pickEngagementSlot(hours, 2)).toBe(FALLBACK_SLOT_TIME);
+    expect(pickEngagementSlot(hours, 0)).toBe(FALLBACK_SLOT_TIME);
   });
 
   it("falls back with no hour data", () => {
-    expect(pickEngagementSlot([], 10)).toBe("18:30");
+    expect(pickEngagementSlot([], 10)).toBe(FALLBACK_SLOT_TIME);
   });
 
   it("falls back when the best hour has no measurable engagement", () => {
-    expect(pickEngagementSlot([{ hour: 8, avgEngagement: 0, posts: 1 }], 5)).toBe("18:30");
+    expect(pickEngagementSlot([{ hour: 8, avgEngagement: 0, posts: 1 }], 5)).toBe(FALLBACK_SLOT_TIME);
   });
 
   it("normalizes the hour12:false midnight reading (24 -> 00)", () => {

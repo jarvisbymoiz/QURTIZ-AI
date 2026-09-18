@@ -5,6 +5,42 @@ import "server-only";
 export const GRAPH_VERSION = "v22.0";
 export const GRAPH_HOST = "https://graph.facebook.com";
 
+/**
+ * Strips the query string from a Graph endpoint so a sanitized diagnostic can
+ * never contain an access_token. Only the path is retained.
+ */
+export function sanitizeMetaEndpoint(endpoint: string): string {
+  return endpoint.split("?")[0];
+}
+
+/**
+ * Sanitized Meta Graph diagnostic: step, endpoint PATH, HTTP status and the API
+ * error code/message/fbtrace id. Access tokens are NEVER logged - callers pass a
+ * path, and any query string is stripped as a second line of defence.
+ */
+export function logMetaDiagnostic(
+  step: string,
+  endpoint: string,
+  status: number | null,
+  error?: MetaGraphErrorPayload,
+  /** Extra NON-SECRET context (platform, token type, ids). Never a token. */
+  info?: Record<string, unknown>,
+): void {
+  const payload: Record<string, unknown> = {
+    step,
+    endpoint: sanitizeMetaEndpoint(endpoint),
+    status,
+    ...(info ?? {}),
+  };
+  if (error) {
+    payload.errorCode = error.code ?? null;
+    payload.errorSubcode = error.error_subcode ?? null;
+    payload.errorMessage = (error.message ?? "").slice(0, 240);
+    payload.fbtraceId = error.fbtrace_id ?? null;
+  }
+  console.warn("[meta-oauth]", JSON.stringify(payload));
+}
+
 export const META_REQUIRED_SCOPES = [
   "public_profile",
   "pages_show_list",
@@ -13,6 +49,11 @@ export const META_REQUIRED_SCOPES = [
   "instagram_basic",
   "instagram_content_publish",
   "instagram_manage_insights",
+  // Required to CREATE the first comment (a separate Graph API request):
+  // Instagram comments need instagram_manage_comments, and commenting on a
+  // Facebook Page post as the Page needs pages_manage_engagement.
+  "instagram_manage_comments",
+  "pages_manage_engagement",
   "read_insights",
   "business_management",
 ];
@@ -262,6 +303,43 @@ export async function debugToken(
 }
 
 /**
+ * Current official way to check which permissions a user access token actually
+ * has granted: GET /me/permissions returns [{ permission, status }].
+ * The deprecated `fields=perms` / `fields=permissions` forms no longer exist in
+ * the Graph API. Only entries with status "granted" are returned, and nothing is
+ * ever fabricated.
+ */
+export async function fetchGrantedPermissions(
+  userToken: string,
+): Promise<{ ok: boolean; granted: string[]; error?: string; status?: number }> {
+  try {
+    const res = await fetch(
+      `${GRAPH_HOST}/${GRAPH_VERSION}/me/permissions?access_token=${encodeURIComponent(userToken)}`,
+      { signal: AbortSignal.timeout(20_000) },
+    );
+    const json = (await res.json()) as {
+      data?: Array<{ permission?: string; status?: string }>;
+      error?: MetaGraphErrorPayload;
+    };
+    logMetaDiagnostic("permissions", "/me/permissions", res.status, json.error);
+
+    if (!json.data) {
+      return { ok: false, granted: [], status: res.status, error: formatMetaGraphError(json.error) };
+    }
+    const granted = json.data
+      .filter((p) => (p.status ?? "").toLowerCase() === "granted" && typeof p.permission === "string")
+      .map((p) => p.permission as string);
+    return { ok: true, granted, status: res.status };
+  } catch (err) {
+    return {
+      ok: false,
+      granted: [],
+      error: err instanceof Error ? err.message : "permissions request failed",
+    };
+  }
+}
+
+/**
  * Deep Instagram account discovery for a Facebook Page.
  * If /me/accounts did not populate instagram_business_account, probe the Page node directly with the Page token.
  */
@@ -407,7 +485,8 @@ export async function discoverMetaAccounts(code: string, origin: string): Promis
     // Continue with token debug
   }
 
-  // 2. Token debug for scopes and expiry
+  // 2. Token debug (authorized with the APP access token) for validity, user id
+  //    and expiry.
   const debug = await debugToken(userToken);
   if (!authorizedUser.id && debug.userId) {
     authorizedUser = { id: debug.userId, name: "Facebook User" };
@@ -415,15 +494,26 @@ export async function discoverMetaAccounts(code: string, origin: string): Promis
 
   const expiresAtDate = debug.expiresAt ?? new Date(Date.now() + expiresInSeconds * 1000);
   const expiresAt = expiresAtDate.toISOString();
-  const grantedScopes = debug.scopes.length > 0 ? debug.scopes : META_REQUIRED_SCOPES;
 
-  // 3. Fetch all Facebook Pages the user manages
+  // 3. Granted permissions - the current official check is GET /me/permissions
+  //    (the legacy `perms` / `fields=permissions` forms no longer exist).
+  //    Scopes are NEVER fabricated: the previous fallback reported every
+  //    requested scope as granted whenever the token could not be introspected.
+  const permissions = await fetchGrantedPermissions(userToken);
+  const grantedScopes = Array.from(new Set([...permissions.granted, ...(debug.scopes ?? [])]));
+  const missingRequiredScopes = META_REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s));
+  const permissionWarning = !permissions.ok
+    ? `Could not read granted permissions from /me/permissions (${permissions.error ?? "unknown error"}). Meta API calls may fail until this is resolved.`
+    : missingRequiredScopes.length > 0
+      ? `Meta did not grant: ${missingRequiredScopes.join(", ")}. The affected publishing/analytics features will fail until these permissions are granted and the account is reconnected.`
+      : null;
+
+  // 4. Fetch all Facebook Pages the user manages
   const pagesFields = [
     "id",
     "name",
     "category",
     "tasks",
-    "perms",
     "access_token",
     "instagram_business_account{id,username,name,profile_picture_url,followers_count}",
     "connected_instagram_account{id,username,name,profile_picture_url}",
@@ -440,7 +530,6 @@ export async function discoverMetaAccounts(code: string, origin: string): Promis
       name: string;
       category?: string;
       tasks?: string[];
-      perms?: string[];
       access_token: string;
       instagram_business_account?: {
         id: string;
@@ -456,21 +545,47 @@ export async function discoverMetaAccounts(code: string, origin: string): Promis
         profile_picture_url?: string;
       };
     }>;
+    paging?: { next?: string };
     error?: MetaGraphErrorPayload;
   };
 
+  // Sanitized step log: endpoint path + HTTP status + API error (never a token).
+  logMetaDiagnostic("pages", "/me/accounts", pagesRes.status, pagesJson.error);
+
   if (!pagesJson.data) {
-    throw new Error(formatMetaGraphError(pagesJson.error));
+    // Surface the REAL API reason (code, message, HTTP status) instead of
+    // implying that the user simply has no Pages.
+    throw new Error(
+      `Meta Pages discovery failed at /me/accounts (HTTP ${pagesRes.status}): ${formatMetaGraphError(pagesJson.error)}`,
+    );
   }
 
-  const rawPages = pagesJson.data;
-  const warnings: string[] = [];
+  const rawPages = [...pagesJson.data];
+  // Follow paging cursors so an account with many Pages is not silently
+  // truncated to the first response.
+  let nextAccountsUrl = typeof pagesJson.paging?.next === "string" ? pagesJson.paging.next : null;
+  let accountsPageGuard = 0;
+  while (nextAccountsUrl && accountsPageGuard < 10) {
+    accountsPageGuard++;
+    const nextRes = await fetch(nextAccountsUrl, { signal: AbortSignal.timeout(30_000) });
+    const nextJson = (await nextRes.json()) as typeof pagesJson;
+    logMetaDiagnostic("pages_next", "/me/accounts", nextRes.status, nextJson.error);
+    if (!nextJson.data) break;
+    rawPages.push(...nextJson.data);
+    nextAccountsUrl = typeof nextJson.paging?.next === "string" ? nextJson.paging.next : null;
+  }
 
-  // 4. Process each page and discover linked Instagram account
+  const warnings: string[] = [];
+  if (permissionWarning) warnings.push(permissionWarning);
+
+  // 5. Process each page and discover linked Instagram account
   const pages: DiscoveredFacebookPage[] = [];
 
   for (const p of rawPages) {
-    const tasks = p.tasks ?? p.perms ?? [];
+    // `tasks` is the current, supported Page permission field. The legacy
+    // `perms` field no longer exists in the Graph API, so it is never used as a
+    // fallback (requesting it makes Meta reject the entire /me/accounts call).
+    const tasks = p.tasks ?? [];
     // Can post if tasks include MANAGE, CREATE_CONTENT, or if tasks is empty/not strictly restricted
     const canPost =
       tasks.length === 0 ||
@@ -501,6 +616,12 @@ export async function discoverMetaAccounts(code: string, origin: string): Promis
       pageToken: p.access_token,
       instagramAccount: igAccount,
     });
+  }
+
+  if (pages.length === 0) {
+    warnings.push(
+      "Meta returned 0 Facebook Pages for this user token (real empty result - not a parsing failure). Usual causes: the Facebook account manages no Pages; pages_show_list / business_management was not granted; the Pages belong to a Business Manager this user cannot manage; or Page access is restricted.",
+    );
   }
 
   const eligiblePages = pages.filter((p) => p.canPost);

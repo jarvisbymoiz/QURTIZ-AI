@@ -1,10 +1,17 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/db";
 import { sql } from "drizzle-orm";
+import { getSessionUser } from "@/lib/workspace";
+import { rateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+  if (!rateLimit(`health:${user.id}`, 12, 60_000).allowed) {
+    return NextResponse.json({ error: "RATE_LIMITED" }, { status: 429 });
+  }
   const envStatus = {
     DATABASE_URL: Boolean(process.env.DATABASE_URL),
     NEXT_PUBLIC_SUPABASE_URL: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
@@ -55,16 +62,9 @@ export async function GET() {
       for (const t of requiredTables) {
         if (found.has(t)) existingTables.push(t);
       }
-    } catch (err) {
+    } catch {
       databaseConnected = false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const anyErr = err as any;
-      const causeMsg = anyErr?.cause?.message || (anyErr?.cause ? String(anyErr.cause) : null);
-      databaseError = causeMsg
-        ? `${err instanceof Error ? err.message : String(err)} [Underlying cause: ${causeMsg}]`
-        : err instanceof Error
-          ? err.message
-          : String(err);
+      databaseError = "Database connectivity or schema check failed. Contact the application administrator.";
     }
   }
 
@@ -96,7 +96,7 @@ export async function GET() {
       },
       quickFix:
         missingTables.length > 0
-          ? "Your Supabase database does not have the required tables yet. In your Supabase Dashboard, open SQL Editor, paste the contents of 'supabase-schema.sql', and click Run."
+          ? "Ask the administrator to review and apply the committed database migrations using the deployment guide."
           : databaseError
             ? process.env.DATABASE_URL?.includes("db.") && process.env.DATABASE_URL?.includes(".supabase.co")
               ? `You appear to be using Supabase Direct Connection (db.[ref].supabase.co), which uses IPv6 and is unreachable from Vercel serverless. Please switch to your Supabase Connection Pooler URI (aws-0-[region].pooler.supabase.com:5432) in Supabase Dashboard → Settings → Database → Connection string → URI → Session (port 5432). Error was: ${databaseError}`

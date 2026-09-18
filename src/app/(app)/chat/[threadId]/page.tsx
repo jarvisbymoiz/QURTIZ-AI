@@ -75,6 +75,7 @@ export default async function ThreadPage({
           <MobileThreads activeThreadId={thread.id} />
         </div>
         <ChatPanel
+          key={thread.id}
           workspaceId={ctx.workspace.id}
           workspaceName={ctx.workspace.name}
           threadId={thread.id}

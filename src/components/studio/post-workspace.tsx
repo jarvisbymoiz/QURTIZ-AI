@@ -1,6 +1,9 @@
-﻿"use client";
+"use client";
+import { uploadStudioMedia } from "@/lib/media/client-upload";
+import { selectSingleReviewVisual } from "@/lib/media/review";
+import { orderVisuals } from "@/lib/publishing/media";
 
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -21,7 +24,7 @@ import type { contentItems, contentVariants, visualAssets } from "@/db/schema";
 import {
   generateVisualAction,
   buildMasterPromptAction,
-  uploadVisualUploadAction,
+
 } from "@/server/actions/visuals";
 import { scheduleContentAction } from "@/server/actions/schedule";
 import {
@@ -29,6 +32,7 @@ import {
   regenerateContentAction,
   setContentStatusAction,
   updateVariantCaptionAction,
+  updateReviewFieldAction,
 } from "@/server/actions/content";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +44,8 @@ import { cn } from "@/lib/utils";
 
 type Item = typeof contentItems.$inferSelect;
 type Variant = typeof contentVariants.$inferSelect;
+import { MediaUploader, type UploadedMedia } from "@/components/studio/media-uploader";
+
 type Visual = typeof visualAssets.$inferSelect;
 
 const STATUS_STYLE: Record<string, string> = {
@@ -77,26 +83,61 @@ function FieldCard({
   copy,
   actions,
   bodyClassName,
+  embedded = false,
+  inline = false,
   children,
 }: {
   label: string;
   copy?: string;
   actions?: React.ReactNode;
   bodyClassName?: string;
+  embedded?: boolean;
+  inline?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border bg-card/40">
-      <div className="flex items-center justify-between border-b bg-muted/20 px-2.5 py-1">
+    <div className={cn("min-w-0 overflow-hidden rounded-lg", !embedded && "border bg-card/40", inline && "sm:grid sm:grid-cols-[auto_minmax(0,1fr)] sm:items-start")}>
+      <div className={cn("flex items-center justify-between gap-2 px-2 py-0.5", !embedded && !inline && "border-b bg-muted/20", inline && "sm:pt-2")}>
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</span>
         <div className="flex items-center gap-0.5">
           {copy ? <CopyIcon text={copy} label={label} /> : null}
           {actions}
         </div>
       </div>
-      <div className={cn("p-2.5 text-sm leading-relaxed", bodyClassName)}>{children}</div>
+      <div className={cn("min-w-0 px-2 py-1.5 text-[13px] leading-5 [overflow-wrap:anywhere]", bodyClassName)}>{children}</div>
     </div>
   );
+}
+
+function EditableReviewField({ label, value, editable, save, embedded }: {
+  label: string;
+  value: string;
+  editable: boolean;
+  save: (value: string) => Promise<{ ok: boolean; error?: string }>;
+  embedded?: boolean;
+}) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [pending, start] = useTransition();
+  useEffect(() => { if (!editing) setDraft(value); }, [value, editing]);
+  return <FieldCard label={label} copy={draft} embedded={embedded} actions={editable && !editing ? (
+    <button type="button" aria-label={"Edit " + label.toLowerCase()} className="rounded p-1 text-muted-foreground hover:bg-accent" onClick={() => setEditing(true)}>
+      <Pencil className="size-3" aria-hidden />
+    </button>
+  ) : null}>
+    {editing ? <div className="space-y-2">
+      <Textarea aria-label={label} value={draft} onChange={event => setDraft(event.target.value)} rows={4} disabled={pending} />
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="ghost" disabled={pending} onClick={() => { setDraft(value); setEditing(false); }}>Cancel</Button>
+        <Button size="sm" disabled={pending} onClick={() => start(async () => {
+          const result = await save(draft);
+          if (!result.ok) { toast.error(result.error ?? "Could not save."); return; }
+          toast.success(label + " saved"); setEditing(false); router.refresh();
+        })}>{pending ? "Saving…" : "Save"}</Button>
+      </div>
+    </div> : <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-muted-foreground">{draft || "—"}</p>}
+  </FieldCard>;
 }
 
 export function PostWorkspace({
@@ -122,11 +163,16 @@ export function PostWorkspace({
   const router = useRouter();
   const displayTimezone = timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [pending, start] = useTransition();
-  const [activeVariantId, setActiveVariantId] = useState<string>(variants[0]?.id ?? "");
-  const variant = variants.find((v) => v.id === activeVariantId) ?? variants[0] ?? null;
+  // Legacy posts can mix formats by platform. Open the format advertised by
+  // the content card instead of an arbitrary database row's single-image view.
+  const [activeVariantId, setActiveVariantId] = useState<string>(variants.find(v => v.format === item.format)?.id ?? variants[0]?.id ?? "");
+  const variant = variants.find((v) => v.id === activeVariantId) ?? variants.find(v => v.format === item.format) ?? variants[0] ?? null;
+  const canEditReview = editable && !["scheduled", "published"].includes(item.status) && !["scheduled", "published"].includes(variant?.status ?? "");
+  const canEditMedia = canEditReview && ["draft", "ready_for_review", "rejected", "failed"].includes(item.status);
 
   const [caption, setCaption] = useState(variant?.caption ?? "");
   const [editingCaption, setEditingCaption] = useState(false);
+  useEffect(() => { if (!editingCaption) setCaption(variant?.caption ?? ""); }, [variant?.caption, variant?.id, editingCaption]);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [scheduling, setScheduling] = useState(false);
@@ -140,9 +186,16 @@ export function PostWorkspace({
   });
   const [scheduleTime, setScheduleTime] = useState("18:30");
   const [masterPrompt, setMasterPrompt] = useState<string | null>(null);
+  const [previewFailed, setPreviewFailed] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  const [mediaUploading, setMediaUploading] = useState(false);
 
   const scores = (item.aiScores ?? {}) as Record<string, number>;
+  const displayScore = (value: number) => {
+    const normalized = value > 0 && value <= 1 ? value * 10 : value;
+    return Number(Math.min(10, Math.max(0, normalized)).toFixed(1));
+  };
   const qa = (item.qa ?? {}) as { passed?: boolean; score?: number; issues?: { severity: string; check: string; message: string }[] } | null;
   // Mirrors the server-side QA gate: a draft whose QA did not pass is NOT
   // promoted to Ready for Review when a visual is attached.
@@ -154,18 +207,27 @@ export function PostWorkspace({
     totalDuration?: number;
   };
   const slides = (variant?.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[];
-  const isCarousel = variant?.format === "carousel" && slides.length > 0;
-  const isReel = variant?.format === "reel";
-  const itemVisuals = visuals.filter((v) => v.slideIndex === null || v.slideIndex === undefined);
-  const latestVisual = itemVisuals.length > 0 ? itemVisuals[itemVisuals.length - 1] : null;
+  const mediaFormat = variant?.format ?? item.format;
+  const isCarousel = mediaFormat === "carousel";
+  const isReel = mediaFormat === "reel";
+  const latestVisual = selectSingleReviewVisual(visuals.filter(v => v.mimeType.startsWith("image/")));
   const previewUrl = latestVisual ? visualUrls[latestVisual.storagePath] ?? null : null;
-  const hashtagsText = (variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => "#" + h).join(" ");
+  useEffect(() => { setPreviewFailed(false); }, [previewUrl]);
+  // User-uploaded media, in the persisted order (slideIndex is the order key):
+  // several images for a carousel / one video for a reel.
+  const orderedVisuals = visuals.filter(v => v.mimeType.startsWith(isReel ? "video/" : "image/")).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() || a.storagePath.localeCompare(b.storagePath));
+  const uploads = orderedVisuals.filter(v => v.kind === "upload");
+  const generatedSlides = new Map<number, Visual>();
+  for (const visual of orderedVisuals) if (visual.slideIndex != null) generatedSlides.set(visual.slideIndex, visual);
+  const uploadedMedia: UploadedMedia[] = orderVisuals(uploads.length ? uploads : [...generatedSlides.values()])
+    .map((v, i) => ({ id: v.id, url: visualUrls[v.storagePath] ?? null, mimeType: v.mimeType, position: v.slideIndex ?? i, uploaded: v.kind === "upload" }));
+  const hashtagsText = (variant?.hashtags ?? item.hashtags).map((h) => "#" + h).join(" ");
 
 
 
   function generate(mode: "template" | "ai", slideIndex?: number) {
     start(async () => {
-      const r = await generateVisualAction(item.id, mode, slideIndex);
+      const r = await generateVisualAction(item.id, mode, slideIndex, variant?.id);
       if (r.ok) {
         toast.success(r.model && r.model !== "satori-template" ? "AI visual created (" + r.model + ")" : willPromoteOnVisual ? "Visual created — moved to Ready for Review" : "Visual created");
         router.refresh();
@@ -240,12 +302,12 @@ export function PostWorkspace({
       let failed = 0;
       let i = 0;
       for (const file of Array.from(files)) {
-        const fd = new FormData();
-        fd.set("itemId", item.id);
+
+
         const t = targets[i];
-        if (t !== undefined) fd.set("slideIndex", String(t));
-        fd.set("file", file);
-        const r = await uploadVisualUploadAction(fd);
+
+
+        const r = await uploadStudioMedia(item.id, file, t);
         if (r.ok) uploaded++;
         else {
           failed++;
@@ -265,19 +327,23 @@ export function PostWorkspace({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-2">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-b pb-1.5 pr-7">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className={cn("font-medium", STATUS_STYLE[item.status])}>
             {item.status.replaceAll("_", " ")}
           </Badge>
           <span className="text-xs capitalize text-muted-foreground">{variant?.platform ?? ""} · {variant?.format.replaceAll("_", " ") ?? item.format}</span>
           {typeof scores.overall !== "number" && scores.relevance ? (
-            <span className="text-xs text-muted-foreground">Relevance {scores.relevance}/10 · Engagement {scores.engagement}/10 (AI-est.)</span>
+            <span className="text-xs text-muted-foreground">Relevance {displayScore(scores.relevance)}/10 · Engagement {displayScore(scores.engagement)}/10 (AI-est.)</span>
           ) : null}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {isCarousel || isReel ? <Button size="sm" variant="outline" disabled={!canEditMedia || pending || mediaUploading}
+            onClick={() => mediaInputRef.current?.click()}>
+            <Upload className="size-3.5" aria-hidden /> {isReel ? "Upload video" : "Add images"}
+          </Button> : null}
           <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
             <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
           </Button>
@@ -286,10 +352,10 @@ export function PostWorkspace({
       </div>
 
       {/* Body — two equal columns, no inner column scrollbars; one shared scroll only if content exceeds the dialog */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto scroll-thin lg:grid-cols-2">
+      <div className="grid min-h-0 flex-1 grid-cols-1 content-start items-start gap-2.5 overflow-y-auto scroll-thin md:grid-cols-2 md:gap-3">
         {/* LEFT — post content */}
-        <div className="space-y-2.5">
-          <FieldCard label="Topic" bodyClassName="text-sm font-semibold leading-snug">
+        <div className="min-w-0 space-y-2">
+          <FieldCard label="Topic" inline bodyClassName="text-sm font-semibold leading-snug">
             {item.topic}
             {item.hook ? <p className="mt-1 text-xs font-normal text-muted-foreground">Hook: {item.hook}</p> : null}
           </FieldCard>
@@ -310,18 +376,19 @@ export function PostWorkspace({
             <div className="flex flex-wrap gap-1.5 px-0.5">
               {variants.map((v) => (
                 <button key={v.id} type="button" onClick={() => { setActiveVariantId(v.id); setCaption(v.caption); }}
-                  className={cn("rounded-full border px-2.5 py-1 text-xs capitalize", v.id === activeVariantId ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground")}>
+                  className={cn("rounded-full border px-2.5 py-1 text-xs capitalize", v.id === variant?.id ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground")}>
                   {v.platform}
                 </button>
               ))}
             </div>
           ) : null}
 
+          {Object.keys((item.internalEdits ?? {}) as object).length ? <p className="text-xs text-muted-foreground">Qurtiz-only corrections shown. The published social post remains unchanged.</p> : null}
           <FieldCard
             label="Caption"
             copy={caption}
             bodyClassName="max-h-40 scroll-thin overflow-y-auto"
-            actions={editable ? (
+            actions={canEditReview ? (
               editingCaption ? null : (
                 <button type="button" aria-label="Edit caption" className="rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground" onClick={() => setEditingCaption(true)}>
                   <Pencil className="size-3" aria-hidden />
@@ -331,7 +398,7 @@ export function PostWorkspace({
           >
             {editingCaption ? (
               <div className="space-y-2">
-                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={5} className="scroll-thin resize-none" disabled={!editable} />
+                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={4} className="scroll-thin resize-none" disabled={!editable} />
                 <div className="flex justify-end gap-2">
                   <Button size="sm" variant="ghost" onClick={() => { setCaption(variant?.caption ?? ""); setEditingCaption(false); }}>Cancel</Button>
                   <Button size="sm" disabled={pending} onClick={() => { if (variant) { start(async () => { const r = await updateVariantCaptionAction(variant.id, caption); if (r.ok) { toast.success("Caption saved"); router.refresh(); setEditingCaption(false); } else toast.error(r.error); }); } }}>
@@ -344,46 +411,84 @@ export function PostWorkspace({
             )}
           </FieldCard>
 
+          <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-2">
           <FieldCard label="Hashtags" copy={hashtagsText}>
             <div className="flex flex-wrap gap-1">
-              {(variant?.hashtags?.length ? variant.hashtags : item.hashtags).map((h) => (
+              {(variant?.hashtags ?? item.hashtags).map((h) => (
                 <span key={h} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">#{h}</span>
               ))}
             </div>
           </FieldCard>
 
 
-          <FieldCard label="First comment" copy={(item.firstComment ?? variant?.firstComment) ?? ""} bodyClassName="max-h-28 scroll-thin overflow-y-auto">
-            <p className="whitespace-pre-wrap">{item.firstComment ?? variant?.firstComment ?? "—"}</p>
-          </FieldCard>
+          <EditableReviewField key={variant?.id + "-comment"} label="First comment" value={variant?.firstComment ?? item.firstComment ?? ""}
+            editable={canEditReview && !!variant} save={value => updateReviewFieldAction(variant!.id, "firstComment", value)} />
+          </div>
         </div>
 
         {/* RIGHT — creative: prompt, media options, preview */}
-        <div className="space-y-2.5">
+        <div className="min-w-0 space-y-2">
+          <EditableReviewField label="Visual prompt" value={item.visualConcept ?? ""} editable={canEditReview && !!variant}
+            save={value => updateReviewFieldAction(variant!.id, "visualConcept", value)} />
+
+          {/* Media options */}
+          <div className="flex flex-wrap items-center gap-1.5 px-0.5">
+            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
+              {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
+            </Button>
+            <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={() => generate("ai")}>
+              <Sparkles className="size-3.5" aria-hidden /> Generate AI visual
+            </Button>
+            {editable && !isCarousel && !isReel ? (
+              <>
+                <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                  onChange={(e) => { uploadFiles(e.target.files); e.target.value = ""; }} />
+                <Button size="sm" variant="ghost" disabled={pending} onClick={() => fileRef.current?.click()}>
+                  <Upload className="size-3.5" aria-hidden /> Upload image{isCarousel ? "s" : ""}
+                </Button>
+              </>
+            ) : null}
+          </div>
+
+          {/* Carousel (multi-image) / Reel (video) media manager */}
+          <MediaUploader itemId={item.id} variantId={variant?.id} format={mediaFormat} media={uploadedMedia}
+            editable={canEditMedia} uploadInputRef={mediaInputRef} onUploadBusyChange={setMediaUploading}
+            lockedReason={editable ? item.status === "approved" ? "Revoke approval to change media." : "Media can be changed when this post is back in review." : "You have read-only access to this post."} />
+
+          {/* Visual preview */}
+          {!isCarousel && !isReel ? <FieldCard label="Visual preview">
+            {previewUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={previewUrl} alt="Preview" onError={() => setPreviewFailed(true)} className="mx-auto max-h-[220px] sm:max-h-[240px] max-w-full rounded-lg border object-contain" />
+            ) : (
+              <div className="flex h-24 items-center justify-center rounded-lg border border-dashed px-3 text-center text-xs text-muted-foreground">
+                {latestVisual ? "Media is saved, but the preview URL could not be loaded. Refresh to try again." : "No visual yet — generate, or upload your own."}
+              </div>
+            )}
+            {latestVisual && !previewUrl ? <Button size="sm" variant="outline" onClick={() => router.refresh()}>Refresh preview</Button> : null}
+            {previewFailed ? <div role="alert" className="text-xs text-destructive">The saved image preview could not load. <Button size="sm" variant="outline" onClick={() => router.refresh()}>Refresh preview</Button></div> : null}
+
+          </FieldCard> : null}
+
           {isCarousel ? (
-            <div className="space-y-2">
-              <div className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Carousel slides</div>
+            <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-2">
+              <div className="col-span-full px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Carousel slides</div>
               {slides.map((s) => {
-                const sv = visuals.filter((v) => v.slideIndex === s.index);
-                const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
                 return (
-                  <FieldCard key={s.index} label={"Slide " + s.index + (s.headline ? " — " + s.headline : "")} copy={s.visualPrompt ?? ""}
+                  <FieldCard key={s.index} label={"Slide " + s.index + (s.headline ? " — " + s.headline : "")} copy={s.visualPrompt ?? ""} bodyClassName="p-0"
                     actions={editable && aiConfigured ? (
                       <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" disabled={pending} onClick={() => generate("ai", s.index)}>
                         <Sparkles className="size-3" aria-hidden /> Generate
                       </Button>
                     ) : null}>
-                    {s.visualPrompt ? <p className="mb-2 max-h-24 scroll-thin overflow-y-auto whitespace-pre-wrap text-xs text-muted-foreground">{s.visualPrompt}</p> : null}
-                    {url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={url} alt={"Slide " + s.index} className="max-h-44 rounded-md border object-contain" />
-                    ) : null}
+                    <EditableReviewField key={variant?.id + "-slide-" + s.index} label="Visual prompt" value={s.visualPrompt ?? ""} embedded
+                      editable={canEditReview && !!variant} save={value => updateReviewFieldAction(variant!.id, "slidePrompt", value, s.index)} />
                   </FieldCard>
                 );
               })}
             </div>
           ) : isReel ? (
-            <FieldCard label={"Reel script" + (script.totalDuration ? " (" + script.totalDuration + "s)" : "")} copy={JSON.stringify(script, null, 2)} bodyClassName="max-h-72 scroll-thin overflow-y-auto">
+            <FieldCard label={"Reel script" + (script.totalDuration ? " (" + script.totalDuration + "s)" : "")} copy={JSON.stringify(script, null, 2)} bodyClassName="max-h-60 scroll-thin overflow-y-auto">
               {script.hook ? <p className="text-xs"><span className="font-medium">0-5s Hook:</span> {script.hook}</p> : null}
               {(script.scenes ?? []).map((s, i) => {
                 const sceneStart = 5 + i * Math.round(((script.totalDuration ?? 30) - 10) / Math.max((script.scenes ?? []).length, 1));
@@ -399,63 +504,14 @@ export function PostWorkspace({
               })}
               {script.outro ? <p className="mt-1.5 text-xs text-muted-foreground">Outro: {script.outro}</p> : null}
             </FieldCard>
-          ) : (
-            <FieldCard label="Visual prompt" copy={item.visualConcept ?? ""} bodyClassName="max-h-40 scroll-thin overflow-y-auto">
-              <p className="whitespace-pre-wrap text-muted-foreground">{item.visualConcept ?? "—"}</p>
-            </FieldCard>
-          )}
-
-          {/* Media options */}
-          <div className="flex flex-wrap gap-2 px-0.5">
-            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
-              {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
-            </Button>
-            <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={() => generate("ai")}>
-              <Sparkles className="size-3.5" aria-hidden /> Generate AI visual
-            </Button>
-            {editable ? (
-              <>
-                <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" multiple={isCarousel} className="hidden"
-                  onChange={(e) => { uploadFiles(e.target.files); e.target.value = ""; }} />
-                <Button size="sm" variant="ghost" disabled={pending} onClick={() => fileRef.current?.click()}>
-                  <Upload className="size-3.5" aria-hidden /> Upload image{isCarousel ? "s" : ""}
-                </Button>
-              </>
-            ) : null}
-          </div>
-
-          {/* Visual preview */}
-          <FieldCard label="Visual preview">
-            {previewUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={previewUrl} alt="Preview" className="mx-auto max-h-[320px] rounded-lg border object-contain" />
-            ) : (
-              <div className="flex h-44 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-                No visual yet — generate, or upload your own.
-              </div>
-            )}
-            {isCarousel && slides.length > 0 ? (
-              <div className="mt-2 flex gap-2 overflow-x-auto scroll-thin">
-                {slides.map((s) => {
-                  const sv = visuals.filter((v) => v.slideIndex === s.index);
-                  const url = sv.length > 0 ? visualUrls[sv[sv.length - 1].storagePath] ?? null : null;
-                  return url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img key={s.index} src={url} alt={"Slide " + s.index} className="h-24 rounded-md border object-contain" />
-                  ) : (
-                    <div key={s.index} className="flex h-24 w-20 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">S{s.index}</div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </FieldCard>
+          ) : null}
         </div>
       </div>
 
       {/* Footer — always visible: status panels + action bar */}
-      <div className="space-y-2 border-t pt-2">
+      <div className="shrink-0 space-y-1.5 border-t pt-1.5">
         {rejecting ? (
-          <div className="space-y-2 rounded-lg border border-destructive/40 p-3">
+          <div className="space-y-1.5 rounded-lg border border-destructive/40 p-2">
             <Label htmlFor={"rr-" + item.id}>Rejection reason (optional)</Label>
             <Input id={"rr-" + item.id} value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={300} placeholder="e.g. too salesy" />
             <div className="flex justify-end gap-2">
@@ -465,12 +521,16 @@ export function PostWorkspace({
           </div>
         ) : null}
         {scheduling ? (
-          <div className="space-y-2 rounded-lg border p-3">
+          <div className="grid grid-cols-1 items-end gap-2 rounded-lg border p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <div className="min-w-0 space-y-1">
             <Label htmlFor={"sd-" + item.id}>Schedule date (workspace time)</Label>
             <Input id={"sd-" + item.id} type="date" value={scheduleDate} min={new Date().toISOString().slice(0, 10)} onChange={(e) => { setScheduleDate(e.target.value); setScheduleTimeChosen(true); }} />
-            <Label htmlFor={"st-" + item.id} className="mt-2">Schedule time</Label>
+            </div>
+            <div className="min-w-0 space-y-1">
+            <Label htmlFor={"st-" + item.id}>Schedule time</Label>
             <Input id={"st-" + item.id} type="time" value={scheduleTime} onChange={(e) => { setScheduleTime(e.target.value); setScheduleTimeChosen(true); }} />
-            <div className="flex justify-end gap-2">
+            </div>
+            <div className="flex justify-end gap-1.5">
               <Button size="sm" variant="ghost" onClick={() => setScheduling(false)}>Cancel</Button>
               <Button size="sm" disabled={pending} onClick={() => { setScheduleTimeChosen(true); schedule(); }}>
                 <CalendarClock className="size-3.5" aria-hidden /> Schedule
@@ -479,17 +539,17 @@ export function PostWorkspace({
           </div>
         ) : null}
         {item.status === "scheduled" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2.5 text-xs text-indigo-300">
+          <div className="flex items-center gap-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2 text-xs text-indigo-300">
             <CalendarClock className="size-3.5" aria-hidden />
             Scheduled{item.scheduledAt ? " for " + new Intl.DateTimeFormat("en-CA", { timeZone: displayTimezone, dateStyle: "short", timeStyle: "short" }).format(new Date(item.scheduledAt)) : ""} ({displayTimezone}) — the background worker publishes automatically.
           </div>
         ) : null}
         {item.status === "failed" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
+          <div className="flex items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
             <AlertTriangle className="size-3.5" aria-hidden /> Generation failed — use Regenerate.
           </div>
         ) : null}
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 [&>button]:h-8 [&>button]:px-2.5 sm:[&>button]:h-7">
           {item.status === "approved" || item.status === "ready_for_review" || item.status === "rejected" ? (
             <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => { if (scheduleTimeChosen) schedule(); else setScheduling(true); }}>
               <CalendarClock className="size-3.5" aria-hidden /> Schedule

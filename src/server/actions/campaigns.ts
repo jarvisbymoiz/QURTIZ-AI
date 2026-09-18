@@ -96,17 +96,25 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
     const start = stripped.indexOf("[");
     const end = stripped.lastIndexOf("]");
     const parsedArc = arcSchema.safeParse(JSON.parse(stripped.slice(start, end + 1)));
-    if (parsedArc.success) themes = parsedArc.data;
+    if (parsedArc.success && parsedArc.data.length === d.durationDays &&
+      new Set(parsedArc.data.map(day => day.dayIndex)).size === d.durationDays &&
+      parsedArc.data.every(day => day.dayIndex <= d.durationDays)) {
+      themes = parsedArc.data.sort((a, b) => a.dayIndex - b.dayIndex);
+    }
   } catch {
     // fall through to default arc
   }
   let usedDefaultArc = false;
   if (themes.length === 0) {
     usedDefaultArc = true;
-    themes = DEFAULT_ARC.slice(0, d.durationDays).map((theme, i) => ({ dayIndex: i + 1, theme }));
+    themes = Array.from({ length: d.durationDays }, (_, i) => ({
+      dayIndex: i + 1,
+      theme: DEFAULT_ARC[Math.min(DEFAULT_ARC.length - 1, Math.floor(i * DEFAULT_ARC.length / d.durationDays))],
+    }));
   }
 
-  const [campaign] = await db
+  const { campaign, job } = await db.transaction(async tx => {
+  const [campaign] = await tx
     .insert(campaigns)
     .values({
       workspaceId: ctx.workspaceId,
@@ -122,7 +130,7 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
     })
     .returning();
 
-  await db.insert(campaignItems).values(
+  await tx.insert(campaignItems).values(
     themes.map((t) => ({
       campaignId: campaign.id,
       workspaceId: ctx.workspaceId,
@@ -131,7 +139,7 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
     })),
   );
 
-  const [job] = await db
+  const [job] = await tx
     .insert(jobs)
     .values({
       workspaceId: ctx.workspaceId,
@@ -143,28 +151,23 @@ Reply with ONLY a JSON array: [{"dayIndex":1,"theme":"..."},...]`,
     })
     .returning();
 
-  await db.update(campaigns).set({ jobId: job.id }).where(eq(campaigns.id, campaign.id));
+  await tx.update(campaigns).set({ jobId: job.id }).where(eq(campaigns.id, campaign.id));
+  return { campaign, job };
+  });
 
   try {
-    if (!process.env.VERCEL) {
-      const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
-      const boss = await getBoss();
-      await boss.send(QUEUES.campaignGenerate, { campaignId: campaign.id, jobId: job.id });
-    } else {
-      const { generateCampaign } = await import("@/lib/jobs/workflows");
-      void generateCampaign(campaign.id).catch((err) => {
-        console.error("[campaign serverless execution failed]", err);
-      });
-    }
+    const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+    const boss = await getBoss();
+    const queuedId = await boss.send(QUEUES.campaignGenerate, { campaignId: campaign.id, jobId: job.id });
+    if (!queuedId) throw new Error("The campaign could not be queued.");
   } catch (error) {
-    try {
-      const { generateCampaign } = await import("@/lib/jobs/workflows");
-      void generateCampaign(campaign.id).catch((err) => {
-        console.error("[campaign fallback execution failed]", err);
-      });
-    } catch {
-      console.warn("[campaign dispatch]", error);
-    }
+    console.error("[campaign dispatch]", error);
+    await db.transaction(async tx => {
+      await tx.update(jobs).set({ status: "failed", error: "Campaign queue unavailable. Try again after the worker connection is restored.", updatedAt: new Date() }).where(eq(jobs.id, job.id));
+      await tx.update(campaigns).set({ status: "cancelled", updatedAt: new Date() }).where(eq(campaigns.id, campaign.id));
+    });
+    revalidatePath("/campaigns");
+    return { ok: false, error: "The campaign was saved but could not be queued. Check the worker connection before retrying." };
   }
 
   revalidatePath("/campaigns");

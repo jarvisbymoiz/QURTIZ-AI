@@ -1,4 +1,4 @@
-﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import {
   AI_CONFIGURATION_REQUIRED_MESSAGE,
@@ -95,6 +95,7 @@ function expectAIConfigError(fn: () => unknown, detailRegex: RegExp): void {
 }
 
 beforeEach(() => {
+  vi.stubEnv("AI_ALLOWED_BASE_URLS", "https://a.example/v1,https://b.example/v1,https://gateway.example/v1,https://legacy-gateway.example/v1,https://legacy.example/v1,https://my-gateway.example/v1,https://proxy.example/v1,https://x.example/v1");
   // The dev-only env fallback must never interfere with these tests: a
   // workspace with no row must throw AIConfigError, not resolve via
   // GEMINI_API_KEY.

@@ -2,6 +2,7 @@
 
 import type { ImageProviderId } from "@/lib/ai/provider";
 import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
+import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 
 /**
  * Image generation via REST, driven by the workspace's own AI config
@@ -117,9 +118,11 @@ async function openaiCompatibleGenerate(args: {
   baseUrl: string;
 }): Promise<ImageGenResult> {
   const baseUrl = args.baseUrl.replace(/\/+$/, "");
+  assertAllowedAiEndpoint(baseUrl);
   const model = args.modelId;
   try {
     const res = await fetch(`${baseUrl}/images/generations`, {
+      redirect: "error",
       method: "POST",
       headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({

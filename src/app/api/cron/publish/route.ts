@@ -8,7 +8,10 @@ export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
 
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  if (!cronSecret) {
+    return NextResponse.json({ error: "Cron is not configured" }, { status: 503 });
+  }
+  if (authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -19,7 +22,7 @@ export async function GET(req: NextRequest) {
   } catch (error) {
     console.error("[cron/publish error]", error);
     return NextResponse.json(
-      { ok: false, error: error instanceof Error ? error.message : "Cron execution failed" },
+      { ok: false, error: "Cron execution failed; check server logs" },
       { status: 500 },
     );
   }

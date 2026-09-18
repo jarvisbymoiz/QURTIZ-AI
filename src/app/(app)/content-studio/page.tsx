@@ -1,3 +1,4 @@
+import { effectiveContent } from "@/lib/content/edit";
 ﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
@@ -43,6 +44,7 @@ export default async function ContentStudioPage() {
   const visualUrls = visuals.length
     ? await listAssetSignedUrls(visuals.map((v) => v.storagePath))
     : {};
+  const display = items.map(item => effectiveContent(item, variants.filter(variant => variant.contentItemId === item.id)));
   return (
     <div className="space-y-6">
       <PageHeader
@@ -50,8 +52,9 @@ export default async function ContentStudioPage() {
         description="Generate, review, and manage posts. Every post is AI-estimated and QA-checked before review — nothing publishes from here."
       />
       <StudioClient
-        items={items}
-        variants={variants}
+        workspaceId={ctx.workspace.id}
+        items={display.map(record => record.item)}
+        variants={display.flatMap(record => record.variants)}
         pillars={pillars}
         visuals={visuals}
         visualUrls={visualUrls}

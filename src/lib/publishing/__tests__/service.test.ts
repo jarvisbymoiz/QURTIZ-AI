@@ -10,8 +10,10 @@ import {
   isFirstCommentPlanError,
   platformToBufferService,
   publishNow,
+  retryFailedPublish,
   resolvePublishConnection,
   schedulePost,
+  selectItemMedia,
   shouldProactivelyRefresh,
   PublishingError,
   type ContentKind,
@@ -27,6 +29,7 @@ import {
   workspaces,
 } from "@/db/schema";
 import { encryptToken } from "@/lib/crypto/tokens";
+import { dateIsoInTz, hmInTz, parseZonedDateTime } from "@/lib/scheduling/time";
 
 /* ── Module mocks ─────────────────────────────────────────────────────── */
 
@@ -45,7 +48,7 @@ vi.mock("@/lib/buffer/client", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/meta/publish", () => ({ publishPost: vi.fn() }));
+vi.mock("@/lib/meta/publish", () => ({ publishPost: vi.fn(), publishFirstComment: vi.fn() }));
 
 // Signed-URL helper stub: the service asks Supabase storage for a reachable
 // image URL whenever a visual is attached to the item under publish.
@@ -140,7 +143,7 @@ const VARIANT_ROW: Row = {
   contentItemId: ITEM_ID,
   workspaceId: WORKSPACE_ID,
   platform: "facebook",
-  format: "reel",
+  format: "single_image",
   caption: "Variant caption",
   hashtags: ["tag1", "tag2"],
   firstComment: "First! 🚀",
@@ -190,12 +193,15 @@ function makeFakeDb(spec: {
   }
 
   const db = {
+    transaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => callback(db),
     select: () => ({
       from: (table: unknown) => ({
         where: () => {
           const promise = Promise.resolve(nextRows(table)) as Promise<Row[]> & {
             orderBy: () => { limit: () => Promise<Row[]> };
+            for: () => Promise<Row[]>;
           };
+          promise.for = () => promise;
           promise.orderBy = () => ({ limit: () => Promise.resolve(nextRows(table)) });
           return promise;
         },
@@ -226,6 +232,18 @@ function makeFakeDb(spec: {
 }
 
 /* ── Pure helpers ─────────────────────────────────────────────────────── */
+
+describe("mixed-format post media selection", () => {
+  it("selects ordered Carousel images and Reel video independently from shared uploaded media", async () => {
+    const fake=makeFakeDb({visualAssets:[[
+      {kind:"upload",storagePath:"second.png",mimeType:"image/png",slideIndex:1,createdAt:new Date()},
+      {kind:"upload",storagePath:"reel.mov",mimeType:"video/quicktime",slideIndex:0,createdAt:new Date()},
+      {kind:"upload",storagePath:"first.png",mimeType:"image/png",slideIndex:0,createdAt:new Date()},
+    ]]});mockedGetDb.mockReturnValue(fake.db as never);
+    expect(await selectItemMedia({workspaceId:WORKSPACE_ID,contentItemId:ITEM_ID,format:"carousel"})).toMatchObject({kind:"images",paths:["first.png","second.png"]});
+    expect(await selectItemMedia({workspaceId:WORKSPACE_ID,contentItemId:ITEM_ID,format:"reel"})).toMatchObject({kind:"video",paths:["reel.mov"],mimeTypes:["video/quicktime"]});
+  });
+});
 
 describe("deriveContentKind", () => {
   it("maps reel → reel", () => {
@@ -326,7 +344,7 @@ describe("buildBufferPayload", () => {
 describe("createPost variables contract (wired through buildBufferPayload)", () => {
   it("mutation string carries NO literal values — everything travels in variables", () => {
     expect(CREATE_POST_MUTATION).toBe(
-      "mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id text dueAt } } ... on MutationError { message } } }",
+      "mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id text dueAt status } } ... on MutationError { message } } }",
     );
     // No quoted literals inline (Buffer rejects quoted enums inside the
     // inline mutation string) and no ids/text baked in.
@@ -361,6 +379,7 @@ describe("createPost variables contract (wired through buildBufferPayload)", () 
     expect(input.metadata).toHaveProperty("facebook.type", "post"); // a plain STRING (valid enum in variables)
   });
 
+
   it("instagram customScheduled — dueAt present, omits metadata when no firstComment", () => {
     const args = buildBufferPayload({
       channelId: "ch-ig",
@@ -385,12 +404,13 @@ describe("createPost variables contract (wired through buildBufferPayload)", () 
       schedulingType: "automatic",
       needsApproval: false,
       assets: [],
+      metadata: { instagram: { type: "reel", shouldShareToFeed: true } },
       dueAt: "2026-09-04T10:00:00.000Z",
     });
-    expect(input.metadata).toBeUndefined();
+    expect(input.metadata).toEqual({ instagram: { type: "reel", shouldShareToFeed: true } });
   });
 
-  it("instagram — includes firstComment in metadata.instagram without unsupported type field", () => {
+  it("instagram - sends the REQUIRED type + shouldShareToFeed metadata alongside the firstComment", () => {
     const { input } = buildCreatePostVariables({
       channelId: "ch-ig",
       text: "Hi",
@@ -400,9 +420,9 @@ describe("createPost variables contract (wired through buildBufferPayload)", () 
       firstComment: "Hello from IG comment!",
     });
     expect(input.metadata).toEqual({
-      instagram: { firstComment: "Hello from IG comment!" },
+      instagram: { type: "post", shouldShareToFeed: true, firstComment: "Hello from IG comment!" },
     });
-    expect("type" in (input.metadata as Record<string, unknown>).instagram).toBe(false);
+    expect((input.metadata as Record<string, unknown>).instagram).toHaveProperty("shouldShareToFeed", true);
   });
 });
 
@@ -581,6 +601,43 @@ describe("resolvePublishConnection — token lifecycle", () => {
 });
 
 describe("publishNow — Buffer lifecycle", () => {
+  it.each(["network", "invalid_response"] as const)("does not resend after an ambiguous %s response", async reason => {
+    const fake = happyDb(makeConnRow());
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: false, reason, message: "Response lost" });
+    const result = await publishNow({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID, contentVariantId: VARIANT_ID, platform: "facebook" });
+    expect(result).toMatchObject({ ok: false, reason: "unknown_outcome" });
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
+    expect(fake.updates.some(write => write.values.status === "published")).toBe(false);
+  });
+
+  it.each([
+    { status: "processing", providerPostId: null },
+    { status: "failed", providerPostId: "accepted-1" },
+    { status: "failed", providerPostId: null, result: { reconciliationRequired: true } },
+  ])("blocks a new immediate publish when a prior job is active or unconfirmed: %j", async job => {
+    const fake = makeFakeDb({ contentItems: [[ITEM_ROW]], contentVariants: [[VARIANT_ROW]],
+      platformConnections: [[makeConnRow()]], publishingJobs: [[job]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    const result = await publishNow({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID, contentVariantId: VARIANT_ID, platform: "facebook" });
+    expect(result).toMatchObject({ ok: false, reason: "publish_conflict" });
+    expect(fake.inserts).toHaveLength(0);
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+  it.each(["unknown", "pending", "error"])("preserves the accepted post ID without claiming publication for status %s", async (status) => {
+    const fake = happyDb(makeConnRow());
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({ ok: true, data: { id: "accepted-1", status, dueAt: null } });
+    const result = await publishNow({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID, contentVariantId: VARIANT_ID, platform: "facebook" });
+    expect(result.ok).toBe(status !== "error");
+    if (result.ok) expect(result.pendingDelivery).toBe(true);
+    expect(fake.updates.some(write => write.values.status === "published")).toBe(false);
+    expect(fake.updates.find(write => write.table === publishingJobs && write.values.providerPostId === "accepted-1")?.values)
+      .toMatchObject({ status: status === "error" ? "failed" : "processing", providerPostId: "accepted-1" });
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
+  });
   function happyDb(conn: Row, spec?: { visualAssets?: Row[][]; contentVariants?: Row[][] }) {
     return makeFakeDb({
       platformConnections: [[conn]],
@@ -627,6 +684,7 @@ describe("publishNow — Buffer lifecycle", () => {
       provider: "buffer",
       mode: "shareNow",
       providerPostId: "post-ok",
+      pendingDelivery: false,
       scheduledAt: expect.any(Date),
       mediaAttached: false, // text-only variant, no visual attached
     });
@@ -637,10 +695,10 @@ describe("publishNow — Buffer lifecycle", () => {
     expect(mockedCreatePostForBuffer.mock.calls[1][1]).toMatchObject({
       channelId: CHANNEL_REF,
       mode: "shareNow",
-      contentKind: "reel",
+      contentKind: "post",
       service: "facebook",
       firstComment: "First! 🚀",
-      mediaUrl: null,
+      mediaUrls: [],
     });
     // The rotated envelope was persisted (stale guard passed: same token).
     expect(fake.updates.filter((u) => "encryptedToken" in u.values)).toHaveLength(1);
@@ -698,7 +756,7 @@ describe("publishNow — Buffer lifecycle", () => {
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.mediaAttached).toBe(true);
     expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
-    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBe("https://signed.example/visual.png");
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrls).toEqual(["https://signed.example/visual.png"]);
     const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-media");
     expect(jobUpdate).toBeDefined();
     expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBe(true);
@@ -908,13 +966,13 @@ describe("publishNow / schedulePost — connection guard", () => {
   it("schedulePost stamps the job with the resolved provider + channel and flips statuses", async () => {
     const fake = makeFakeDb({
       platformConnections: [[makeConnRow()]],
-      contentVariants: [[VARIANT_ROW], [{ status: "scheduled" }]],
+      contentVariants: [[VARIANT_ROW], [VARIANT_ROW], [{ status: "scheduled" }]],
       contentItems: [[ITEM_ROW]],
       visualAssets: [[]],
       workspaces: [[{ createdBy: "user-1" }]],
     });
     mockedGetDb.mockReturnValue(fake.db as never);
-    const scheduledAt = new Date("2026-09-10T12:00:00.000Z");
+    const scheduledAt = new Date(Date.now() + 86_400_000);
 
     const res = await schedulePost({
       workspaceId: WORKSPACE_ID,
@@ -963,7 +1021,7 @@ describe("publishNow / schedulePost — connection guard", () => {
       contentItemId: ITEM_ID,
       contentVariantId: VARIANT_ID,
       platform: "facebook",
-      scheduledAt: new Date("2026-09-10T12:00:00.000Z"),
+      scheduledAt: new Date(Date.now() + 86_400_000),
     });
 
     expect(res).toEqual({
@@ -1010,9 +1068,9 @@ describe("publishNow — first-comment paid-plan fallback", () => {
     // created nothing on the MutationError).
     expect(mockedCreatePostForBuffer.mock.calls[1][1]).toMatchObject({
       channelId: CHANNEL_REF,
-      text: "Item caption\n\n#tag1 #tag2",
+      text: "Variant caption\n\n#tag1 #tag2",
       mode: "shareNow",
-      contentKind: "reel",
+      contentKind: "post",
       service: "facebook",
       firstComment: null,
     });
@@ -1021,6 +1079,7 @@ describe("publishNow — first-comment paid-plan fallback", () => {
       provider: "buffer",
       mode: "shareNow",
       providerPostId: "post-fc",
+      pendingDelivery: false,
       scheduledAt: expect.any(Date),
       mediaAttached: false,
       firstCommentSkipped: true,
@@ -1081,7 +1140,7 @@ describe("publishNow — first-comment paid-plan fallback", () => {
     expect(failUpdate!.values.lastError).toBe("Invalid post: First comment requires a paid plan.");
   });
 
-  it("retries Instagram publish when Buffer rejects firstComment / input.metadata.instagram GraphQL validation", async () => {
+  it("strips the first comment and retries EXACTLY ONCE when Buffer rejects it (comment-specific failure)", async () => {
     const fake = fcDb("conn-fc-ig");
     mockedGetDb.mockReturnValue(fake.db as never);
     mockChannelOk();
@@ -1089,7 +1148,7 @@ describe("publishNow — first-comment paid-plan fallback", () => {
       .mockResolvedValueOnce({
         ok: false,
         reason: "rejected",
-        message: 'Variable "$input" got invalid value { firstComment: "..." } at "input.metadata.instagram"; Field "shouldShareToFeed"...',
+        message: 'Field "firstComment" is not defined by type "InstagramPostMetadataInput".',
       })
       .mockResolvedValueOnce({ ok: true, data: { id: "post-ig-fc", status: "sent", dueAt: null } });
 
@@ -1101,32 +1160,77 @@ describe("publishNow — first-comment paid-plan fallback", () => {
     });
 
     expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(2);
-    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.firstComment).toBe("First! 🚀");
-    expect(mockedCreatePostForBuffer.mock.calls[1][1]?.firstComment).toBeNull();
+    const first = mockedCreatePostForBuffer.mock.calls[0][1];
+    const retry = mockedCreatePostForBuffer.mock.calls[1][1];
+    expect(first?.firstComment).toBe(VARIANT_ROW.firstComment);
+    // The retry is the SAME post (channel/kind/service/media identical) with ONLY
+    // the comment dropped. The per-service metadata is rebuilt by the variables
+    // builder, so the retry payload is valid on its own - the exact Instagram
+    // variables JSON (required type + shouldShareToFeed) is locked in
+    // client.test.ts.
+    expect(retry?.channelId).toBe(first?.channelId);
+    expect(retry?.contentKind).toBe(first?.contentKind);
+    expect(retry?.service).toBe(first?.service);
+    expect(retry?.mediaUrls).toEqual(first?.mediaUrls);
+    expect(retry?.videoUrl).toBe(first?.videoUrl);
+    expect(retry?.firstComment).toBeNull();
     expect(res).toEqual({
       ok: true,
       provider: "buffer",
       mode: "shareNow",
       providerPostId: "post-ig-fc",
+      pendingDelivery: false,
       scheduledAt: expect.any(Date),
       mediaAttached: false,
       firstCommentSkipped: true,
     });
+    // Published ONLY after Buffer confirmed success, with providerPostId
+    // persisted (idempotency: a second fire refuses because it is set).
+    const jobUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.providerPostId === "post-ig-fc");
+    expect(jobUpdate).toBeDefined();
+    expect(jobUpdate!.values.status).toBe("published");
+    expect((jobUpdate!.values.result as Record<string, unknown>).firstCommentSkipped).toBe(true);
   });
 
-  it("isFirstCommentPlanError matches paid-plan, camelCase firstComment, and metadata.instagram errors", () => {
+  it("does NOT retry for a required-field payload error (permanent, never published)", async () => {
+    const fake = fcDb("conn-fc-ig-required");
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockChannelOk();
+    mockedCreatePostForBuffer.mockResolvedValue({
+      ok: false,
+      reason: "rejected",
+      message:
+        'Variable "$input" got invalid value {...} at "input.metadata.instagram"; Field "type" of required type "PostType!" was not provided.',
+    });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "instagram",
+    });
+
+    expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ ok: false, reason: "rejected", message: expect.stringContaining("PostType") });
+    const published = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "published");
+    expect(published).toBeUndefined();
+    const failed = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "failed");
+    expect(failed).toBeDefined();
+  });
+  it("isFirstCommentPlanError matches only comment / unsupported-Instagram-metadata causes", () => {
     expect(isFirstCommentPlanError("Invalid post: First comment requires a paid plan.")).toBe(true);
-    expect(
-      isFirstCommentPlanError(
-        'Variable "$input" got invalid value { type: "post", firstComment: "..." } at "input.metadata.instagram"; Field "s..."',
-      ),
-    ).toBe(true);
     expect(isFirstCommentPlanError('Field "firstComment" is not defined by type "InstagramPostMetadataInput"')).toBe(true);
     expect(isFirstCommentPlanError("Unsupported Instagram metadata field")).toBe(true);
+    // REQUIRED-field validation errors are payload bugs - never strip-and-retry.
+    expect(
+      isFirstCommentPlanError(
+        'Variable "$input" got invalid value {...} at "input.metadata.instagram"; Field "type" of required type "PostType!" was not provided.',
+      ),
+    ).toBe(false);
+    expect(isFirstCommentPlanError('Field "shouldShareToFeed" of required type "Boolean!" was not provided.')).toBe(false);
     expect(isFirstCommentPlanError("Invalid post: Image dimensions not supported.")).toBe(false);
     expect(isFirstCommentPlanError("Channel not found")).toBe(false);
-  });
-});
+  });});
 
 /* ── Fix B: publishNow synthetic job-row persistence ─────────────────── */
 
@@ -1209,21 +1313,30 @@ describe("publishNow — synthetic job row persistence", () => {
 /* ── Fix C: partial-schedule visibility (MIN scheduledAt) ────────────── */
 
 describe("schedulePost — partial-schedule visibility", () => {
-  const SLOT = new Date("2026-09-10T12:00:00.000Z");
-  const EARLIER = new Date("2026-09-10T09:00:00.000Z");
+  it("rejects a past timestamp before any database changes", async () => {
+    const fake = makeFakeDb({});
+    mockedGetDb.mockReturnValue(fake.db as never);
+    expect(await schedulePost({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID, platform: "facebook", scheduledAt: new Date(Date.now() - 1000) }))
+      .toMatchObject({ ok: false, reason: "invalid_time" });
+    expect(fake.inserts).toHaveLength(0);
+    expect(fake.deletes).toHaveLength(0);
+  });
+  const SLOT = new Date(Date.now() + 86_400_000);
+  const EARLIER = new Date(SLOT.getTime() - 3 * 3_600_000);
 
   function schedDb(secondStatuses: Row[]) {
     return makeFakeDb({
       platformConnections: [[makeConnRow()]],
       // select #1: variant by id (loadPublishContext); #2: statuses for the
       // all-scheduled check after the variant flip.
-      contentVariants: [[VARIANT_ROW], secondStatuses],
+      contentVariants: [[VARIANT_ROW], [VARIANT_ROW], secondStatuses],
       contentItems: [[ITEM_ROW]],
       visualAssets: [[]],
       workspaces: [[{ createdBy: "user-1" }]],
       // Pending publish jobs for the item (MIN source). The just-inserted job
       // plus another variant's earlier pending job.
-      publishingJobs: [[{ scheduledAt: EARLIER }, { scheduledAt: SLOT }]],
+      publishingJobs: [[], [{ scheduledAt: EARLIER }, { scheduledAt: SLOT }]],
     });
   }
 
@@ -1270,6 +1383,35 @@ describe("schedulePost — partial-schedule visibility", () => {
 
 /* ── Third fallback: public-URL HEAD (no-key background path) ─────────── */
 
+describe("schedulePost — Auto Run Calendar policy", () => {
+  const policy = { timezone: "Asia/Karachi", times: ["09:00", "12:00", "17:00"], source: "configured-fallback", fallbackTimes: ["09:00", "12:00", "17:00"], minGapMinutes: 120, maxPostsPerDay: 3 };
+  function autoDb(config: Row, occupied: Row[]) {
+    return makeFakeDb({ platformConnections: [[makeConnRow()]], contentItems: [[ITEM_ROW]],
+      contentVariants: [[VARIANT_ROW], [VARIANT_ROW], [{ status: "scheduled" }]], visualAssets: [[]],
+      workspaces: [[{ id: WORKSPACE_ID, createdBy: "user-1" }]], settings: [[{ value: config }]],
+      publishingJobs: [occupied, [], []] });
+  }
+  it("uses the next free configured slot from the committed Calendar instead of the supplied placeholder", async () => {
+    const tomorrow = new Date(`${dateIsoInTz(policy.timezone, new Date())}T12:00:00Z`);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    const day = tomorrow.toISOString().slice(0, 10);
+    const fake = autoDb({ enabled: true, requireApproval: false, autoSchedule: true }, [{ scheduledAt: parseZonedDateTime(day, "09:30", policy.timezone) }]);
+    mockedGetDb.mockReturnValue(fake.db as never);
+    const res = await schedulePost({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID, contentVariantId: VARIANT_ID, platform: "facebook",
+      scheduledAt: new Date(Date.now() + 60_000), autoTiming: policy });
+    expect(res.ok).toBe(true);
+    expect(hmInTz(policy.timezone, fake.inserts[0].values.scheduledAt as Date)).toBe("12:00");
+    expect(dateIsoInTz(policy.timezone, fake.inserts[0].values.scheduledAt as Date)).toBe(day);
+    expect(fake.inserts[0].values.result).toMatchObject({ schedulingSource: "configured-fallback", timezone: policy.timezone });
+  });
+  it.each([{ enabled: false, requireApproval: false }, { enabled: true, requireApproval: true }, { enabled: true, requireApproval: false, autoSchedule: false }])("honors changed approval/enable/scheduling settings at commit time: %j", async config => {
+    const fake = autoDb(config, []); mockedGetDb.mockReturnValue(fake.db as never);
+    expect(await schedulePost({ workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID, contentVariantId: VARIANT_ID, platform: "facebook",
+      scheduledAt: new Date(Date.now() + 60_000), autoTiming: policy })).toMatchObject({ ok: false, reason: "not_approved" });
+    expect(fake.inserts).toHaveLength(0); expect(fake.deletes).toHaveLength(0);
+  });
+});
+
 describe("signedUrlForVisual — public-URL fallback", () => {
   /** DB with a visual present (the signing chain is exercised). */
   function visualDb(connId: string) {
@@ -1315,11 +1457,11 @@ describe("signedUrlForVisual — public-URL fallback", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://supa.example.co/storage/v1/object/public/brand-assets/brand-assets/visual.png",
-      { method: "HEAD" },
+      expect.objectContaining({ method: "HEAD", redirect: "error", signal: expect.any(AbortSignal) }),
     );
-    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBe(
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrls).toEqual([
       "https://supa.example.co/storage/v1/object/public/brand-assets/brand-assets/visual.png",
-    );
+    ]);
     // Honest mediaAttached in the job-row result jsonb (worker path).
     const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-pub");
     expect(jobUpdate).toBeDefined();
@@ -1395,7 +1537,7 @@ describe("publishNow — mediaUrlOverride (Calendar Publish Now pre-mint)", () =
     // Minting was skipped entirely — the signer was never constructed.
     expect(vi.mocked(createServiceClient)).not.toHaveBeenCalled();
     expect(mockedCreatePostForBuffer).toHaveBeenCalledTimes(1);
-    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBe("https://signed.example/preminted-by-session.png");
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrls).toEqual(["https://signed.example/preminted-by-session.png"]);
     // Honest mediaAttached in the job-row result jsonb.
     const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-override");
     expect(jobUpdate).toBeDefined();
@@ -1417,8 +1559,214 @@ describe("publishNow — mediaUrlOverride (Calendar Publish Now pre-mint)", () =
     });
 
     expect(res).toMatchObject({ ok: true, providerPostId: "post-noviz", mediaAttached: false });
-    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrl).toBeNull();
+    expect(mockedCreatePostForBuffer.mock.calls[0][1]?.mediaUrls).toEqual([]);
     const jobUpdate = fake.updates.find((u) => u.values.providerPostId === "post-noviz");
     expect((jobUpdate!.values.result as Record<string, unknown>).mediaAttached).toBeUndefined();
+  });
+});
+
+/* -- Meta FIRST COMMENT (separate request, own lifecycle, idempotent) -------- */
+
+const metaPublishModule = await import("@/lib/meta/publish");
+const mockedPublishPost = vi.mocked(metaPublishModule.publishPost);
+const mockedPublishFirstComment = vi.mocked(metaPublishModule.publishFirstComment);
+
+describe("Meta first comment", () => {
+  function metaDb(jobRow?: Row) {
+    return makeFakeDb({
+      platformConnections: [[makeConnRow({ provider: "meta" })]],
+      contentVariants: [[{ ...VARIANT_ROW, ...(jobRow?.status === "published" ? { status: "published" } : {}) }]],
+      contentItems: [[{ ...ITEM_ROW, ...(jobRow?.status === "published" ? { status: "published" } : {}) }]],
+      visualAssets: [[]],
+      workspaces: [[{ createdBy: "user-1" }]],
+      ...(jobRow ? { publishingJobs: [[jobRow]] } : {}),
+    });
+  }
+
+  it("publishes the first comment as a SEPARATE request and records the comment id", async () => {
+    const fake = metaDb();
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockedPublishPost.mockResolvedValue({ ok: true, postId: "post-1", permalink: null });
+    mockedPublishFirstComment.mockResolvedValue({ ok: true, commentId: "cmt-1", status: 200 });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      jobId: "job-fc",
+    });
+
+    expect(mockedPublishPost).toHaveBeenCalledTimes(1);
+    // Separate request, addressed by the id the main post returned.
+    expect(mockedPublishFirstComment).toHaveBeenCalledTimes(1);
+    expect(mockedPublishFirstComment.mock.calls[0][0]).toMatchObject({
+      platform: "facebook",
+      postId: "post-1",
+      message: VARIANT_ROW.firstComment,
+    });
+    expect(res).toMatchObject({
+      ok: true,
+      providerPostId: "post-1",
+      comment: { status: "published", providerCommentId: "cmt-1" },
+    });
+    // The persisted job result carries the comment state + provider comment id.
+    const commentStates = fake.updates
+      .filter((u) => u.table === publishingJobs)
+      .map((u) => (u.values.result ?? {}) as Record<string, unknown>)
+      .map((r) => r.comment as Record<string, unknown> | undefined)
+      .filter((c): c is Record<string, unknown> => Boolean(c));
+    expect(commentStates.some((c) => c.status === "published" && c.providerCommentId === "cmt-1")).toBe(true);
+  });
+
+  it("keeps the post Published when the comment fails, and records the failure", async () => {
+    const fake = metaDb();
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockedPublishPost.mockResolvedValue({ ok: true, postId: "post-2", permalink: null });
+    mockedPublishFirstComment.mockResolvedValue({ ok: false, reason: "graph_error", message: "comment boom" });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "instagram",
+      jobId: "job-ig",
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.providerPostId).toBe("post-2");
+      expect(res.comment).toMatchObject({ status: "failed", providerCommentId: null });
+      expect(res.comment?.error).toContain("comment boom");
+    }
+    // The job row is still published - a comment failure never un-publishes.
+    const publishedUpdate = fake.updates.find((u) => u.table === publishingJobs && u.values.status === "published");
+    expect(publishedUpdate).toBeDefined();
+    expect(publishedUpdate!.values.providerPostId).toBe("post-2");
+  });
+
+  it("marks an unsupported comment terminal instead of failing or retrying it", async () => {
+    const fake = metaDb();
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockedPublishPost.mockResolvedValue({ ok: true, postId: "post-3", permalink: null });
+    mockedPublishFirstComment.mockResolvedValue({
+      ok: false,
+      reason: "unsupported",
+      message: "Comments are not supported for this media type.",
+    });
+
+    const res = await publishNow({
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "instagram",
+      jobId: "job-ig-2",
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.comment?.status).toBe("unsupported");
+  });
+
+  it("retries ONLY the comment when the main post is already published (never republishes)", async () => {
+    const jobRow: Row = {
+      id: "job-cmt-only",
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      provider: "meta",
+      status: "published",
+      providerPostId: "post-9",
+      attempts: 1,
+      result: {
+        postId: "post-9",
+        comment: { status: "pending", providerCommentId: null, error: null, attemptedAt: null, publishedAt: null },
+      },
+    };
+    const fake = metaDb(jobRow);
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockedPublishFirstComment.mockResolvedValue({ ok: true, commentId: "cmt-9", status: 200 });
+
+    const res = await retryFailedPublish({ workspaceId: WORKSPACE_ID, jobId: "job-cmt-only" });
+
+    // The main post is NOT touched: providerPostId is its idempotency key.
+    expect(mockedPublishPost).not.toHaveBeenCalled();
+    expect(mockedPublishFirstComment).toHaveBeenCalledTimes(1);
+    expect(mockedPublishFirstComment.mock.calls[0][0]).toMatchObject({ postId: "post-9" });
+    expect(res).toMatchObject({
+      ok: true,
+      providerPostId: "post-9",
+      comment: { status: "published", providerCommentId: "cmt-9" },
+    });
+  });
+
+  it("never duplicates a comment that was already created (restart / retry protection)", async () => {
+    const jobRow: Row = {
+      id: "job-cmt-done",
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "facebook",
+      provider: "meta",
+      status: "published",
+      providerPostId: "post-10",
+      attempts: 1,
+      result: {
+        postId: "post-10",
+        comment: { status: "published", providerCommentId: "cmt-10", error: null, attemptedAt: "x", publishedAt: "y" },
+      },
+    };
+    const fake = metaDb(jobRow);
+    mockedGetDb.mockReturnValue(fake.db as never);
+
+    const res = await retryFailedPublish({ workspaceId: WORKSPACE_ID, jobId: "job-cmt-done" });
+
+    expect(mockedPublishPost).not.toHaveBeenCalled();
+    expect(mockedPublishFirstComment).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ ok: false, reason: "already_published" });
+  });
+
+  it("records permission_required (terminal) when Meta refuses the comment permission, and keeps the post published", async () => {
+    const jobRow: Row = {
+      id: "job-cmt-perm",
+      workspaceId: WORKSPACE_ID,
+      contentItemId: ITEM_ID,
+      contentVariantId: VARIANT_ID,
+      platform: "instagram",
+      provider: "meta",
+      status: "published",
+      providerPostId: "post-perm",
+      attempts: 1,
+      result: {
+        postId: "post-perm",
+        comment: { status: "pending", providerCommentId: null, error: null, attemptedAt: null, publishedAt: null },
+      },
+    };
+    const fake = metaDb(jobRow);
+    mockedGetDb.mockReturnValue(fake.db as never);
+    mockedPublishFirstComment.mockResolvedValue({
+      ok: false,
+      reason: "permission_required",
+      message: "Permissions error",
+      code: 200,
+      status: 400,
+    });
+
+    const res = await retryFailedPublish({ workspaceId: WORKSPACE_ID, jobId: "job-cmt-perm" });
+
+    expect(mockedPublishPost).not.toHaveBeenCalled();
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.comment?.status).toBe("permission_required");
+      expect(res.comment?.error).toMatch(/instagram_manage_comments/);
+      expect(res.comment?.providerCommentId).toBeNull();
+    }
+    // Terminal status: a further retry must NOT re-attempt the comment.
+    const stored = fake.updates
+      .filter((u) => u.table === publishingJobs)
+      .map((u) => (u.values.result ?? {}) as Record<string, unknown>)
+      .map((r) => r.comment as Record<string, unknown> | undefined)
+      .filter((c): c is Record<string, unknown> => Boolean(c));
+    expect(stored.some((c) => c.status === "permission_required")).toBe(true);
   });
 });

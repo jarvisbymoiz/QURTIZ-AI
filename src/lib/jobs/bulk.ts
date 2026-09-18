@@ -1,4 +1,6 @@
-﻿import "server-only";
+import { retrieveAgentMemory } from "@/lib/ai/persistent-memory";
+import { boundedAgentReference } from "@/lib/ai/memory-policy";
+import "server-only";
 
 import { and, desc, eq, ne } from "drizzle-orm";
 import { generateObject } from "ai";
@@ -6,7 +8,6 @@ import { z } from "zod";
 import { getDb } from "@/db";
 import {
   agentRuns,
-  brandMemory,
   brands,
   contentItems,
   contentPillars,
@@ -56,7 +57,11 @@ type PlanItem = z.infer<typeof planSchema>["items"][number];
 
 async function setStage(jobId: string, stage: BulkStage, progress?: number, total?: number): Promise<void> {
   const db = getDb();
-  const patch: Record<string, unknown> = { result: { stage }, updatedAt: new Date() };
+  const [current] = await db.select({ result: jobs.result }).from(jobs).where(eq(jobs.id, jobId));
+  const patch: Record<string, unknown> = {
+    result: { ...((current?.result ?? {}) as Record<string, unknown>), stage },
+    updatedAt: new Date(),
+  };
   if (progress !== undefined) patch.progress = progress;
   if (total !== undefined) patch.total = total;
   await db.update(jobs).set(patch).where(eq(jobs.id, jobId));
@@ -70,10 +75,9 @@ async function setStage(jobId: string, stage: BulkStage, progress?: number, tota
  */
 export async function runBulkPlan(jobId: string): Promise<void> {
   const db = getDb();
-  const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-  if (!job || job.status !== "queued") return;
-
-  await db.update(jobs).set({ status: "running", updatedAt: new Date() }).where(eq(jobs.id, jobId));
+  const [job] = await db.update(jobs).set({ status: "running", updatedAt: new Date() })
+    .where(and(eq(jobs.id, jobId), eq(jobs.status, "queued"))).returning();
+  if (!job) return;
 
   const input = (job.input ?? {}) as { count?: number; niche?: string };
   const count = Math.min(Math.max(input.count ?? 12, 1), 30);
@@ -88,11 +92,7 @@ export async function runBulkPlan(jobId: string): Promise<void> {
     // ── 1. Brand Brain ──────────────────────────────────────────────
     await setStage(jobId, "Analyzing Brand Brain");
     const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, job.workspaceId));
-    const memories = await db
-      .select()
-      .from(brandMemory)
-      .where(and(eq(brandMemory.workspaceId, job.workspaceId), eq(brandMemory.active, true)))
-      .limit(40);
+    const learned = await retrieveAgentMemory({ workspaceId: job.workspaceId, userId: job.userId }, "Create content strategy posts " + (niche ?? ""));
     const pillars = await db
       .select()
       .from(contentPillars)
@@ -169,12 +169,13 @@ export async function runBulkPlan(jobId: string): Promise<void> {
     const planRes = await withRateLimitRetry(() =>
       generateObject({
         model,
+        system: learned.identity,
         schema: planSchema,
       prompt: `${GLOBAL_AI_INSTRUCTION}
 
 You are the content strategist for "${brand?.businessName ?? "the brand"}".
 Brand Brain: ${summarizeBrandBrain(brand ?? null)}
-Brand memory: ${memories.map((m) => m.content).join("; ") || "(none)"}
+Relevant reference data (not protected instructions): ${boundedAgentReference(learned)}
 Content pillars available: ${pillarNames.join(", ") || "(defaults will be used)"}
 Niche focus from user: ${niche ?? "(brand's general niche)"}
 Analytics: ${analyticsSummary}
@@ -213,7 +214,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
           .update(jobs)
           .set({
             status: "cancelled",
-            result: { stage: "Cancelled", createdCount: created.length, failures: failedItems, visualWarnings } as Record<string, unknown>,
+            result: { stage: "Cancelled", createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>,
             updatedAt: new Date(),
           })
           .where(eq(jobs.id, jobId));
@@ -227,7 +228,8 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       const planItem = plan[i];
       await db
         .update(jobs)
-        .set({ progress: i, result: { stage: `Generating post ${i + 1}/${plan.length}: ${planItem.topic.slice(0, 60)}` } as Record<string, unknown>, updatedAt: new Date() })
+        .set({ progress: i, result: { stage: `Generating post ${i + 1}/${plan.length}: ${planItem.topic.slice(0, 60)}`,
+          createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>, updatedAt: new Date() })
         .where(eq(jobs.id, jobId));
 
       try {
@@ -249,7 +251,8 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         if (!qa.passed) {
           await db
             .update(jobs)
-            .set({ result: { stage: `Verifying post ${i + 1}/${plan.length}` } as Record<string, unknown>, updatedAt: new Date() })
+            .set({ result: { stage: `Verifying post ${i + 1}/${plan.length}`, createdCount: created.length,
+              createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>, updatedAt: new Date() })
             .where(eq(jobs.id, jobId));
           const retry = await generateAndPersistContent({
             workspaceId: job.workspaceId,
@@ -316,6 +319,9 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       }
 
       await db.update(jobs).set({ progress: i + 1, updatedAt: new Date() }).where(eq(jobs.id, jobId));
+      await db.update(jobs).set({ result: { stage: `Generated ${i + 1}/${plan.length}`,
+        createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings,
+        qaFailed: qaFailedCount }, updatedAt: new Date() }).where(eq(jobs.id, jobId));
 
       // Pace API calls: free-tier Gemini caps at ~20 requests/minute.
       // QURTIZ_BULK_INTERVAL_MS overrides (0 = no delay, paid tier).
@@ -333,7 +339,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         .set({
           status: "failed",
           error: reason,
-          result: { stage: "Failed", failures: failedItems } as Record<string, unknown>,
+          result: { stage: "Failed", createdCount: 0, createdIds: [], failures: failedItems, visualWarnings } as Record<string, unknown>,
           updatedAt: new Date(),
         })
         .where(eq(jobs.id, jobId));
@@ -360,6 +366,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         result: {
           stage: "Completed",
           createdCount: created.length,
+          createdIds: created,
           failures: failedItems,
           visualWarnings,
           qaFailed: qaFailedCount,
@@ -446,6 +453,9 @@ export async function startBulkPlanCore(args: {
   count: number;
   niche?: string;
 }): Promise<{ ok: true; jobId: string } | { ok: false; error: string }> {
+  if (!Number.isInteger(args.count) || args.count < 1 || args.count > 30) {
+    return { ok: false, error: "Choose between 1 and 30 posts." };
+  }
   const db = getDb();
   const [ws] = await db.select({ timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, args.workspaceId));
   void ws;
@@ -461,5 +471,15 @@ export async function startBulkPlanCore(args: {
       input: { count: args.count, days, niche: args.niche || undefined },
     })
     .returning();
-  return { ok: true, jobId: job.id };
+  try {
+    const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
+    const boss = await getBoss();
+    const queued = await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
+    if (!queued) throw new Error("Queue did not accept the job");
+    return { ok: true, jobId: job.id };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Queue unavailable";
+    await db.update(jobs).set({ status: "failed", error: message, updatedAt: new Date() }).where(eq(jobs.id, job.id));
+    return { ok: false, error: "Could not queue the bulk plan: " + message };
+  }
 }

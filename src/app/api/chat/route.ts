@@ -1,22 +1,27 @@
-﻿import { NextResponse, type NextRequest } from "next/server";
+import { boundedAgentReference } from "@/lib/ai/memory-policy";
+import { retrieveAgentMemory } from "@/lib/ai/persistent-memory";
+import { NextResponse, type NextRequest } from "next/server";
 import {
   convertToModelMessages,
+  consumeStream,
   stepCountIs,
   streamText,
   type UIMessage,
 } from "ai";
+import { z } from "zod";
+import { prepareChatTurn, ChatTurnError } from "@/lib/ai/chat-turn";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandMemory, brands, chatThreads, workspaces } from "@/db/schema";
-import { buildAgentTools, summarizeBrandBrain } from "@/lib/ai/tools";
+import { agentRuns, brands, workspaces, chatThreads } from "@/db/schema";
+import { buildAgentTools } from "@/lib/ai/tools";
 import { describeStreamError, repairWrappedToolCall } from "@/lib/ai/stream-errors";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
-import { isRunRegistered, registerRunController, unregisterRunController } from "@/lib/ai/run-registry";
-import { and, desc, isNull } from "drizzle-orm";
+import { abortRun, isRunRegistered, registerRunController, unregisterRunController } from "@/lib/ai/run-registry";
+import { and } from "drizzle-orm";
 import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { rateLimit } from "@/lib/security/rate-limit";
 import {
@@ -28,9 +33,13 @@ import {
   textOf,
 } from "@/lib/ai/chat-persistence";
 
+import { createBudgetedChatModel, resolveChatBudget, type ConversationContext } from "@/lib/ai/chat-budget";
+
+import { createLazyChatTools } from "@/lib/ai/chat-tools";
+
 export const dynamic = "force-dynamic";
 
-const MAX_RECENT_MESSAGES = 24;
+
 
 export async function POST(request: NextRequest) {
   const user = await getSessionUser();
@@ -45,9 +54,11 @@ export async function POST(request: NextRequest) {
   }
 
   const body = (await request.json().catch(() => null)) as
-    | { messages?: UIMessage[]; workspaceId?: string; threadId?: string | null }
+    | { messages?: UIMessage[]; workspaceId?: string; threadId?: string | null; createThread?: boolean }
     | null;
-  if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
+  if (!body || !Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 500 ||
+    !z.string().uuid().safeParse(body.threadId).success ||
+    (body.workspaceId !== undefined && !z.string().uuid().safeParse(body.workspaceId).success)) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
@@ -69,30 +80,30 @@ export async function POST(request: NextRequest) {
     const detail = error instanceof AIConfigError ? error.detail : "AI is not configured for this workspace.";
     return NextResponse.json({ error: "CONFIGURATION_REQUIRED", message: detail }, { status: 503 });
   }
-  const model = textModel.model;
+
 
   // Empty assistant placeholders (parts=[]) from a dead earlier stream must
   // never reach the model context — several providers reject an assistant
   // message with no content, which is exactly how the "second message always
   // fails" loop used to sustain itself.
-  const sanitized = filterEmptyAssistantPlaceholders(body.messages);
+  const userMessage = z.object({ id: z.string().min(1).max(200), role: z.literal("user"),
+    parts: z.array(z.union([
+      z.object({ type: z.literal("text"), text: z.string().max(30_000) }),
+      z.object({ type: z.literal("file"), mediaType: z.string(), url: z.string().max(12_000_000), filename: z.string().max(300).optional() }),
+    ])).min(1).max(12),
+  }).safeParse(body.messages.at(-1));
+  if (!userMessage.success) return NextResponse.json({ error: "INVALID_MESSAGE" }, { status: 400 });
+  const sanitized = filterEmptyAssistantPlaceholders([userMessage.data as UIMessage]);
   if (sanitized.length === 0) {
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
   const db = getDb();
-  const [brandRow] = await db.select().from(brands).where(eq(brands.workspaceId, workspaceId));
+  const [brandRow] = await db.select({ businessName: brands.businessName }).from(brands).where(eq(brands.workspaceId, workspaceId));
   const [workspaceRow] = await db
     .select({ timezone: workspaces.timezone })
     .from(workspaces)
     .where(eq(workspaces.id, workspaceId));
-  const memories = await db
-    .select()
-    .from(brandMemory)
-    .where(and(eq(brandMemory.workspaceId, workspaceId), eq(brandMemory.active, true)))
-    .orderBy(desc(brandMemory.createdAt))
-    .limit(60);
-
   // Publishing-route reality for the system prompt (Meta API ⇄ Buffer API).
   const publishProvider = await getWorkspacePublishProvider(workspaceId);
 
@@ -109,6 +120,10 @@ export async function POST(request: NextRequest) {
         if (!fp.mediaType || !ALLOWED_MEDIA.has(fp.mediaType)) {
           return NextResponse.json({ error: "UNSUPPORTED_FILE", message: "Only PNG, JPEG, WebP images and PDF files are supported." }, { status: 400 });
         }
+        if (typeof fp.url !== "string" || !fp.url.startsWith(`data:${fp.mediaType};base64,`) ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(fp.url.slice(fp.url.indexOf(",") + 1))) {
+          return NextResponse.json({ error: "INVALID_ATTACHMENT", message: "Attach a local file; remote attachment URLs are not supported." }, { status: 400 });
+        }
         totalChars += (fp.url ?? "").length;
         if ((fp.url ?? "").length > MAX_PART_CHARS) {
           return NextResponse.json({ error: "FILE_TOO_LARGE", message: "Each attachment must be under 9MB." }, { status: 400 });
@@ -120,28 +135,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "TOO_MANY_ATTACHMENTS", message: "Total attachments exceed 22MB." }, { status: 400 });
   }
 
-  // Resolve the thread: when the client passed one, confirm it belongs to
-  // this user/workspace. When it didn't (first exchange), thread creation
-  // stays with /api/chat/persist exactly as before — server-side assistant
-  // persistence simply skips below until the thread exists (the spec guard:
-  // no threadId → keep current behavior).
-  const threadId = typeof body.threadId === "string" && body.threadId.length > 0 ? body.threadId : null;
-  if (threadId) {
-    const [existing] = await db
-      .select({ id: chatThreads.id })
-      .from(chatThreads)
-      .where(
-        and(
-          eq(chatThreads.id, threadId),
-          eq(chatThreads.workspaceId, workspaceId),
-          eq(chatThreads.userId, user.id),
-          isNull(chatThreads.deletedAt),
-        ),
-      );
-    if (!existing) {
-      return NextResponse.json({ error: "THREAD_NOT_FOUND" }, { status: 404 });
-    }
-  }
+  const threadId = body.threadId!;
 
   // The first user message drives auto-titling. When the request contains
   // exactly one user message this IS the first exchange (or its retry) —
@@ -156,30 +150,56 @@ export async function POST(request: NextRequest) {
   // row key instead of appending a second assistant row. Computed at
   // response time (assistantMessageIdForTurn below) when the run id exists.
 
-  const [run] = await db
-    .insert(agentRuns)
-    .values({ workspaceId, userId: user.id, kind: "chat", model: textModel.modelId })
-    .returning();
-
+  let prepared;
+  try {
+    prepared = await prepareChatTurn({ threadId, createThread: body.createThread === true,
+      workspaceId, userId: user.id, message: sanitized[sanitized.length - 1], model: textModel.modelId });
+  } catch (error) {
+    if (error instanceof ChatTurnError) return NextResponse.json({ error: "CHAT_CONFLICT", message: error.message }, { status: error.status });
+    console.error("[chat] Could not save turn", error);
+    return NextResponse.json({ error: "PERSISTENCE_FAILED", message: "Could not save your message. Please retry." }, { status: 503 });
+  }
+  const { run } = prepared;
   // Real cancellation: the cancel route aborts this controller, which trips
   // the combined abort signal below (user cancel OR the 600s safety cap).
   const cancelController = new AbortController();
   registerRunController(run.id, cancelController);
+  const runSignal = AbortSignal.any([cancelController.signal, AbortSignal.timeout(600_000)]);
+  let pollingCancellation = false;
+  const cancellationTimer = setInterval(async () => {
+    if (pollingCancellation) return;
+    pollingCancellation = true;
+    try {
+      const [current] = await db.select({ status: agentRuns.status }).from(agentRuns).where(eq(agentRuns.id, run.id));
+      if (!current || current.status === "cancelled") abortRun(run.id);
+    } catch (error) { console.error("[chat] Cancellation check failed", error); }
+    finally { pollingCancellation = false; }
+  }, 2000);
+  runSignal.addEventListener("abort", () => clearInterval(cancellationTimer), { once: true });
   // Distinguishes WHY the combined abort signal tripped — the message
   // metadata and the agent_runs row must always tell the same story.
   let abortOutcome: "user" | "timeout" | null = null;
 
-  const system = buildSystemPrompt({
-    brandSummary: summarizeBrandBrain(brandRow ?? null),
-    memories,
-    workspaceName: brandRow?.businessName ?? workspaceId,
-    workspaceTimezone: workspaceRow?.timezone ?? "UTC",
-    publishProvider,
-  });
-
-  const recent = sanitized.slice(-MAX_RECENT_MESSAGES);
-
   try {
+    const budget = resolveChatBudget(textModel.provider, textModel.modelId);
+    const scope = `${textModel.provider}/${textModel.modelId}`;
+    const prior = prepared.context as ConversationContext | null;
+    const capacity = Math.min(budget.contextTokens, budget.requestTokens, prior?.scope === scope && prior.learnedLimit ? prior.learnedLimit : Infinity);
+    const memoryBytes = Math.max(200, Math.min(3200, Math.floor((capacity - Math.min(budget.outputTokens, capacity / 8)) * budget.threshold * 0.12 * 3)));
+    const memoryContext = await retrieveAgentMemory({ userId: user.id, workspaceId }, textOf(sanitized[sanitized.length - 1]));
+    const system = buildSystemPrompt({
+      identity: memoryContext.identity,
+      persistentContext: boundedAgentReference(memoryContext, memoryBytes),
+      lazyContext: true, currentTask: textOf(sanitized[sanitized.length - 1]),
+      brandSummary: "",
+      memories: [],
+      workspaceName: brandRow?.businessName ?? workspaceId,
+      workspaceTimezone: workspaceRow?.timezone ?? "UTC",
+      publishProvider,
+    });
+
+    const recent = prepared.messages;
+
     // M6: AI SDK v5 streamText() returns synchronously — provider errors
     // (429/5xx) arrive later as error parts inside the stream, so a retry
     // wrapper around the call itself can never catch them (the old
@@ -187,12 +207,40 @@ export async function POST(request: NextRequest) {
     // phase internally; stream errors are captured via onError and surfaced
     // as an honest failure below instead of a silent truncated stream.
     let streamError: string | null = null;
+    const compressionUsage = { inputTokens: 0, outputTokens: 0 };
+    const model = createBudgetedChatModel({ model: textModel.model, scope: `${textModel.provider}/${textModel.modelId}`,
+      budget,
+      onCompressionDiagnostic: event => {
+        if (process.env.NODE_ENV !== "production" || process.env.QURTIZ_CHAT_BUDGET_DEBUG === "1") {
+          console.info("[chat:compression]", { runId: run.id, provider: textModel.provider, model: textModel.modelId, ...event });
+        }
+      },
+      onDiagnostic: diagnostic => {
+        if (process.env.NODE_ENV !== "production" || process.env.QURTIZ_CHAT_BUDGET_DEBUG === "1") {
+          console.info("[chat:budget]", { runId: run.id, provider: textModel.provider, model: textModel.modelId, ...diagnostic });
+        }
+      },
+      onUsage: async usage => {
+        compressionUsage.inputTokens += usage.inputTokens ?? 0;
+        compressionUsage.outputTokens += usage.outputTokens ?? 0;
+        await db.update(agentRuns).set({ ...compressionUsage,
+          costUsd: estimateCostFromUsage(textModel.modelId, compressionUsage).toFixed(6) })
+          .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")));
+      },
+      context: prepared.context as ConversationContext | null,
+      save: async context => {
+        await db.update(chatThreads).set({ context }).where(and(eq(chatThreads.id, threadId),
+          eq(chatThreads.workspaceId, workspaceId), eq(chatThreads.userId, user.id)));
+      },
+    });
 
+    const lazyTools = createLazyChatTools(buildAgentTools({ workspaceId, userId: user.id, runId: run.id, abortSignal: runSignal, currentTask: textOf(sanitized[sanitized.length - 1]) }), textOf(sanitized[sanitized.length - 1]));
     const result = streamText({
       model,
       system,
       messages: convertToModelMessages(recent),
-      tools: buildAgentTools({ workspaceId, userId: user.id, runId: run.id }),
+      tools: lazyTools.tools,
+      prepareStep: lazyTools.prepareStep,
       stopWhen: stepCountIs(6),
       // Centralized, provider-agnostic repair for tool calls whose arguments
       // arrive wrapped in a `{"json": {...}}` envelope (some models emit the
@@ -210,7 +258,7 @@ export async function POST(request: NextRequest) {
       // part indefinitely. 10 minutes is generous beyond any legitimate
       // tool-heavy chat (bounded content generation is ~≤9 min pathological),
       // but guarantees the stream can never hang forever.
-      abortSignal: AbortSignal.any([cancelController.signal, AbortSignal.timeout(600_000)]),
+      abortSignal: runSignal,
       // Gemini-only option; other providers (openai-compatible) ignore it.
       ...(textModel.provider === "gemini"
         ? { providerOptions: { google: { thinkingConfig: { includeThoughts: true } } } }
@@ -244,30 +292,28 @@ export async function POST(request: NextRequest) {
       onError: ({ error }) => {
         streamError = describeStreamError(error);
       },
-      onFinish: async ({ usage, finishReason }) => {
+      onFinish: async ({ usage }) => {
+        clearInterval(cancellationTimer);
         unregisterRunController(run.id);
-        const failed = finishReason === "error" || streamError !== null;
         try {
           await db
             .update(agentRuns)
             .set({
-              status: failed ? "failed" : "completed",
-              inputTokens: usage?.inputTokens ?? null,
-              outputTokens: usage?.outputTokens ?? null,
+              inputTokens: (usage?.inputTokens ?? 0) + compressionUsage.inputTokens,
+              outputTokens: (usage?.outputTokens ?? 0) + compressionUsage.outputTokens,
               costUsd: usage
-                ? estimateCostFromUsage(textModel.modelId, usage).toFixed(6)
+                ? estimateCostFromUsage(textModel.modelId, { inputTokens: (usage.inputTokens ?? 0) + compressionUsage.inputTokens, outputTokens: (usage.outputTokens ?? 0) + compressionUsage.outputTokens }).toFixed(6)
                 : null,
-              finishedAt: new Date(),
-              error: failed ? streamError ?? "Generation failed (finishReason=error)" : null,
             })
             .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")));
-        } catch {
-          // Never let run bookkeeping break the response.
+        } catch (error) {
+          console.error("[chat] Usage persistence failed", { runId: run.id, error });
         }
       },
     });
 
     return result.toUIMessageStreamResponse({
+      consumeSseStream: ({ stream }) => consumeStream({ stream }),
       // Run truth for the client: runId arrives with the stream `start` event
       // (so Stop can target the run immediately), and the terminal status
       // rides the `finish` event — persisted with the message so reloaded
@@ -303,6 +349,7 @@ export async function POST(request: NextRequest) {
       // cancel() (client disconnect) with no finishReason — the
       // interrupted case resolves to "failed" instead of a phantom row.
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+        clearInterval(cancellationTimer);
         const terminal = resolveTerminalRunState({
           isAborted,
           abortOutcome,
@@ -310,23 +357,24 @@ export async function POST(request: NextRequest) {
           streamError,
         });
 
-        // Server-side assistant persistence (skip on the very first
-        // exchange, where the thread does not exist yet — /api/chat/persist
-        // creates it and upserts the same message id there).
+        // prepareChatTurn already saved the thread and placeholder, including
+        // the first exchange. Finalize the response and run together.
         if (threadId) {
           try {
             await persistAssistantMessage({
               threadId,
               workspaceId,
               userId: user.id,
-              message: { ...responseMessage, id: assistantMessageIdForTurn(recent[recent.length - 1], run.id) },
+              message: { ...responseMessage, id: assistantMessageIdForTurn(recent[recent.length - 1], run.id),
+                metadata: { ...(responseMessage.metadata as Record<string, unknown> | undefined), runId: run.id } },
               runStatus: terminal.status,
               runError: terminal.error,
             });
-          } catch {
-            // Persisting the row is best-effort: a failure here never
-            // breaks the stream, the client can still save on its own
-            // (it will be deduped by the persist route).
+          } catch (error) {
+            console.error("[chat] Assistant persistence failed", { runId: run.id, error });
+            await db.update(agentRuns).set({ status: "failed", error: "The response could not be saved. Please retry.", finishedAt: new Date() })
+              .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")))
+              .catch(error => console.error("[chat] Persistence failure bookkeeping failed", { runId: run.id, error }));
           }
           // First successful exchange → auto-title the thread (bounded,
           // fire-and-forget, user renames always win).
@@ -339,6 +387,7 @@ export async function POST(request: NextRequest) {
       sendStart: true,
     });
   } catch (error) {
+    clearInterval(cancellationTimer);
     const message = error instanceof Error ? error.message : "Unknown provider error";
     unregisterRunController(run.id);
     try {

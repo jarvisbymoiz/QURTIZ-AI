@@ -16,6 +16,14 @@ export const autopilotSettingsSchema = z.object({
   requireApproval: z.boolean().default(true),
   nicheFocus: z.string().trim().max(300).optional().or(z.literal("")),
   maxPostsPerRun: z.number().int().min(1).max(3).default(1),
+  platforms: z.array(z.enum(["facebook", "instagram"])).min(1).max(2).transform(v => [...new Set(v)]).default(["facebook", "instagram"]),
+  formats: z.array(z.enum(["single_image", "carousel", "reel", "story", "text_post"])).min(1).max(5).transform(v => [...new Set(v)]).default(["single_image"]),
+  autoSchedule: z.boolean().default(true),
+  generateImages: z.boolean().default(true),
+  runDays: z.array(z.number().int().min(0).max(6)).min(1).max(7).transform(v => [...new Set(v)]).default([0,1,2,3,4,5,6]),
+  fallbackTimes: z.array(runTime).min(1).max(6).transform(v => [...new Set(v)]).default(["09:00", "12:00", "17:00"]),
+  minGapMinutes: z.number().int().min(30).max(1440).default(120),
+  maxPostsPerDay: z.number().int().min(1).max(6).default(3),
   // Dedupe before the cap so repeated times collapse into one slot.
   runTimes: z
     .array(runTime)

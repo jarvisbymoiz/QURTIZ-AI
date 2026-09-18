@@ -16,6 +16,7 @@ import {
 } from "@ai-sdk/provider";
 import { convertUint8ArrayToBase64, generateId } from "@ai-sdk/provider-utils";
 import { safeToolResultJson, unwrapWrappedJsonInput } from "./stream-errors";
+import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 
 /**
  * Minimal OpenAI Chat Completions-compatible LanguageModelV2.
@@ -169,16 +170,16 @@ function toChatMessages(prompt: LanguageModelV2Prompt): ChatMessage[] {
       continue;
     }
     if (msg.role === "tool") {
-      const part = msg.content[0] as
-        | { type: "tool-result"; toolCallId: string; output: { type: "text" | "json"; value: unknown } }
-        | undefined;
-      if (!part) continue;
+      for (const part of msg.content as
+        { type: "tool-result"; toolCallId: string; output: { type: string; value: unknown } }[]) {
       // Safe serialization for json outputs (BigInt/circular values must
       // degrade to a parseable string, never throw inside doStream); text
       // outputs stay stringified as before.
       const value =
-        part.output.type === "json" ? safeToolResultJson(part.output.value) : String(part.output.value);
+        part.output.type === "json" || part.output.type === "error-json"
+          ? safeToolResultJson(part.output.value) : String(part.output.value);
       messages.push({ role: "tool", tool_call_id: part.toolCallId, content: value });
+      }
     }
   }
   return messages;
@@ -306,6 +307,7 @@ export function createOpenAICompatibleModel(opts: {
   baseUrl: string | null;
 }): LanguageModelV2 {
   const baseUrl = (opts.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  assertAllowedAiEndpoint(baseUrl);
   const url = `${baseUrl}/chat/completions`;
   const authHeaders = { Authorization: `Bearer ${opts.apiKey}` };
 
@@ -321,6 +323,7 @@ export function createOpenAICompatibleModel(opts: {
       const messages = toChatMessages(callOptions.prompt);
       const requestBody = buildRequestBody({ modelId: opts.modelId, messages, callOptions, stream: false });
       const res = await fetch(url, {
+        redirect: "error",
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json", ...callOptions.headers },
         body: JSON.stringify(requestBody),
@@ -367,6 +370,7 @@ export function createOpenAICompatibleModel(opts: {
       const messages = toChatMessages(callOptions.prompt);
       const requestBody = buildRequestBody({ modelId: opts.modelId, messages, callOptions, stream: true });
       const res = await fetch(url, {
+        redirect: "error",
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json", ...callOptions.headers },
         body: JSON.stringify(requestBody),

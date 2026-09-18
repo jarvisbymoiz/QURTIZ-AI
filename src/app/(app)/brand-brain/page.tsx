@@ -1,4 +1,4 @@
-﻿import { desc, eq } from "drizzle-orm";
+﻿import { and, desc, eq, isNull } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brandMemory, brands } from "@/db/schema";
 import { listAssetSignedUrls } from "@/server/actions/visuals";
@@ -19,7 +19,7 @@ export default async function BrandBrainPage() {
   const memories = await db
     .select()
     .from(brandMemory)
-    .where(eq(brandMemory.workspaceId, ctx.workspace.id))
+    .where(and(eq(brandMemory.workspaceId, ctx.workspace.id), isNull(brandMemory.supersededAt), isNull(brandMemory.deletedAt)))
     .orderBy(desc(brandMemory.createdAt));
 
   const assets = await db

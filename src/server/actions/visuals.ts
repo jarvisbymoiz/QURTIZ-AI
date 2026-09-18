@@ -1,9 +1,10 @@
 "use server";
 
+import { reorderVisualUploads } from "@/lib/visuals/media-order";
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
+import { brandAssets, brands, contentItems, contentVariants, publishingJobs, visualAssets } from "@/db/schema";
 import { rateLimit } from "@/lib/security/rate-limit";
 import type { VisualMode } from "@/lib/visuals/generate";
 import { getActiveContext } from "@/lib/workspace";
@@ -82,6 +83,7 @@ export async function generateVisualAction(
   contentItemId: string,
   mode: VisualMode,
   slideIndex?: number,
+  variantId?: string,
 ): Promise<ActionResult & { visualId?: string; model?: string }> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
@@ -97,6 +99,7 @@ export async function generateVisualAction(
       contentItemId,
       mode,
       slideIndex,
+      variantId,
     });
     if (!result.ok) return { ok: false, error: result.message };
     revalidatePath("/content-studio");
@@ -113,93 +116,79 @@ export async function getAssetSignedUrl(storagePath: string): Promise<string | n
   const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return null;
   if (!storagePath.startsWith(`${ctx.workspaceId}/`)) return null;
-  const { createClient } = await import("@/lib/supabase/server");
-  const supabase = await createClient();
-  const { data } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 3600);
+  const { createServiceClient } = await import("@/lib/supabase/service");
+  const supabase = process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : await (await import("@/lib/supabase/server")).createClient();
+  const { data, error } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 3600);
+  if (error) console.error("[media-preview] signing failed", error.message);
   return data?.signedUrl ?? null;
 }
 
 export async function listAssetSignedUrls(paths: string[]): Promise<Record<string, string | null>> {
-  const out: Record<string, string | null> = {};
-  for (const p of paths) out[p] = await getAssetSignedUrl(p);
+  const ctx = await getActiveContext("brand:read");
+  if ("error" in ctx) return {};
+  const authorized = [...new Set(paths)].filter(p => p.startsWith(`${ctx.workspaceId}/`)).slice(0, 200);
+  const out: Record<string, string | null> = Object.fromEntries(authorized.map(p => [p, null]));
+  if (!authorized.length) return out;
+  const { createServiceClient } = await import("@/lib/supabase/service");
+  const supabase = process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : await (await import("@/lib/supabase/server")).createClient();
+  const { data, error } = await supabase.storage.from("brand-assets").createSignedUrls(authorized, 3600);
+  if (error) console.error("[media-preview] batch signing failed", error.message);
+  for (const row of data ?? []) if (row.path) out[row.path] = row.signedUrl ?? null;
   return out;
 }
 
 
 
-/**
- * Manual visual upload: the user attaches their own image for a content item
- * (or a specific carousel slide). Marks the item Ready for Review if it was
- * still a draft, per the approval-first workflow.
- */
-export async function uploadVisualUploadAction(formData: FormData): Promise<ActionResult> {
+/** Remove ONE uploaded media item (row + storage object) without touching the
+ *  others. Workspace-scoped; only kind="upload" rows can be removed this way. */
+export async function removeVisualUploadAction(visualId: string): Promise<ActionResult> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
-  const rl = rateLimit("visual-upload:" + ctx.workspaceId, 10, 10 * 60_000);
-  if (!rl.allowed) return { ok: false, error: "Upload limit reached. Try again in a few minutes." };
-
-  const itemId = String(formData.get("itemId") ?? "");
-  const slideIndexRaw = formData.get("slideIndex");
-  const slideIndex = slideIndexRaw === null || slideIndexRaw === "" ? null : Number(slideIndexRaw);
-  const file = formData.get("file");
-
-  if (!itemId) return { ok: false, error: "Missing content item." };
-  if (!(file instanceof File) || file.size === 0) return { ok: false, error: "Choose an image file." };
-  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-    return { ok: false, error: "Only PNG, JPEG or WebP images are allowed." };
-  }
-  if (file.size > 9 * 1024 * 1024) return { ok: false, error: "Image must be 9MB or smaller." };
-
-  // M8: the itemId is user-supplied — verify the content item belongs to this
-  // workspace BEFORE uploading/inserting, or a cross-workspace visual_assets
-  // row (and storage object) could be injected.
   const db = getDb();
-  const [item] = await db
-    .select({ id: contentItems.id, status: contentItems.status, qa: contentItems.qa })
-    .from(contentItems)
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-  if (!item) return { ok: false, error: "Content item not found in this workspace." };
+  const [row] = await db
+    .select({ id: visualAssets.id, storagePath: visualAssets.storagePath, itemId: visualAssets.contentItemId })
+    .from(visualAssets)
+    .where(
+      and(
+        eq(visualAssets.id, visualId),
+        eq(visualAssets.workspaceId, ctx.workspaceId),
+        eq(visualAssets.kind, "upload"),
+      ),
+    );
+  if (!row) return { ok: false, error: "Media item not found." };
+  try { await db.transaction(async tx => {
+  const [item] = await tx.select({ status: contentItems.status }).from(contentItems)
+    .where(and(eq(contentItems.id, row.itemId), eq(contentItems.workspaceId, ctx.workspaceId))).for("update");
+  if (!item || !["draft", "ready_for_review", "failed", "rejected"].includes(item.status)) {
+    throw new Error("Move this post back to review before changing its media.");
+  }
+  const active = await tx.select({ id: publishingJobs.id }).from(publishingJobs)
+    .where(and(eq(publishingJobs.contentItemId, row.itemId), eq(publishingJobs.status, "processing")));
+  if (active.length) throw new Error("Publishing is in progress; media cannot be changed.");
 
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
-  const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
-  const storagePath = ctx.workspaceId + "/visuals/" + itemId + "-upload-" + Date.now() + "." + ext;
-  const { error: uploadError } = await supabase.storage
-    .from("brand-assets")
-    .upload(storagePath, file, { contentType: file.type, upsert: false });
-  if (uploadError) return { ok: false, error: "Upload failed: " + uploadError.message };
+  // Storage first: if the object cannot be removed we keep the row so the user
+  // still sees (and can retry) the item instead of silently losing track of it.
+  const { error: removeError } = await supabase.storage.from("brand-assets").remove([row.storagePath]);
+  if (removeError) throw new Error("Could not delete the stored file: " + removeError.message);
 
-  await db.insert(visualAssets).values({
-    workspaceId: ctx.workspaceId,
-    contentItemId: itemId,
-    kind: "upload",
-    slideIndex: slideIndex === null || Number.isNaN(slideIndex) ? null : slideIndex,
-    storagePath,
-    mimeType: file.type,
-    meta: { source: "manual-upload" },
-  });
-
-  // Approval transition: draft -> ready_for_review once a visual exists —
-  // but only when QA passed. Attaching a visual must not promote a QA-failed
-  // draft (status "draft" + qa.passed=false); it stays a draft until the
-  // content is actually re-QA'd.
-  const qaPassed = (item.qa as { passed?: boolean } | null)?.passed === true;
-  if (item.status === "draft" && qaPassed) {
-    await db
-      .update(contentItems)
-      .set({ status: "ready_for_review", updatedAt: new Date() })
-      .where(eq(contentItems.id, itemId));
-    await db
-      .update(contentVariants)
-      .set({ status: "ready_for_review", updatedAt: new Date() })
-      .where(eq(contentVariants.contentItemId, itemId));
-  }
-
+  await tx.delete(visualAssets).where(and(eq(visualAssets.id, row.id), eq(visualAssets.workspaceId, ctx.workspaceId)));
+  }); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not remove media." }; }
   revalidatePath("/content-studio");
   return { ok: true };
 }
 
+/** Persist a new order for the item's uploaded media (`slideIndex` is the
+ *  order key). Rejects any id that is not an upload of this workspace/item. */
+export async function reorderVisualUploadsAction(itemId: string, orderedIds: string[], mediaType?: "image/" | "video/"): Promise<ActionResult> {
+  const ctx = await getActiveContext("brand:write");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  const result = await reorderVisualUploads(ctx, itemId, orderedIds, mediaType);
+  if (result.ok) revalidatePath("/content-studio");
+  return result;
+}
 
 export async function buildMasterPromptAction(itemId: string, variantId?: string): Promise<
   { ok: true; prompt: string } | { ok: false; error: string }
@@ -251,7 +240,7 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
     caption: variant.caption || item.caption,
     cta: variant.cta ?? item.cta,
     firstComment: variant.firstComment ?? item.firstComment,
-    hashtags: variant.hashtags?.length ? variant.hashtags : item.hashtags,
+    hashtags: variant.hashtags ?? item.hashtags,
     visualConcept: item.visualConcept,
     slides: (variant.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
     script: variant.format === "reel" ? (variant.script as Record<string, unknown> as never) : null,

@@ -1,6 +1,9 @@
+import { CORE_AGENT_IDENTITY } from "@/lib/ai/identity";
+import { retrieveAgentMemory } from "@/lib/ai/persistent-memory";
+import { boundedAgentReference } from "@/lib/ai/memory-policy";
 import "server-only";
 
-import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   aiInsights,
@@ -9,32 +12,24 @@ import {
   competitorSnapshots,
   competitors,
   contentItems,
-  contentVariants,
   workspaces,
   notifications,
   postMetrics,
   publishingJobs,
-  researchItems,
   jobs,
-  settings,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
-import { hasWorkspaceAIConfig } from "@/lib/ai/config";
-import { researchTopics } from "@/lib/ai/research";
-import { autopilotClaimKey, isAutopilotDue, pickEngagementSlot, sanitizeMaxPosts, sanitizeRunTimes } from "@/lib/autopilot/logic";
-import { generateVisual, type VisualGenResult } from "@/lib/visuals/generate";
-import { dateIsoInTz, hmInTz, isValidTimezone, tomorrowIsoInTz } from "@/lib/scheduling/time";
 import type { PgBoss } from "pg-boss";
-import { generateAndPersistContent, type GenerateContentInput } from "@/lib/ai/content";
-import { createServiceClient } from "@/lib/supabase/service";
-import { publishNow } from "@/lib/publishing/service";
+import { generateAndPersistContent } from "@/lib/ai/content";
+import { publishNow, reconcileBufferDeliveries } from "@/lib/publishing/service";
 import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
 
 const MAX_PUBLISH_ATTEMPTS = 3;
 const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
 const STUCK_PROCESSING_MS = 10 * 60_000; // a claim older than this is treated as lost
+const STUCK_GENERATION_MS = 30 * 60_000;
 
 /**
  * Attempt to publish one due publishing job. The worker's only job is to
@@ -62,7 +57,7 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
       attempts: sql`${publishingJobs.attempts} + 1`,
       updatedAt: new Date(),
     })
-    .where(and(eq(publishingJobs.id, publishingJobId), eq(publishingJobs.status, "pending")))
+    .where(and(eq(publishingJobs.id, publishingJobId), eq(publishingJobs.status, "pending"), isNull(publishingJobs.providerPostId)))
     .returning();
   if (!job) return;
 
@@ -100,10 +95,18 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
       workspaceId: job.workspaceId,
       userId: recipientId,
       kind: "publishing_completed",
-      title: result.provider === "buffer" ? "Published via Buffer" : "Published successfully",
-      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} post is live${
-        result.provider === "buffer" ? " — queued in Buffer, will go live within a minute." : "."
-      }${result.firstCommentSkipped ? "\n\nFirst Comment: Skipped (unavailable on current Buffer plan)." : ""}`,
+      title: result.pendingDelivery ? "Buffer accepted the post" : "Published successfully",
+      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} ${result.pendingDelivery ? "delivery is awaiting confirmation from Buffer." : "post is live."}${result.firstCommentSkipped ? "\n\nFirst Comment: Skipped (unavailable on current Buffer plan)." : ""}${
+        result.comment
+          ? `\n\nFirst Comment: ${result.comment.status}${
+              result.comment.status === "published" && result.comment.providerCommentId
+                ? ` (id ${result.comment.providerCommentId})`
+                : result.comment.error
+                  ? ` - ${result.comment.error}`
+                  : ""
+            }.`
+          : ""
+      }`,
       link: "/content-studio",
     });
     return;
@@ -111,9 +114,9 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
 
   // Failure classification: transient (network/429/5xx) requeue up to
   // MAX_PUBLISH_ATTEMPTS; everything else fails permanently.
-  const transient = /rate limit|too many requests|\b429\b|timeout|timed out|econnreset|socket|network|unavailable|temporar|internal server|bad gateway|\b5\d\d\b/.test(
-    result.message.toLowerCase(),
-  );
+  // Retry only a confirmed rejection. A lost response may mean the provider
+  // accepted the post; replaying that mutation could publish it twice.
+  const transient = result.reason === "rate_limited";
   if (transient && job.attempts < MAX_PUBLISH_ATTEMPTS) {
     await db
       .update(publishingJobs)
@@ -172,17 +175,20 @@ export async function recoverStuckPublishJobs(): Promise<void> {
     .where(
       and(
         eq(publishingJobs.status, "processing"),
+        isNull(publishingJobs.providerPostId),
         lte(publishingJobs.updatedAt, new Date(Date.now() - STUCK_PROCESSING_MS)),
       ),
     )
     .limit(10);
   for (const job of stale) {
-    if (job.attempts >= MAX_PUBLISH_ATTEMPTS) {
-      const reason = "Publish job was stuck in processing (worker lost) and exceeded the attempt limit.";
+    {
+      const reason = "The worker stopped before delivery was confirmed. Check the connected account before retrying to avoid a duplicate post.";
       await db
         .update(publishingJobs)
-        .set({ status: "failed", lastError: reason, updatedAt: new Date() })
-        .where(eq(publishingJobs.id, job.id));
+        .set({ status: "failed", lastError: reason,
+          result: sql`coalesce(${publishingJobs.result}, '{}'::jsonb) || '{"reconciliationRequired":true}'::jsonb`, updatedAt: new Date() })
+        .where(and(eq(publishingJobs.id, job.id), eq(publishingJobs.status, "processing"), isNull(publishingJobs.providerPostId),
+          lte(publishingJobs.updatedAt, new Date(Date.now() - STUCK_PROCESSING_MS))));
       const [ws] = await db
         .select({ createdBy: workspaces.createdBy })
         .from(workspaces)
@@ -195,18 +201,6 @@ export async function recoverStuckPublishJobs(): Promise<void> {
         body: reason,
         link: "/content-studio",
       });
-    } else {
-      // Requeue; the claim on the next pick-up counts another attempt, so the
-      // stuck/recover cycle is bounded by MAX_PUBLISH_ATTEMPTS.
-      await db
-        .update(publishingJobs)
-        .set({
-          status: "pending",
-          scheduledAt: new Date(),
-          lastError: "Recovered from a stuck processing state; requeued.",
-          updatedAt: new Date(),
-        })
-        .where(eq(publishingJobs.id, job.id));
     }
   }
 }
@@ -216,7 +210,9 @@ export async function recoverStuckPublishJobs(): Promise<void> {
  *  entry — the per-provider adapter lives inside the publishing service. */
 export async function publishDueScan(): Promise<void> {
   const db = getDb();
+  await reconcileBufferDeliveries();
   await recoverStuckPublishJobs();
+  await recoverStuckGenerationJobs();
   const due = await db
     .select({ id: publishingJobs.id })
     .from(publishingJobs)
@@ -224,6 +220,45 @@ export async function publishDueScan(): Promise<void> {
     .limit(10);
   for (const j of due) {
     await attemptPublish(j.id);
+  }
+}
+
+/** Long AI jobs must reach a terminal state after a worker/process loss. We do
+ * not automatically replay them because the last AI call may have persisted a
+ * content item before the process stopped. The UI retry creates only the
+ * remaining count and therefore cannot silently duplicate a full plan. */
+export async function recoverStuckGenerationJobs(): Promise<void> {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - STUCK_GENERATION_MS);
+  const stale = await db.select().from(jobs).where(and(
+    inArray(jobs.type, ["bulk_plan", "campaign"]),
+    eq(jobs.status, "running"),
+    lte(jobs.updatedAt, cutoff),
+  )).limit(20);
+  for (const job of stale) {
+    const prior = (job.result ?? {}) as Record<string, unknown>;
+    const message = "The background worker stopped before this job completed. Review the saved results, then retry the remaining items.";
+    const [recovered] = await db.update(jobs).set({ status: "failed", error: message,
+      result: { ...prior, stage: "Failed", recoveryRequired: true }, updatedAt: new Date() })
+      .where(and(eq(jobs.id, job.id), eq(jobs.status, "running"), lte(jobs.updatedAt, cutoff)))
+      .returning({ id: jobs.id });
+    if (!recovered) continue;
+
+    if (job.type === "campaign") {
+      const campaignId = (job.input as { campaignId?: unknown } | null)?.campaignId;
+      if (typeof campaignId === "string") {
+        await db.update(campaigns).set({ status: "cancelled", updatedAt: new Date() })
+          .where(and(eq(campaigns.id, campaignId), eq(campaigns.workspaceId, job.workspaceId), eq(campaigns.status, "generating")));
+      }
+    }
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.userId,
+      kind: "system",
+      title: job.type === "campaign" ? "Campaign generation stopped" : "Bulk generation stopped",
+      body: message,
+      link: job.type === "campaign" ? "/campaigns" : "/bulk-creation",
+    });
   }
 }
 
@@ -262,6 +297,11 @@ export async function generateCampaign(campaignId: string): Promise<void> {
     return;
   }
 
+  if (!campaign.jobId) throw new Error("Campaign has no durable job record.");
+  const [claimed] = await db.update(jobs).set({ status: "running", updatedAt: new Date() })
+    .where(and(eq(jobs.id, campaign.jobId), eq(jobs.workspaceId, campaign.workspaceId), eq(jobs.status, "queued"))).returning();
+  if (!claimed) return;
+
   const days = await db
     .select()
     .from(campaignItems)
@@ -272,13 +312,19 @@ export async function generateCampaign(campaignId: string): Promise<void> {
 
   // Honest accounting: count real successes, not attempts. The run/job row is
   // updated so the UI shows real progress and a truthful terminal state.
-  let generated = 0;
+  let generated = days.length - pending.length;
   let failed = 0;
   if (campaign.jobId) {
-    await db.update(jobs).set({ status: "running", progress: 0, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
+    await db.update(jobs).set({ progress: generated, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
   }
 
   for (const day of pending) {
+    const [current] = await db.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, campaignId));
+    if (!current || current.status !== "generating") {
+      await db.update(jobs).set({ status: "cancelled", progress: generated, result: { generated, failed }, updatedAt: new Date() })
+        .where(eq(jobs.id, campaign.jobId));
+      return;
+    }
     try {
       const { itemId } = await generateAndPersistContent({
         workspaceId: campaign.workspaceId,
@@ -321,58 +367,39 @@ export async function generateCampaign(campaignId: string): Promise<void> {
     return;
   }
 
+  const [currentCampaign] = await db.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, campaignId));
+  if (!currentCampaign || currentCampaign.status !== "generating") {
+    await db.update(jobs).set({ status: "cancelled", progress: generated, result: { generated, failed }, updatedAt: new Date() })
+      .where(eq(jobs.id, campaign.jobId));
+    return;
+  }
   if (campaign.jobId) {
     await db.update(jobs).set({ status: "completed", progress: generated, result: { generated, failed }, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
   }
-  await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, campaignId));
+  await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(and(eq(campaigns.id, campaignId), eq(campaigns.status, "generating")));
   await db.insert(notifications).values({
     workspaceId: campaign.workspaceId,
     userId: campaign.createdBy ?? campaign.workspaceId,
     kind: "job_completed",
     title: "Campaign content ready",
-    body: generated + " of " + pending.length + " posts generated" + (failed > 0 ? " — " + failed + " failed." : "."),
+    body: generated + " of " + days.length + " posts generated" + (failed > 0 ? " — " + failed + " failed." : "."),
     link: "/campaigns",
   });
 }
 
 
-/** Content formats the AI content engine can produce (contentFormatEnum). */
-const CONTENT_FORMATS = new Set(["single_image", "carousel", "reel", "story", "text_post"]);
 /** How many synced posts feed the measured-performance context + best-hour pick. */
 const AUTOPILOT_METRICS_WINDOW = 30;
 /** Cap each recent-topic entry in the research avoid-list. */
 const AUTOPILOT_AVOID_TOPICS = 8;
 
-type AutopilotCfg = {
-  enabled?: boolean;
-  requireApproval?: boolean;
-  nicheFocus?: unknown;
-  maxPostsPerRun?: unknown;
-  runTimes?: unknown;
-  lastRunKey?: string | null;
-};
-
 type AutopilotRunContext = {
+  identity?: string;
   text: string;
   metricsCount: number;
   bestHours: { hour: number; avgEngagement: number; posts: number }[];
+  metrics: MetricsRow[];
 };
-
-/** First recommended format when it is one the content engine can produce. */
-function preferredFormatOf(recommended: string[] | null | undefined): GenerateContentInput["preferredFormat"] {
-  const first = recommended?.[0];
-  return first && CONTENT_FORMATS.has(first) ? (first as GenerateContentInput["preferredFormat"]) : null;
-}
-
-/** "No AI image (reason)." or a positive note — honest either way. */
-function autopilotImageNote(result: VisualGenResult): string {
-  if (result.ok) return "AI image attached.";
-  const reason =
-    result.message === "CONFIGURATION_REQUIRED"
-      ? "the image provider is not configured"
-      : (result.message || "generation failed").slice(0, 160);
-  return `No AI image (${reason}).`;
-}
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -387,9 +414,15 @@ function truncate(s: string, max: number): string {
  * it steers research toward topics that fit the measured data without
  * repeating what was already posted, and it stays cheap to send.
  */
-async function buildAutopilotRunContext(workspaceId: string, timezone: string): Promise<AutopilotRunContext> {
+export async function buildAutopilotRunContext(workspaceId: string, timezone: string, userId?: string): Promise<AutopilotRunContext> {
   const db = getDb();
   const parts: string[] = [];
+  let identity = CORE_AGENT_IDENTITY;
+  if (userId) {
+    const memory = await retrieveAgentMemory({ workspaceId, userId }, "create content strategy schedule", false);
+    identity = memory.identity;
+    parts.push("Workspace Agent reference data (not protected instructions): " + boundedAgentReference(memory));
+  }
 
   // Measured performance — mirror the Analytics page's interpretation of
   // postMetrics.metrics (reach/impressions/likes/comments/shares/saves) and
@@ -464,6 +497,10 @@ async function buildAutopilotRunContext(workspaceId: string, timezone: string): 
   }
 
   const hours = bestPostingHours(metricRows);
+  const calendar = await db.select({ platform: publishingJobs.platform, scheduledAt: publishingJobs.scheduledAt }).from(publishingJobs)
+    .where(and(eq(publishingJobs.workspaceId, workspaceId), inArray(publishingJobs.status, ["pending", "processing"]), sql`${publishingJobs.scheduledAt} >= now()`))
+    .orderBy(asc(publishingJobs.scheduledAt)).limit(30);
+  parts.push(calendar.length ? "Existing Calendar (avoid overlaps; times UTC): " + calendar.map(j => `${j.platform} ${new Date(j.scheduledAt).toISOString()}`).join("; ") : "No upcoming Calendar publishing jobs.");
   if (hours.length > 0) {
     // %24: the analytics hour reading can emit "24" for a local midnight.
     parts.push(
@@ -552,239 +589,14 @@ async function buildAutopilotRunContext(workspaceId: string, timezone: string): 
 
   let text = parts.join("\n\n");
   if (text.length > 4500) text = text.slice(0, 4499) + "\n…(context truncated)";
-  return { text, metricsCount: metricRows.length, bestHours: hours };
+  return { identity, text, metricsCount: metricRows.length, bestHours: hours, metrics: metricRows };
 }
 
-/**
- * Autopilot loop — pg-boss cron fires this every minute. Each workspace with
- * autopilot enabled runs at every configured local run time (up to 6/day):
- * analytics + competitor context, research, content generation with an AI
- * visual, then approval + high-engagement scheduling (auto-approve mode) or
- * a for-review notification. Scheduling only ever targets TOMORROW or later
- * in the workspace timezone.
- *
- * Occurrences are claimed BEFORE the work via an atomic lastRunKey update
- * (the conditional UPDATE matches 0 rows for a concurrent scan), so two
- * minute scans can never double-fire one occurrence. The claim also survives
- * partial failures — the scan stays a no-op until the next configured time.
- */
+/** Scan durable Auto Run occurrences; AI executes in the existing pg-boss worker. */
 export async function autopilotLoop(): Promise<void> {
-  const db = getDb();
-  const rows = await db
-    .select({ workspaceId: settings.workspaceId, value: settings.value })
-    .from(settings)
-    .where(eq(settings.key, "autopilot"));
-  for (const row of rows) {
-    const cfg = (row.value ?? {}) as AutopilotCfg;
-    if (!cfg.enabled) continue;
-    try {
-      const [ws] = await db
-        .select({ createdBy: workspaces.createdBy, timezone: workspaces.timezone })
-        .from(workspaces)
-        .where(eq(workspaces.id, row.workspaceId));
-      if (!ws) continue;
-
-      const runTimes = sanitizeRunTimes(cfg.runTimes);
-      if (runTimes.length === 0) {
-        console.warn(`[autopilot] workspace ${row.workspaceId}: enabled with no run times — add run times in Settings`);
-        continue;
-      }
-      if (!isValidTimezone(ws.timezone)) {
-        console.warn(`[autopilot] workspace ${row.workspaceId}: invalid timezone "${ws.timezone}" — fix it in Workspace Settings`);
-        continue;
-      }
-
-      const now = new Date();
-      const localDate = dateIsoInTz(ws.timezone, now);
-      const localHm = hmInTz(ws.timezone, now);
-      if (!isAutopilotDue(cfg, localDate, localHm)) continue;
-
-      if (!(await hasWorkspaceAIConfig(row.workspaceId))) {
-        console.warn(`[autopilot] workspace ${row.workspaceId}: run due at ${localHm} ${ws.timezone} but AI is not configured — add provider + keys in Workspace Settings`);
-        continue;
-      }
-
-      // Atomic claim of this occurrence (date + local time). jsonb_set keeps
-      // any concurrent Settings save intact; the enabled check prevents
-      // processing a workspace that was disabled after the row was read.
-      const claimKey = autopilotClaimKey(localDate, localHm);
-      const claimed = await db
-        .update(settings)
-        .set({
-          value: sql`jsonb_set(${settings.value}, '{lastRunKey}', ${JSON.stringify(claimKey)}::jsonb, true)`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(settings.workspaceId, row.workspaceId),
-            eq(settings.key, "autopilot"),
-            sql`${settings.value}->>'enabled' = 'true'`,
-            sql`${settings.value}->>'lastRunKey' IS DISTINCT FROM ${claimKey}`,
-          ),
-        )
-        .returning({ workspaceId: settings.workspaceId });
-      if (claimed.length === 0) continue; // another scan claimed it first
-
-      await runAutopilotForWorkspace({
-        workspaceId: row.workspaceId,
-        userId: ws.createdBy,
-        timezone: ws.timezone,
-        cfg,
-        localHm,
-      });
-    } catch (e) {
-      console.error("[autopilot]", e instanceof Error ? e.message : e);
-    }
-  }
+  const { scanAutoRuns } = await import("@/lib/autopilot/run");
+  await scanAutoRuns();
 }
-
-/** One due run for one workspace. Never throws for item-level failures. */
-async function runAutopilotForWorkspace(args: {
-  workspaceId: string;
-  userId: string;
-  timezone: string;
-  cfg: AutopilotCfg;
-  localHm: string;
-}): Promise<void> {
-  const db = getDb();
-  const { workspaceId, userId, timezone, cfg, localHm } = args;
-  const limit = sanitizeMaxPosts(cfg.maxPostsPerRun);
-
-  const runCtx = await buildAutopilotRunContext(workspaceId, timezone);
-  const niche = typeof cfg.nicheFocus === "string" && cfg.nicheFocus.trim().length > 0 ? cfg.nicheFocus : "the brand's niche";
-  const research = await researchTopics({
-    workspaceId,
-    userId,
-    niche,
-    notes: `Autopilot run at ${localHm} (${timezone})`,
-    context: runCtx.text || null,
-  });
-  if (!research.ok) {
-    // The occurrence is already claimed — no per-minute retry storm. The
-    // next configured run time retries with a fresh research call.
-    console.warn(`[autopilot] workspace ${workspaceId}: research failed at ${localHm} — ${research.message}`);
-    return;
-  }
-  const ids = research.insertedIds ?? [];
-  if (ids.length === 0) return;
-
-  const candidates = await db
-    .select()
-    .from(researchItems)
-    .where(and(eq(researchItems.workspaceId, workspaceId), eq(researchItems.status, "new"), inArray(researchItems.id, ids)));
-  const top = candidates
-    .map((item) => ({ item, score: ((item.scores ?? {}) as Record<string, number>).overall ?? 0 }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-  if (top.length === 0) {
-    console.warn(`[autopilot] workspace ${workspaceId}: no research items persisted for the ${localHm} run`);
-    return;
-  }
-  console.log(`[autopilot] workspace ${workspaceId}: ${localHm} ${timezone} run — up to ${top.length} post(s)`);
-
-  // One slot per run: the analytics best local hour (18:30 while there are
-  // fewer than 3 measured posts), always TOMORROW in the workspace timezone.
-  const slot = pickEngagementSlot(runCtx.bestHours, runCtx.metricsCount);
-  const slotDate = tomorrowIsoInTz(timezone);
-
-  // Service-role storage client for image upload. Resolution is hoisted so a
-  // missing SUPABASE_SERVICE_ROLE_KEY degrades per item to an honest
-  // "No AI image" note instead of throwing mid-run and silently dropping the
-  // auto-approve/schedule + notification for an otherwise-created post.
-  let storage: ReturnType<typeof createServiceClient> | null = null;
-  try {
-    storage = createServiceClient();
-  } catch (e) {
-    console.error(`[autopilot] workspace ${workspaceId}: service-role storage unavailable — AI images skipped (${e instanceof Error ? e.message : e})`);
-  }
-
-  for (const t of top) {
-    try {
-      const { itemId, qa } = await generateAndPersistContent({
-        workspaceId,
-        userId,
-        input: {
-          topic: t.item.topic,
-          objective: "Autopilot run " + localHm,
-          platforms: ["facebook", "instagram"],
-          preferredFormat: preferredFormatOf(t.item.recommendedFormats),
-        },
-      });
-      await db.update(researchItems).set({ status: "converted", updatedAt: new Date() }).where(eq(researchItems.id, t.item.id));
-
-      // AI visual — the same pipeline as Content Studio's "Generate AI
-      // visual" (mode "ai"), but with the service-role storage client:
-      // this worker has no request scope, so the cookies()-based client
-      // would throw. Non-fatal: the notification says so honestly.
-      const visual = storage
-        ? await generateVisual({
-            workspaceId,
-            userId,
-            contentItemId: itemId,
-            mode: "ai",
-            storage,
-          })
-        : { ok: false as const, reason: "config_error" as const, message: "Supabase service-role key is not configured" };
-      const imageNote = autopilotImageNote(visual);
-
-      // QA-gate: content that failed QA is NEVER auto-approved or
-      // auto-scheduled — it goes to review like everything else.
-      if (cfg.requireApproval === false && qa.passed) {
-        await db.update(contentItems).set({ status: "approved", updatedAt: new Date() }).where(eq(contentItems.id, itemId));
-        await db.update(contentVariants).set({ status: "approved", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, itemId));
-        const { schedulePost } = await import("@/lib/publishing/service");
-        // Resolve UTC slot once (workspace-local slot on slotDate → UTC).
-        const { parseZonedDateTime } = await import("@/lib/scheduling/time");
-        const scheduledAt = parseZonedDateTime(slotDate, slot, timezone);
-        const variants = await db.select({ id: contentVariants.id, platform: contentVariants.platform }).from(contentVariants).where(eq(contentVariants.contentItemId, itemId));
-        let scheduledCount = 0;
-        for (const v of variants) {
-          const sched = await schedulePost({
-            workspaceId,
-            contentItemId: itemId,
-            contentVariantId: v.id,
-            platform: v.platform as "facebook" | "instagram",
-            scheduledAt,
-          });
-          if (sched.ok) scheduledCount++;
-        }
-        if (scheduledCount > 0) {
-          await db.insert(notifications).values({
-            workspaceId,
-            userId,
-            kind: "content_ready",
-            title: "Autopilot scheduled a post",
-            body: `Tomorrow at ${slot} (${timezone}): ${t.item.topic}. ${imageNote}`,
-            link: "/calendar",
-          });
-        } else {
-          console.error(`[autopilot] workspace ${workspaceId}: scheduling failed for "${t.item.topic}" — no variants could be scheduled.`);
-          await db.insert(notifications).values({
-            workspaceId,
-            userId,
-            kind: "content_ready",
-            title: "Autopilot post not scheduled",
-            body: `${t.item.topic}: no platform connection routed the job. Approve and schedule it manually in Content Studio.`,
-            link: "/content-studio",
-          });
-        }
-      } else {
-        await db.insert(notifications).values({
-          workspaceId,
-          userId,
-          kind: "content_ready",
-          title: "Autopilot created content for review",
-          body: `${t.item.topic}${qa.passed ? "" : " (QA needs attention — review before approving)"}. ${imageNote}`,
-          link: "/content-studio",
-        });
-      }
-    } catch (e) {
-      // One item must not sink the rest of the run.
-      console.error(`[autopilot] workspace ${workspaceId}: item "${t.item.topic}" failed`, e instanceof Error ? e.message : e);
-    }
-  }
-}
-
 
 /** Register all workers. Called once at server start. */
 export async function registerWorkers(boss: PgBoss): Promise<void> {
@@ -816,9 +628,19 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
       await bulkGenerate(row.id);
     }
   });
-  await boss.work(QUEUES.campaignGenerate, async (job) => {
-    const data = (job as { data?: { campaignId?: string } }).data;
-    if (data?.campaignId) await generateCampaign(data.campaignId);
+  await boss.work<{ campaignId?: string; jobId?: string }>(QUEUES.campaignGenerate, async (batch) => {
+    for (const job of batch) {
+      if (!job.data.campaignId) throw new Error("Campaign job is missing campaignId");
+      try {
+        await generateCampaign(job.data.campaignId);
+      } catch (error) {
+        if (job.data.jobId) {
+          await getDb().update(jobs).set({ status: "queued", error: error instanceof Error ? error.message : "Campaign worker failed",
+            updatedAt: new Date() }).where(and(eq(jobs.id, job.data.jobId), eq(jobs.status, "running")));
+        }
+        throw error;
+      }
+    }
   });
   await boss.work(QUEUES.syncInsights, async () => {
     // The cron schedule passes workspace scoping by iterating all connected
@@ -845,6 +667,10 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   });
   await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();
+  });
+  await boss.work<{ jobId: string }>(QUEUES.autopilotRun, async batch => {
+    const { executeAutoRun } = await import("@/lib/autopilot/run");
+    for (const job of batch) await executeAutoRun(job.data.jobId);
   });
   console.log("[qurtiz] workers registered");
 }

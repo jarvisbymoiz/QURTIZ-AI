@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Loader2, Plus, Sparkles } from "lucide-react";
@@ -157,6 +157,12 @@ function ItemCard({
 }) {
   const [open, setOpen] = useState(false);
   const scores = (item.aiScores ?? {}) as Record<string, number>;
+  // Older providers returned confidence-style scores on a 0–1 scale while
+  // current generation stores 0–10. Keep historical cards comparable.
+  const displayScore = (value: number) => {
+    const normalized = value > 0 && value <= 1 ? value * 10 : value;
+    return Number(Math.min(10, Math.max(0, normalized)).toFixed(1));
+  };
 
   return (
     <Card>
@@ -174,20 +180,20 @@ function ItemCard({
         <div className="flex flex-wrap items-center gap-3">
           {typeof scores.relevance === "number" ? (
             <span className="text-xs text-muted-foreground">
-              Relevance <span className="font-medium text-foreground">{scores.relevance}/10</span>
+              Relevance <span className="font-medium text-foreground">{displayScore(scores.relevance)}/10</span>
               <span className="ml-1 text-[10px] uppercase tracking-wide">(AI-est.)</span>
             </span>
           ) : null}
           {typeof scores.engagement === "number" ? (
             <span className="text-xs text-muted-foreground">
-              Engagement <span className="font-medium text-foreground">{scores.engagement}/10</span>
+              Engagement <span className="font-medium text-foreground">{displayScore(scores.engagement)}/10</span>
               <span className="ml-1 text-[10px] uppercase tracking-wide">(AI-est.)</span>
             </span>
           ) : null}
         </div>
         {open ? (
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent className="flex h-[90dvh] w-full flex-col overflow-hidden p-4 sm:h-[76dvh] sm:w-[74vw] sm:max-w-[1600px] sm:p-5">
+            <DialogContent className="flex h-[92dvh] max-h-[calc(100dvh-1rem)] w-full max-w-[calc(100%-1rem)] flex-col gap-0 overflow-hidden p-2.5 sm:w-[94vw] sm:max-w-[1480px] sm:p-3">
               <PostWorkspace
                 item={item}
                 variants={variants}
@@ -231,6 +237,7 @@ function BulkApproveButton() {
 }
 
 export function StudioClient({
+  workspaceId,
   items,
   variants,
   pillars,
@@ -240,6 +247,7 @@ export function StudioClient({
   editable,
   timezone,
 }: {
+  workspaceId?: string;
   items: Item[];
   variants: Variant[];
   pillars: Pillar[];
@@ -250,6 +258,14 @@ export function StudioClient({
   /** Workspace timezone for date display (scheduling badge). */
   timezone?: string;
 }) {
+  const router = useRouter();
+  useEffect(() => {
+    const refresh = () => router.refresh();
+    const channel = workspaceId && typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("qurtiz-content:" + workspaceId) : null;
+    if (channel) channel.onmessage = refresh;
+    window.addEventListener("focus", refresh);
+    return () => { channel?.close(); window.removeEventListener("focus", refresh); };
+  }, [router, workspaceId]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const byItem = useMemo(() => {
@@ -338,4 +354,3 @@ export function StudioClient({
 function DeleteHidden() {
   return null;
 }
-

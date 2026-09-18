@@ -149,6 +149,7 @@ function makeFakeDb(overrides?: {
   };
 
   const tx = {
+    select: db.select,
     insert: db.insert,
     update: db.update,
     delete: db.delete,
@@ -192,13 +193,31 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("persistAssistantMessage", () => {
+  it("cannot overwrite a newer retry with a late response from an older run", async () => {
+    const newer = uidMessage({ id: "u1:a", metadata: { runId: "newer", runStatus: "running" } });
+    const fake = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: newer, createdAt: new Date() } }] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    await persistAssistantMessage({ threadId: THREAD, workspaceId: WORKSPACE, userId: USER,
+      message: uidMessage({ id: "u1:a" }), runStatus: "completed" });
+    expect(fake.writes.filter(write => write.kind !== "select")).toHaveLength(0);
+    expect(fake.rows[0].row.message).toEqual(newer);
+  });
+
+  it("does not resurrect a response removed by an edit or thread deletion", async () => {
+    const fake = makeFakeDb();
+    mockedGetDb.mockReturnValue(fake.db as never);
+    await persistAssistantMessage({ threadId: THREAD, workspaceId: WORKSPACE, userId: USER,
+      message: uidMessage({ id: "u1:a" }), runStatus: "completed" });
+    expect(fake.rows).toHaveLength(0);
+    expect(fake.writes.filter(write => write.kind !== "select")).toHaveLength(0);
+  });
   it("upserts the assistant row with parts verbatim and runStatus completed", async () => {
     const parts = [
       { type: "text", text: "Done." },
       { type: "tool-create_content", state: "output-available", input: { topic: "x" }, output: { ok: true } },
     ];
     const message = uidMessage({ id: "u1:a", parts: parts as never });
-    const { db } = makeFakeDb();
+    const { db } = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: uidMessage({ id: "u1:a" }), createdAt: new Date("2026-01-01") } }] });
     mockedGetDb.mockReturnValue(db as never);
 
     await persistAssistantMessage({
@@ -232,7 +251,7 @@ describe("persistAssistantMessage", () => {
 
   it("persists runStatus failed + runError when the stream errored", async () => {
     const message = uidMessage({ id: "u1:a", parts: [{ type: "text", text: "partial" }] as never });
-    const { db } = makeFakeDb();
+    const { db } = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: uidMessage({ id: "u1:a" }), createdAt: new Date("2026-01-01") } }] });
     mockedGetDb.mockReturnValue(db as never);
 
     await persistAssistantMessage({
@@ -252,7 +271,7 @@ describe("persistAssistantMessage", () => {
 
   it("never leaves a 'running' row: metadata is always overwritten with the terminal state", async () => {
     const message = uidMessage({ id: "u1:a" });
-    const { db } = makeFakeDb();
+    const { db } = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: uidMessage({ id: "u1:a" }), createdAt: new Date("2026-01-01") } }] });
     mockedGetDb.mockReturnValue(db as never);
 
     await persistAssistantMessage({
@@ -268,9 +287,9 @@ describe("persistAssistantMessage", () => {
     expect((row.message as { metadata: Record<string, unknown> }).metadata.runStatus).toBe("failed");
   });
 
-  it("drops empty assistant placeholders instead of persisting phantom rows", async () => {
+  it("finalizes an empty response so the saved placeholder cannot remain running", async () => {
     const message = uidMessage({ id: "u1:a", parts: [] as never });
-    const { db } = makeFakeDb();
+    const { db } = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: uidMessage({ id: "u1:a" }), createdAt: new Date("2026-01-01") } }] });
     mockedGetDb.mockReturnValue(db as never);
 
     await persistAssistantMessage({
@@ -282,13 +301,14 @@ describe("persistAssistantMessage", () => {
       runError: "Provider stream error",
     });
 
-    expect(db.writes.filter((w) => w.kind === "insert")).toHaveLength(0);
-    expect(db.writes.filter((w) => w.kind === "update" && w.table === chatThreads)).toHaveLength(0);
+    const saved = findWrite(db.writes, "insert", chatMessages).values?.message as UIMessage;
+    expect(saved.metadata).toMatchObject({ runStatus: "failed", runError: "Provider stream error" });
+    expect(findWrite(db.writes, "update", agentRuns).set).toMatchObject({ status: "failed" });
   });
 
   it("is idempotent: re-persisting the same message id (client re-post / retry) keeps ONE row", async () => {
     const message = uidMessage({ id: "u1:a" });
-    const { db } = makeFakeDb();
+    const { db } = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: uidMessage({ id: "u1:a" }), createdAt: new Date("2026-01-01") } }] });
     mockedGetDb.mockReturnValue(db as never);
 
     await persistAssistantMessage({
@@ -373,17 +393,19 @@ describe("assistantMessageIdForTurn", () => {
 // ---------------------------------------------------------------------------
 
 describe("failInterruptedChatRuns (boot sweep)", () => {
-  it("marks every running chat run failed with the restart error", async () => {
-    const { db } = makeFakeDb({ updateReturning: [{ id: "r1" }, { id: "r2" }] });
+  it("only considers stale runs at boot; another process may own recent runs", async () => {
+    const { db } = makeFakeDb({ agentRunRows: [{ id: "r1", status: "running", error: null }], updateReturning: [{ id: "r1" }] });
     mockedGetDb.mockReturnValue(db as never);
 
     const count = await failInterruptedChatRuns();
 
-    expect(count).toBe(2);
+    expect(count).toBe(1);
+    const selection = findWrite(db.writes, "select", agentRuns);
+    expect(sqlParams(selection.where).some(value => value instanceof Date && value.getTime() <= Date.now() - 29 * 60_000)).toBe(true);
     const update = findWrite(db.writes, "update", agentRuns);
     expect(update).toBeDefined();
     expect((update.set as Record<string, unknown>).status).toBe("failed");
-    expect((update.set as Record<string, unknown>).error).toBe("Interrupted by server restart");
+    expect((update.set as Record<string, unknown>).error).toBe("Run timed out (stale)");
     expect((update.set as Record<string, unknown>).finishedAt).toBeInstanceOf(Date);
   });
 });

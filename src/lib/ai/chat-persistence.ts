@@ -145,7 +145,6 @@ export type PersistArgs = {
  */
 export async function persistAssistantMessage(args: PersistArgs): Promise<void> {
   if (!args.threadId || !args.workspaceId || !args.userId) return;
-  if (isEmptyAssistantPlaceholder(args.message)) return;
 
   const messageId = typeof args.message.id === "string" ? args.message.id : null;
   if (!messageId) return;
@@ -157,10 +156,22 @@ export async function persistAssistantMessage(args: PersistArgs): Promise<void> 
   if (args.runError) metadata.runError = args.runError;
   else delete metadata.runError;
 
-  const finalMessage: UIMessage = { ...args.message, metadata: metadata as UIMessage["metadata"] };
+  // Retain the terminal metadata even when the provider produced no parts.
+  // The saved placeholder is the user's retry/recovery anchor.
+  const finalMessage: UIMessage = { ...args.message,
+    parts: args.message.parts.length ? args.message.parts : [{ type: "text", text: "" }],
+    metadata: metadata as UIMessage["metadata"] };
 
   const db = getDb();
   await db.transaction(async (tx) => {
+    // The same row lock is used when starting/editing a turn. Delayed stream
+    // completion cannot overwrite a newer retry or resurrect an edited tail.
+    await tx.execute(sql`select id from ${chatThreads} where id = ${param(args.threadId)} for update`);
+    const [existing] = await tx.select().from(chatMessages).where(and(eq(chatMessages.threadId, args.threadId),
+      sql`${chatMessages.message} ->> 'id' = ${param(messageId)}`));
+    const existingRunId = (existing?.message as { metadata?: { runId?: string } } | undefined)?.metadata?.runId;
+    if (existingRunId && existingRunId !== incomingMeta.runId) return;
+    if (!existing) return; // edited/deleted while the old stream was finishing
     await tx.delete(chatMessages).where(
       and(
         eq(chatMessages.threadId, args.threadId),
@@ -175,11 +186,17 @@ export async function persistAssistantMessage(args: PersistArgs): Promise<void> 
       role: args.message.role,
       content: textOf(args.message),
       message: finalMessage as unknown as Record<string, unknown>,
+      createdAt: existing.createdAt,
     });
     await tx
       .update(chatThreads)
       .set({ updatedAt: new Date() })
       .where(eq(chatThreads.id, args.threadId));
+    if (typeof incomingMeta.runId === "string") {
+      await tx.update(agentRuns).set({ status: args.runStatus, error: args.runError ?? null, finishedAt: new Date() })
+        .where(and(eq(agentRuns.id, incomingMeta.runId), eq(agentRuns.workspaceId, args.workspaceId),
+          eq(agentRuns.userId, args.userId), eq(agentRuns.status, "running")));
+    }
   });
 }
 
@@ -187,20 +204,9 @@ export async function persistAssistantMessage(args: PersistArgs): Promise<void> 
 // Fix 2 — interrupted-run recovery
 // ---------------------------------------------------------------------------
 
-/** Boot sweep: every chat run still marked "running" belongs to a process
- * that no longer exists (the registry starts empty on boot). */
+/** A new process cannot infer that runs owned by other processes are dead. */
 export async function failInterruptedChatRuns(): Promise<number> {
-  const db = getDb();
-  const result = await db
-    .update(agentRuns)
-    .set({
-      status: "failed",
-      error: "Interrupted by server restart",
-      finishedAt: new Date(),
-    })
-    .where(and(eq(agentRuns.kind, "chat"), eq(agentRuns.status, "running")))
-    .returning({ id: agentRuns.id });
-  return result.length;
+  return recoverStaleChatRuns();
 }
 
 /**
@@ -232,7 +238,7 @@ export async function recoverStaleChatRuns(): Promise<number> {
       error: "Run timed out (stale)",
       finishedAt: new Date(),
     })
-    .where(inArray(agentRuns.id, staleIds))
+    .where(and(inArray(agentRuns.id, staleIds), eq(agentRuns.status, "running"), lt(agentRuns.startedAt, cutoff)))
     .returning({ id: agentRuns.id });
   return result.length;
 }
@@ -295,7 +301,8 @@ export async function resolveStaleAssistantMetadata(threadId: string): Promise<v
     await db
       .update(chatMessages)
       .set({ message: newMessage as Record<string, unknown> })
-      .where(eq(chatMessages.id, row.id));
+      .where(and(eq(chatMessages.id, row.id),
+        sql`${chatMessages.message} -> 'metadata' ->> 'runStatus' = 'running'`));
   }
 }
 
@@ -378,7 +385,7 @@ export function maybeAutoTitleThread(args: {
       await db
         .update(chatThreads)
         .set({ title: final.slice(0, 100) })
-        .where(eq(chatThreads.id, args.threadId));
+        .where(and(eq(chatThreads.id, args.threadId), eq(chatThreads.title, thread.title)));
     } catch {
       // Title generation is best-effort; never propagate.
     }

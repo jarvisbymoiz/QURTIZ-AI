@@ -1,16 +1,18 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { contentItems, contentVariants, publishingJobs, jobs, visualAssets } from "@/db/schema";
+import { contentItems, contentVariants, jobs, visualAssets } from "@/db/schema";
 
+import { unscheduleContent } from "@/lib/scheduling/unschedule";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { publishNow } from "@/lib/publishing/service";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { ensureDefaultPillars } from "@/lib/content/pillars";
 import { getActiveContext } from "@/lib/workspace";
+import { approveItem } from "@/lib/content/lifecycle";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -103,59 +105,8 @@ export async function unscheduleContentAction(itemId: string): Promise<ActionRes
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
-  const db = getDb();
-  const [item] = await db
-    .select({ status: contentItems.status })
-    .from(contentItems)
-    .where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, ctx.workspaceId)));
-  if (!item) return { ok: false, error: "Content item not found." };
-
-  // Only unpublished variants (approved/scheduled) are unscheduled — a
-  // variant that is already published stays published and is never flipped
-  // back to approved.
-  const unscheduled = await db
-    .select({ id: contentVariants.id })
-    .from(contentVariants)
-    .where(and(
-      eq(contentVariants.contentItemId, itemId),
-      eq(contentVariants.workspaceId, ctx.workspaceId),
-      inArray(contentVariants.status, ["approved", "scheduled"]),
-    ));
-  const variantIds = unscheduled.map((v) => v.id);
-
-  if (variantIds.length > 0) {
-    // Cancel (NOT delete) the pending jobs so publish history persists; the
-    // worker claims only status='pending' rows and retryFailedPublish refuses
-    // cancelled ones, so a cancelled job can never fire.
-    await db
-      .update(publishingJobs)
-      .set({ status: "cancelled", updatedAt: new Date() })
-      .where(and(
-        eq(publishingJobs.contentItemId, itemId),
-        eq(publishingJobs.workspaceId, ctx.workspaceId),
-        inArray(publishingJobs.contentVariantId, variantIds),
-        eq(publishingJobs.status, "pending"),
-      ));
-    await db
-      .update(contentVariants)
-      .set({ status: "approved", updatedAt: new Date() })
-      .where(inArray(contentVariants.id, variantIds));
-
-    // Every schedulable variant was just returned to approved, so no pending
-    // job remains for this item: clear the grid anchor unconditionally. (With
-    // the MIN(scheduledAt) rule in schedulePost, a partially scheduled item
-    // can carry scheduledAt while its status is still "approved" — clearing
-    // only on status === "scheduled" would leave a ghost on the calendar.)
-    // Status flips only scheduled → approved; published items are untouched.
-    await db
-      .update(contentItems)
-      .set({
-        ...(item.status === "scheduled" ? { status: "approved" as const } : {}),
-        scheduledAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(contentItems.id, itemId));
-  }
+  try { await unscheduleContent(ctx, itemId); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not unschedule content." }; }
 
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
@@ -219,7 +170,21 @@ export async function publishNowAction(input: {
   itemId: string;
   variantId: string;
   platform: "facebook" | "instagram";
-}): Promise<ActionResult & { providerPostId?: string; firstCommentSkipped?: boolean }> {
+}): Promise<
+  ActionResult & {
+    providerPostId?: string;
+    pendingDelivery?: boolean;
+    firstCommentSkipped?: boolean;
+    /** Meta first-comment outcome (separate request after the main post). */
+    comment?: {
+      status: string;
+      providerCommentId: string | null;
+      error: string | null;
+      attemptedAt: string | null;
+      publishedAt: string | null;
+    };
+  }
+> {
   const parsed = publishNowSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid publish request." };
@@ -274,7 +239,9 @@ export async function publishNowAction(input: {
   return {
     ok: true,
     providerPostId: result.providerPostId,
+    pendingDelivery: result.pendingDelivery,
     ...(result.firstCommentSkipped ? { firstCommentSkipped: true } : {}),
+    ...(result.comment ? { comment: result.comment } : {}),
   };
 }
 
@@ -289,25 +256,22 @@ export async function bulkApproveReadyAction(): Promise<ActionResult & { count?:
     .from(contentItems)
     .where(and(eq(contentItems.workspaceId, ctx.workspaceId), eq(contentItems.status, "ready_for_review")));
 
+  let approved = 0;
+  const failures: string[] = [];
   for (const item of ready) {
-    await db
-      .update(contentItems)
-      .set({ status: "approved", updatedAt: new Date() })
-      .where(eq(contentItems.id, item.id));
-    await db
-      .update(contentVariants)
-      .set({ status: "approved", updatedAt: new Date() })
-      .where(eq(contentVariants.contentItemId, item.id));
+    try { await approveItem(ctx.workspaceId, item.id); approved++; }
+    catch (error) { failures.push(error instanceof Error ? error.message : "Approval failed."); }
   }
 
   revalidatePath("/content-studio");
   revalidatePath("/calendar");
   revalidatePath("/");
-  return { ok: true, count: ready.length };
+  if (failures.length) return { ok: false, error: `${approved} approved; ${failures.length} need attention. ${failures[0]}`, count: approved };
+  return { ok: true, count: approved };
 }
 
 const bulkPlanSchema = z.object({
-  count: z.number().int().min(4).max(30).default(12),
+  count: z.number().int().min(1).max(30).default(12),
   niche: z.string().trim().max(300).optional().or(z.literal("")),
 });
 
@@ -335,32 +299,6 @@ export async function startBulkPlanAction(input: { count?: number; niche?: strin
     niche: parsed.data.niche || undefined,
   });
   if (!result.ok) return { ok: false, error: result.error };
-
-  try {
-    if (!process.env.VERCEL) {
-      const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
-      const boss = await getBoss();
-      await boss.send(QUEUES.bulkGenerate, { jobId: result.jobId });
-    } else {
-      const { runBulkPlan } = await import("@/lib/jobs/bulk");
-      void runBulkPlan(result.jobId).catch((err) => {
-        console.error("[bulk-plan serverless execution failed]", err);
-      });
-    }
-  } catch (error) {
-    // If pg-boss fails or is unavailable, fallback to direct background execution
-    try {
-      const { runBulkPlan } = await import("@/lib/jobs/bulk");
-      void runBulkPlan(result.jobId).catch((err) => {
-        console.error("[bulk-plan fallback execution failed]", err);
-      });
-    } catch {
-      const msg = error instanceof Error ? error.message : "Queue unavailable";
-      const db = getDb();
-      await db.update(jobs).set({ status: "failed", error: msg, updatedAt: new Date() }).where(eq(jobs.id, result.jobId));
-      return { ok: false, error: "Could not queue the bulk plan: " + msg };
-    }
-  }
 
   revalidatePath("/content-studio");
   revalidatePath("/calendar");
@@ -424,8 +362,6 @@ export async function getJobStatusAction(jobId: string): Promise<{
   const stage = (job.result as { stage?: string } | null)?.stage ?? null;
   return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined };
 }
-
-
 
 
 

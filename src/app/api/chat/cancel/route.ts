@@ -67,8 +67,9 @@ export async function POST(request: NextRequest) {
       .update(agentRuns)
       .set({ status: "cancelled", error: "Run cancelled by user", finishedAt: new Date() })
       .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "running")));
-  } catch {
-    // The abort itself already stopped the run; bookkeeping must not 500 here.
+  } catch (error) {
+    console.error("[chat] Could not persist cancellation", error);
+    return NextResponse.json({ error: "CANCEL_NOT_CONFIRMED" }, { status: 503 });
   }
 
   return NextResponse.json({ ok: true, status: "cancelled" });

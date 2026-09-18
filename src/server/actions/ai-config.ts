@@ -9,6 +9,8 @@ import { AIConfigError, maskApiKey, validateAIConfigShape, type AiTaskOverrides 
 import { decryptToken } from "@/lib/crypto/tokens";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
+import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
+import { resolvedBaseUrl } from "@/lib/ai/provider-catalog";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -105,6 +107,12 @@ export async function saveWorkspaceAIConfigAction(input: {
     imageBaseUrl: d.imageBaseUrl ?? null,
   });
   if (shapeError) return { ok: false, error: shapeError };
+  try {
+    for (const [provider, base] of [[d.textProvider, d.textBaseUrl], [d.imageProvider, d.imageBaseUrl]]) {
+      const endpoint = resolvedBaseUrl(provider!, base);
+      if (endpoint) assertAllowedAiEndpoint(endpoint);
+    }
+  } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Invalid AI endpoint." }; }
 
   const db = getDb();
   const [existing] = await db

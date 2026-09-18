@@ -127,6 +127,62 @@
       "when": 1788554292604,
       "tag": "0017_publishing_provider_post_id",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789502400000,
+      "tag": "0018_server_access_and_storage",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789632000000,
+      "tag": "0019_chat_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1789722000000,
+      "tag": "0020_agent_memory",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1789732800000,
+      "tag": "0021_proactive_agent_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1789736400000,
+      "tag": "0022_compact_agent_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1789765200000,
+      "tag": "0023_content_internal_edits",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1789768800000,
+      "tag": "0024_agent_editing_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1789772400000,
+      "tag": "0025_content_server_grants",
+      "breakpoints": true
     }
   ]
 }

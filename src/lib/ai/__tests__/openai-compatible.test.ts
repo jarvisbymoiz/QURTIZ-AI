@@ -48,6 +48,29 @@ afterEach(() => {
 });
 
 describe("openai-compatible doStream", () => {
+  it("sends every parallel tool result on the next model request", async () => {
+    let sent: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url, init) => {
+      sent = JSON.parse(String(init?.body));
+      return sseResponse([sseData({ choices: [{ delta: { content: "Both checked" }, finish_reason: "stop" }] }), "data: [DONE]\n\n"]);
+    }) as typeof fetch;
+    const model = createOpenAICompatibleModel({ modelId: "test", apiKey: "key", baseUrl: null });
+    await model.doStream({ prompt: [
+      { role: "user", content: [{ type: "text", text: "Check both" }] },
+      { role: "assistant", content: [
+        { type: "tool-call", toolCallId: "one", toolName: "brand", input: {} },
+        { type: "tool-call", toolCallId: "two", toolName: "research", input: {} },
+      ] },
+      { role: "tool", content: [
+        { type: "tool-result", toolCallId: "one", toolName: "brand", output: { type: "json", value: { brand: "A" } } },
+        { type: "tool-result", toolCallId: "two", toolName: "research", output: { type: "error-json", value: { error: "Unavailable" } } },
+      ] },
+    ] });
+    expect((sent?.messages as { role: string }[]).filter(m => m.role === "tool")).toEqual([
+      { role: "tool", tool_call_id: "one", content: '{"brand":"A"}' },
+      { role: "tool", tool_call_id: "two", content: '{"error":"Unavailable"}' },
+    ]);
+  });
   it("emits a terminal tool-call part so streamText executes the tool", async () => {
     const parts = await collectParts([
       sseData({

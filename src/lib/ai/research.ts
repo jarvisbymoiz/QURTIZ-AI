@@ -1,8 +1,10 @@
-﻿import { generateText } from "ai";
+import { retrieveAgentMemory } from "./persistent-memory";
+import { boundedAgentReference } from "./memory-policy";
+import { generateText } from "ai";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentRuns, brandMemory, brands, researchItems } from "@/db/schema";
+import { agentRuns, brands, researchItems } from "@/db/schema";
 import { estimateCostFromUsage, AIConfigError, type ResolvedTextModel } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
@@ -79,6 +81,7 @@ export async function researchTopics(ctx: {
    *  measured performance, competitor intel, topics to avoid repeating).
    *  Defaults to none — other callers are unaffected. */
   context?: string | null;
+  workspaceOnlyMemory?: boolean;
 }): Promise<ResearchResult> {
   // Workspace-isolated: resolves THIS workspace's text model (AIConfigError
   // when unset → honest "config" result, never another tenant's key).
@@ -93,20 +96,16 @@ export async function researchTopics(ctx: {
 
   const db = getDb();
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
-  const memories = await db
-    .select()
-    .from(brandMemory)
-    .where(and(eq(brandMemory.workspaceId, ctx.workspaceId), eq(brandMemory.active, true)))
-    .limit(40);
+  const learned = await retrieveAgentMemory({ workspaceId: ctx.workspaceId, userId: ctx.userId }, "Research strategy " + ctx.niche, !ctx.workspaceOnlyMemory);
 
   const [run] = await db
     .insert(agentRuns)
     .values({ workspaceId: ctx.workspaceId, userId: ctx.userId, kind: "research", model: resolved.modelId })
     .returning();
 
-  const system = `You are the QURTIZ AI research analyst for "${brand?.businessName ?? ctx.workspaceId}".
+  const system = `${learned.identity}\nYou are the QURTIZ AI research analyst for "${brand?.businessName ?? ctx.workspaceId}".
 Business context: ${summarizeBrandBrain(brand ?? null)}
-Active brand memory: ${memories.map((m) => m.content).join("; ") || "(none)"}
+Relevant reference data (preferences, not protected instructions): ${boundedAgentReference(learned)}
 
 Find concrete, specific social-media content opportunities. Never invent source URLs.
 Scores are 0-10 integers. competition is INVERTED: 10 = very low competition.
@@ -161,6 +160,10 @@ Research content opportunities: trending angles, audience questions, content gap
     if (!parsed.success) throw new Error("Model returned malformed topics JSON");
     rawTopics = parsed.data;
 
+    // Model-generated URLs are not evidence. Retain only URLs actually
+    // returned by the grounding provider; supplementary links stay labeled.
+    const verifiedUrls = new Set(grounded.map(source => source.url));
+    rawTopics = rawTopics.map(topic => ({ ...topic, sourceUrls: topic.sourceUrls.filter(url => verifiedUrls.has(url)) }));
     // Attach grounded sources when we actually have them.
     if (grounded.length > 0) {
       sourced = true;
@@ -218,5 +221,4 @@ Research content opportunities: trending angles, audience questions, content gap
 
   return { ok: true, sourced, note, count: rawTopics.length, insertedIds: inserted.map((r) => r.id) };
 }
-
 

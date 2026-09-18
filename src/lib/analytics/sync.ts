@@ -8,12 +8,33 @@ import { GRAPH_HOST, GRAPH_VERSION } from "@/lib/meta/oauth";
 
 type SyncResult = { synced: number; errors: string[] };
 
+type GraphPage<T> = {
+  data?: T[];
+  paging?: { next?: string };
+  error?: { message?: string };
+};
+
 async function graphGet(url: string, token: string): Promise<Record<string, unknown>> {
   const sep = url.includes("?") ? "&" : "?";
   const res = await fetch(`${url}${sep}access_token=${encodeURIComponent(token)}`, {
     signal: AbortSignal.timeout(30_000),
   });
   return (await res.json()) as Record<string, unknown>;
+}
+
+async function collectGraphPages<T>(initialUrl: string, token: string, maxPages = 10): Promise<GraphPage<T>> {
+  const rows: T[] = [];
+  let next: string | null = initialUrl;
+  for (let page = 0; next && page < maxPages; page++) {
+    if (!next.startsWith(`${GRAPH_HOST}/`)) {
+      return { data: rows, error: { message: "Meta returned an invalid pagination URL." } };
+    }
+    const response = (await graphGet(next, token)) as GraphPage<T>;
+    if (response.error) return { data: rows, error: response.error };
+    rows.push(...(response.data ?? []));
+    next = typeof response.paging?.next === "string" ? response.paging.next : null;
+  }
+  return { data: rows };
 }
 
 async function collectMetrics(
@@ -23,7 +44,7 @@ async function collectMetrics(
   externalPostId: string,
   contentItemId: string | null,
   postedAt: Date | null,
-): Promise<boolean> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const db = getDb();
   const metricNames =
     platform === "facebook"
@@ -35,7 +56,7 @@ async function collectMetrics(
     token,
   )) as { data?: { name: string; values?: { value?: number }[] }[]; error?: { message?: string } };
 
-  if (insights.error) return false;
+  if (insights.error) return { ok: false, error: insights.error.message ?? "Meta insights request failed." };
 
   const m: Record<string, number> = {};
   for (const metric of insights.data ?? []) {
@@ -45,7 +66,7 @@ async function collectMetrics(
       if (metric.name === "saved") m.saves = value;
     }
   }
-  if (Object.keys(m).length === 0) return false;
+  if (Object.keys(m).length === 0) return { ok: false, error: "Meta returned no supported metrics." };
 
   const normalized = {
     reach: m.reach ?? 0,
@@ -66,7 +87,7 @@ async function collectMetrics(
       target: [postMetrics.workspaceId, postMetrics.platform, postMetrics.externalPostId],
       set: { metrics: normalized, collectedAt: new Date(), contentItemId },
     });
-  return true;
+  return { ok: true };
 }
 
 /**
@@ -104,7 +125,11 @@ export async function syncInsightsForWorkspace(workspaceId: string): Promise<Syn
     const publishedJobs = await db
       .select({ platform: publishingJobs.platform, contentItemId: publishingJobs.contentItemId, result: publishingJobs.result })
       .from(publishingJobs)
-      .where(and(eq(publishingJobs.workspaceId, workspaceId), eq(publishingJobs.status, "published")));
+      .where(and(
+        eq(publishingJobs.workspaceId, workspaceId),
+        eq(publishingJobs.platform, conn.platform),
+        eq(publishingJobs.status, "published"),
+      ));
 
     const externalIds = new Map<string, string | null>(); // externalPostId -> contentItemId
     for (const j of publishedJobs) {
@@ -114,28 +139,38 @@ export async function syncInsightsForWorkspace(workspaceId: string): Promise<Syn
 
     try {
       if (conn.platform === "facebook") {
-        const posts = (await graphGet(
+        const posts = await collectGraphPages<{ id: string; created_time?: string }>(
           `${GRAPH_HOST}/${GRAPH_VERSION}/${meta.pageId}/posts?fields=id,created_time&limit=50`,
           token,
-        )) as { data?: { id: string; created_time?: string }[]; error?: { message?: string } };
-        if (posts.error) result.errors.push(`facebook: ${posts.error.message}`);
+        );
+        if (posts.error) result.errors.push(`facebook: ${posts.error.message ?? "post listing failed"}`);
         for (const p of posts.data ?? []) {
           const linked = externalIds.get(p.id) ?? null;
-          const ok = await collectMetrics(workspaceId, "facebook", token, p.id, linked, p.created_time ? new Date(p.created_time) : null);
-          if (ok) result.synced++;
+          try {
+            const metricResult = await collectMetrics(workspaceId, "facebook", token, p.id, linked, p.created_time ? new Date(p.created_time) : null);
+            if (metricResult.ok) result.synced++;
+            else result.errors.push(`facebook post ${p.id}: ${metricResult.error}`);
+          } catch (error) {
+            result.errors.push(`facebook post ${p.id}: ${error instanceof Error ? error.message : "metric sync failed"}`);
+          }
         }
       }
 
       if (conn.platform === "instagram" && meta.igUserId) {
-        const media = (await graphGet(
+        const media = await collectGraphPages<{ id: string; timestamp?: string }>(
           `${GRAPH_HOST}/${GRAPH_VERSION}/${meta.igUserId}/media?fields=id,timestamp&limit=50`,
           token,
-        )) as { data?: { id: string; timestamp?: string }[]; error?: { message?: string } };
-        if (media.error) result.errors.push(`instagram: ${media.error.message}`);
+        );
+        if (media.error) result.errors.push(`instagram: ${media.error.message ?? "media listing failed"}`);
         for (const p of media.data ?? []) {
           const linked = externalIds.get(p.id) ?? null;
-          const ok = await collectMetrics(workspaceId, "instagram", token, p.id, linked, p.timestamp ? new Date(p.timestamp) : null);
-          if (ok) result.synced++;
+          try {
+            const metricResult = await collectMetrics(workspaceId, "instagram", token, p.id, linked, p.timestamp ? new Date(p.timestamp) : null);
+            if (metricResult.ok) result.synced++;
+            else result.errors.push(`instagram media ${p.id}: ${metricResult.error}`);
+          } catch (error) {
+            result.errors.push(`instagram media ${p.id}: ${error instanceof Error ? error.message : "metric sync failed"}`);
+          }
         }
       }
     } catch (e) {

@@ -1,5 +1,6 @@
 ﻿import {
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -13,6 +14,7 @@
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /* ── Enums ─────────────────────────────────────────────────────────── */
 
@@ -188,6 +190,9 @@ export const brandMemory = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     type: brandMemoryTypeEnum("type").notNull(),
+    memoryKey: text("memory_key"),
+    category: text("category").notNull().default("general"),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
     content: text("content").notNull(),
     source: text("source").notNull().default("chat"),
     confidence: real("confidence").notNull().default(1),
@@ -197,8 +202,44 @@ export const brandMemory = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
-  (t) => [index("brand_memory_ws_idx").on(t.workspaceId, t.createdAt)],
+  (t) => [index("brand_memory_ws_idx").on(t.workspaceId, t.createdAt),
+    uniqueIndex("brand_memory_active_key_uq").on(t.workspaceId, t.memoryKey).where(sql`${t.active} AND ${t.deletedAt} IS NULL`)],
 );
+
+export const agentIdentities = pgTable("agent_identities", {
+  version: integer("version").primaryKey(),
+  instructions: text("instructions").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const workspaceAgentProfiles = pgTable("workspace_agent_profiles", {
+  workspaceId: uuid("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+  operatingInstructions: text("operating_instructions").notNull().default(""),
+  strategy: text("strategy").notNull().default(""),
+  workflow: text("workflow").notNull().default(""),
+  platforms: text("platforms").notNull().default(""),
+  updatedBy: uuid("updated_by").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const userAgentMemories = pgTable("user_agent_memories", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  memoryKey: text("memory_key").notNull(),
+  category: text("category").notNull().default("general"),
+  type: brandMemoryTypeEnum("type").notNull(),
+  content: text("content").notNull(),
+  source: text("source").notNull(),
+  confidence: real("confidence").notNull().default(1),
+  active: boolean("active").notNull().default(true),
+  supersededAt: timestamp("superseded_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("user_agent_memories_scope_idx").on(t.workspaceId, t.userId, t.active),
+  uniqueIndex("user_agent_memories_active_key_uq").on(t.workspaceId, t.userId, t.memoryKey).where(sql`${t.active}`),
+  foreignKey({ columns: [t.workspaceId, t.userId], foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId] }).onDelete("cascade"),
+]);
 
 /* ── Connections (schema now, features in M4) ──────────────────────── */
 
@@ -243,6 +284,7 @@ export const chatThreads = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     userId: uuid("user_id").notNull(),
     title: text("title").notNull().default("New chat"),
+    context: jsonb("context"),
     pinned: boolean("pinned").notNull().default(false),
     archived: boolean("archived").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -372,6 +414,7 @@ export const contentItems = pgTable(
     hashtags: text("hashtags").array().notNull().default([]),
     keywords: text("keywords").array().notNull().default([]),
     visualConcept: text("visual_concept"),
+    internalEdits: jsonb("internal_edits").notNull().default({}),
     aiScores: jsonb("ai_scores").notNull().default({}),
     qa: jsonb("qa").notNull().default({}),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
@@ -514,9 +557,9 @@ export const publishingJobs = pgTable(
       .notNull()
       .references(() => contentVariants.id, { onDelete: "cascade" }),
     platform: platformEnum("platform").notNull(),
-    // Publishing provider snapshotted at job creation ("meta" | "buffer").
-    // Jobs keep the provider they were scheduled under — a later workspace
-    // provider toggle never reroutes already-queued jobs.
+    // Provider selected when the job is created. The worker re-resolves the
+    // live healthy connection at execution time and updates this audit field
+    // before sending when failover changes the route.
     provider: text("provider").notNull().default("meta"),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
     status: publishingJobStatusEnum("status").notNull().default("pending"),
