@@ -38,8 +38,7 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
     editingImperative.test(currentRequest) ||
     editingReference.test(currentRequest) ||
     editingAdditions.test(currentRequest) ||
-    editingStyle.test(currentRequest) ||
-    /\buse\s+my\s+usual\s+style\b/i.test(currentRequest);
+    editingStyle.test(currentRequest);
   const direct = /\b(schedule|reschedule)\b/i.test(currentRequest) ? "schedule_content"
     : editing ? "edit_content"
     : /\b(create|generate|write|make|turn|convert)\b/i.test(currentRequest) && /\b(post|content|carousel|reel|version)\b/i.test(currentRequest) ? "create_content"
