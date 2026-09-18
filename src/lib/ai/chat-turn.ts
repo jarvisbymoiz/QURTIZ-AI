@@ -16,6 +16,13 @@ export async function prepareChatTurn(args: {
   threadId: string; createThread: boolean; workspaceId: string; userId: string;
   message: UIMessage; model: string;
 }) {
+  // The seed MUST be a well-formed user message with content. Without a user
+  // seed there is no deterministic assistant id (assistantMessageIdForTurn
+  // falls back to `runId:assistant`, which produces a different id on every
+  // retry — duplicate rows instead of upserts).
+  if (!args.message || args.message.role !== "user" || typeof args.message.id !== "string" || !args.message.id) {
+    throw new ChatTurnError("Your message could not be saved. Please resend it.", 400);
+  }
   const db = getDb();
   return db.transaction(async tx => {
     if (args.createThread) {
@@ -52,13 +59,26 @@ export async function prepareChatTurn(args: {
     await tx.update(chatThreads).set({ updatedAt: new Date() }).where(eq(chatThreads.id, args.threadId));
     // Never cut a tool exchange in half: keep complete UI messages and start
     // at a user turn. Unfinished tool parts cannot enter the next model call.
+    //
+    // Order matters: filter empty parts FIRST, then strip leading non-user
+    // messages. Doing it the other way around can leave a non-user row at the
+    // head when the leading shift removed one empty-text assistant placeholder
+    // but exposed another below it — AI SDK v5's streamText() rejects any
+    // history whose first message is not a user role ("first message must be
+    // user role"), which was the source of intermittent multi-turn failures.
     const history = prior.map(row => row.message as unknown as UIMessage);
-    while (history.length && history[0].role !== "user") history.shift();
     const messages = history.map(m => ({ ...m, parts: m.parts.filter(p => {
       if (p.type === "text") return p.text.trim().length > 0;
       if (!p.type.startsWith("tool-")) return true;
       return ["output-available", "output-error"].includes((p as { state?: string }).state ?? "");
     }) })).filter(m => m.parts.length > 0);
+    while (messages.length && messages[0].role !== "user") messages.shift();
+    // The first turn has no prior history — that's fine (the new user
+    // message below IS the first message). We only hard-fail when prior
+    // history existed but every row was filtered out (corrupt thread).
+    if (messages.length === 0 && prior.length > 0) {
+      throw new ChatTurnError("Your conversation history is empty or invalid. Start a new chat.", 400);
+    }
     return { run, context: thread.context, messages: [...messages, args.message] as UIMessage[] };
   });
 }
