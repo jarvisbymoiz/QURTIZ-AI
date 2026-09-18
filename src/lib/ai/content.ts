@@ -6,7 +6,7 @@ import { z } from "zod";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brands, contentItems, contentVariants } from "@/db/schema";
-import { estimateCostFromUsage, withRateLimitRetry, type ResolvedTextModel } from "@/lib/ai/provider";
+import { estimateCostFromUsage, RateLimitExceededError, withRateLimitRetry, type ResolvedTextModel } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
@@ -280,6 +280,13 @@ async function generateContentObjectWithFallbacks(args: {
     // Only unusable MODEL OUTPUT falls through to the fallbacks. Everything
     // else (rate limit, timeout, HTTP error) keeps its own meaning.
     if (!NoObjectGeneratedError.isInstance(primaryError)) throw primaryError;
+
+    // Daily quota / hard-quota errors must NOT trigger another model call —
+    // each retry burns the same scarce quota and the user is blocked until
+    // reset regardless. Surface the actionable message immediately.
+    if (primaryError instanceof RateLimitExceededError) {
+      throw primaryError;
+    }
 
     let lastRaw = primaryError.text ?? "";
     let lastIssues = "the model returned no usable structured response";

@@ -1,4 +1,5 @@
-﻿import type { LanguageModelV2 } from "@ai-sdk/provider";
+import type { LanguageModelV2 } from "@ai-sdk/provider";
+import { APICallError } from "@ai-sdk/provider";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
 import {
@@ -205,14 +206,222 @@ export function isAiConfigured(): boolean {
 }
 
 /**
- * Retry a generative AI call when the provider returns 429
- * (rate limit / quota exhausted - e.g. Gemini free tier: 20 req/min).
- * Honors the Retry-After header when present, otherwise backs off.
- * Non-429 errors propagate immediately. Re-throws after attempts.
+ * Classify a provider rate-limit / quota error so the caller can decide
+ * whether retrying soon is useful.
+ *
+ * - `tpm` / `rpm` — short windows (tokens/requests per minute). Recover in
+ *   seconds-to-minutes. Worth retrying with backoff.
+ * - `tpd` / `rpd` — long windows (tokens/requests per DAY). OpenRouter free
+ *   tier limits e.g. gpt-oss-120b to 200K TPD. Retry is wasteful — the
+ *   user is blocked for the rest of the calendar day. Surface the
+ *   retry-after honestly so they know whether to wait or switch models.
+ * - `quota` — hard quota exhaustion (account-level credits exhausted,
+ *   upgrade required). Retrying is never useful.
+ * - `other` — unclassified 429/5xx. Default to "recoverable" (tpm).
+ */
+export type RateLimitKind = "tpm" | "rpm" | "tpd" | "rpd" | "quota" | "other";
+
+export type RateLimitInfo = {
+  kind: RateLimitKind;
+  /** Seconds until retry, parsed from Retry-After header or message; null when unknown. */
+  retryAfterSeconds: number | null;
+  /** Provider-reported limit (e.g. 200000 for TPD), null when unparsed. */
+  limit: number | null;
+  /** Tokens/requests already used in the current window, null when unparsed. */
+  used: number | null;
+  /** Tokens/requests requested by this call, null when unparsed. */
+  requested: number | null;
+};
+
+// (kept historically for symmetry with the parseRetryAfter internals —
+// the actual matching is now inlined inside parseRetryAfter with a single
+// greedy regex that handles fractional seconds correctly.)
+
+/**
+ * Parse OpenRouter's free-tier TPD message shape:
+ *   "Rate limit reached for model `openai/gpt-oss-120b` in organization ...
+ *    on tokens per day (TPD): Limit 200000, Used 199147, Requested 2075.
+ *    Please try again in 8m47.904s. Need more tokens? Upgrade to Dev Tier ..."
+ * Also handles generic TPM/RPM/TPD from any provider.
+ */
+export function parseRateLimitError(error: unknown): RateLimitInfo {
+  const empty: RateLimitInfo = { kind: "other", retryAfterSeconds: null, limit: null, used: null, requested: null };
+  if (!error) return empty;
+
+  let message = "";
+  let headers: Record<string, unknown> = {};
+  if (APICallError.isInstance(error)) {
+    message = error.message ?? "";
+    headers = (error.responseHeaders ?? {}) as Record<string, unknown>;
+  } else if (error instanceof Error) {
+    message = error.message ?? "";
+  } else if (typeof error === "string") {
+    message = error;
+  } else {
+    return empty;
+  }
+
+  const lower = message.toLowerCase();
+
+  // Hard quota exhaustion — never worth retrying.
+  if (
+    /\bquota\b/.test(lower) ||
+    /\bresource_exhausted\b/.test(lower) ||
+    /\binsufficient[_ ]quota\b/.test(lower) ||
+    /\bcredit(?:s)?\s+(?:exhausted|balance)\b/.test(lower) ||
+    /\bbilling\b/.test(lower) ||
+    /\bexceeded\s+your\s+current\s+quota\b/.test(lower)
+  ) {
+    return { ...empty, kind: "quota", retryAfterSeconds: parseRetryAfter(message, headers) };
+  }
+
+  // Per-window kind detection (TPD wins over TPM when both are mentioned).
+  const kind: RateLimitKind =
+    /\btokens?\s+per\s+day\b|\bTPD\b/i.test(lower) ? "tpd" :
+    /\brequests?\s+per\s+day\b|\bRPD\b/i.test(lower) ? "rpd" :
+    /\btokens?\s+per\s+(?:minute|min)\b|\bTPM\b/i.test(lower) ? "tpm" :
+    /\brequests?\s+per\s+(?:minute|min)\b|\bRPM\b/i.test(lower) ? "rpm" :
+    /\brate\s+limit\b|\btoo\s+many\s+requests\b|\b429\b/i.test(lower) ? "other" :
+    "other";
+
+  return {
+    kind,
+    retryAfterSeconds: parseRetryAfter(message, headers),
+    limit: parseField(message, /\bLimit\s+([\d,]+)/i),
+    used: parseField(message, /\bUsed\s+([\d,]+)/i),
+    requested: parseField(message, /\bRequested\s+([\d,]+)/i),
+  };
+}
+
+function parseField(message: string, regex: RegExp): number | null {
+  const m = message.match(regex);
+  if (!m) return null;
+  const n = Number(m[1].replaceAll(",", ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseRetryAfter(message: string, headers: Record<string, unknown>): number | null {
+  // 1. HTTP Retry-After header (seconds OR HTTP-date).
+  const headerVal = headers["retry-after"] ?? headers["Retry-After"] ?? headers["x-ratelimit-reset"];
+  if (headerVal != null) {
+    if (typeof headerVal === "number" && Number.isFinite(headerVal)) return Math.max(0, Math.floor(headerVal));
+    if (typeof headerVal === "string") {
+      const num = Number(headerVal);
+      if (Number.isFinite(num)) return Math.max(0, Math.floor(num));
+      const dateMs = Date.parse(headerVal);
+      if (!Number.isNaN(dateMs)) return Math.max(0, Math.floor((dateMs - Date.now()) / 1000));
+    }
+  }
+
+  // 2. Milliseconds ("500ms") — match first because fractional seconds below
+  //    would otherwise swallow it.
+  const msMatch = message.match(/(\d+(?:\.\d+)?)\s*(ms|milliseconds?)\b/i);
+  if (msMatch) return Math.max(1, Math.ceil(Number(msMatch[1]) / 1000));
+
+  // 3. Composite durations like "8m47.904s" / "1h30m15s". To avoid
+  //    matching unrelated `<digits><unit>` tokens (e.g. org IDs, quota
+  //    numbers like "Limit 200000"), we scope the search to a small
+  //    window around retry-style cue phrases. Cues are anchored on a
+  //    word boundary and exclude the bare word "in" (which appears in
+  //    "in organization", "in region", etc. and is too noisy). The
+  //    span boundary is "letter, semicolon, exclamation, question-mark,
+  //    end-of-string" — but NOT a period, because fractional seconds
+  //    like "47.904s" include one in the middle.
+  let total = 0;
+  let matched = false;
+  const cuePattern =
+    /\b(?:try\s+again\s+in|retry\s+after|wait(?:\s+for)?\s+(?:approximately|about|approx\.?)?|available\s+again\s+in|next\s+window\s+in)\s+([^\n\r;!?]*)/gi;
+  let cueMatch: RegExpExecArray | null;
+  while ((cueMatch = cuePattern.exec(message)) !== null) {
+    const span = cueMatch[1];
+    if (!/^\s*\d/.test(span)) continue;
+    const composite = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])/gi;
+    let unitMatch: RegExpExecArray | null;
+    while ((unitMatch = composite.exec(span)) !== null) {
+      const value = Number(unitMatch[1]);
+      const unit = unitMatch[2].toLowerCase();
+      if (!Number.isFinite(value) || value < 0 || value > 1e7) continue;
+      if (unit.startsWith("h")) total += value * 3600;
+      else if (unit.startsWith("m")) total += value * 60;
+      else if (unit.startsWith("s")) total += value;
+      matched = true;
+    }
+  }
+  if (matched) return Math.max(1, Math.floor(total));
+
+  return null;
+}
+
+/**
+ * Human-readable retry hint keyed off the rate-limit kind. TPD/RPD/quota
+ * messages tell the user the recovery is hours, not seconds — so they do not
+ * waste time retrying. TPM/RPM messages invite a short retry.
+ */
+export function rateLimitHint(info: RateLimitInfo): string {
+  const minutes = info.retryAfterSeconds != null ? Math.ceil(info.retryAfterSeconds / 60) : null;
+  switch (info.kind) {
+    case "tpd":
+    case "rpd":
+      return minutes != null
+        ? `Daily ${info.kind.toUpperCase()} limit reached — quota resets in ~${minutes} min. Switch to a different model or upgrade your plan to continue now.`
+        : `Daily ${info.kind.toUpperCase()} limit reached — Switch to a different model or upgrade your plan to continue now.`;
+    case "quota":
+      return `Account quota exhausted. Upgrade the plan or top up credits to continue.`;
+    case "tpm":
+    case "rpm":
+      if (info.retryAfterSeconds == null) {
+        return `Rate limited (${info.kind.toUpperCase()}) — wait and retry.`;
+      }
+      // Use seconds when under a minute (TPM windows are typically <60s);
+      // minutes otherwise. Avoid the "wait ~1s" rounding artifact when
+      // the wait is e.g. 30 seconds.
+      if (info.retryAfterSeconds < 60) {
+        return `Rate limited (${info.kind.toUpperCase()}) — wait ~${Math.max(1, Math.ceil(info.retryAfterSeconds))}s and retry.`;
+      }
+      return `Rate limited (${info.kind.toUpperCase()}) — wait ~${minutes}s and retry.`;
+    default:
+      return "Rate limited — wait and retry, or switch to a different model.";
+  }
+}
+
+/**
+ * Thrown when a generative AI call is permanently blocked (TPD/RPD/quota),
+ * NOT a transient rate limit. Carries the parsed RateLimitInfo so the UI can
+ * render an actionable hint instead of a misleading "Failed after N attempts"
+ * stack trace. The original error is preserved on `cause` for diagnostics.
+ */
+export class RateLimitExceededError extends Error {
+  readonly info: RateLimitInfo;
+  constructor(info: RateLimitInfo, options?: { cause?: unknown }) {
+    super(rateLimitHint(info));
+    this.name = "RateLimitExceededError";
+    this.info = info;
+    if (options?.cause !== undefined) {
+      // ES2022 `cause` slot — keeps the original error in the chain without
+      // losing stack fidelity for logs.
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+/**
+ * Retry a generative AI call when the provider returns 429.
+ *
+ * Two categories of 429 are handled differently:
+ * - **TPM/RPM** (short window) — retry up to `attempts` with the
+ *   provider's `Retry-After` header when present, capped at 60s.
+ * - **TPD/RPD/quota** (long window / hard cap) — do NOT retry: a TPD
+ *   exhaustion on OpenRouter's free tier blocks for the rest of the day,
+ *   and each retry attempt burns more of the user's remaining quota. The
+ *   error is re-thrown wrapped in `RateLimitExceededError` so the caller
+ *   can render a clear "try a different model" message instead of the
+ *   misleading "Failed after N attempts".
+ *
+ * Non-429 errors propagate unchanged.
  */
 export async function withRateLimitRetry<T>(
   fn: () => Promise<T> | T,
-  attempts = 3,
+  attempts = 2,
 ): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -220,14 +429,20 @@ export async function withRateLimitRetry<T>(
       return await fn();
     } catch (err) {
       lastErr = err;
-      const e = err as { statusCode?: number; headers?: Record<string, unknown>; message?: string };
-      const is429 = e?.statusCode === 429 || (e?.message ?? "").includes("RESOURCE_EXHAUSTED");
-      if (!is429 || i === attempts - 1) throw err;
-      let waitMs = 10_000;
-      const ra = (e?.headers as Record<string, unknown>)?.["retry-after"];
-      const raNum = typeof ra === "number" ? ra : ra != null ? Number(String(ra)) : NaN;
-      if (!Number.isNaN(raNum) && raNum > 0) waitMs = Math.min(raNum * 1000, 60_000);
-      await new Promise((r) => setTimeout(r, waitMs));
+      const e = err as { statusCode?: number; message?: string };
+      const is429 = e?.statusCode === 429 || /RESOURCE_EXHAUSTED|Rate limit/i.test(e?.message ?? "");
+      if (!is429) throw err;
+      // Classify BEFORE deciding to retry — TPD/RPD/quota must surface
+      // immediately instead of burning more quota on doomed attempts.
+      const info = parseRateLimitError(err);
+      if (info.kind === "tpd" || info.kind === "rpd" || info.kind === "quota") {
+        throw new RateLimitExceededError(info, { cause: err });
+      }
+      if (i === attempts - 1) throw err;
+      const waitSeconds = info.retryAfterSeconds != null
+        ? Math.min(Math.max(1, info.retryAfterSeconds), 60)
+        : 10;
+      await new Promise((r) => setTimeout(r, waitSeconds * 1000));
     }
   }
   throw lastErr;

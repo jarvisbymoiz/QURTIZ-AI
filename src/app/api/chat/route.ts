@@ -17,7 +17,7 @@ import { buildAgentTools } from "@/lib/ai/tools";
 import { describeStreamError, repairWrappedToolCall } from "@/lib/ai/stream-errors";
 import { buildSystemPrompt } from "@/lib/ai/agent";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
-import { AIConfigError, estimateCostFromUsage } from "@/lib/ai/provider";
+import { AIConfigError, estimateCostFromUsage, RateLimitExceededError, rateLimitHint } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { can } from "@/lib/permissions";
 import { abortRun, isRunRegistered, registerRunController, unregisterRunController } from "@/lib/ai/run-registry";
@@ -388,8 +388,30 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     clearInterval(cancellationTimer);
-    const message = error instanceof Error ? error.message : "Unknown provider error";
     unregisterRunController(run.id);
+    // Daily quota / hard quota / classified rate-limit errors get a precise
+    // actionable message AND a retry-after header so the client toast can
+    // tell the user exactly when to come back (or to switch models now).
+    if (error instanceof RateLimitExceededError) {
+      const hint = rateLimitHint(error.info);
+      const retryAfter = error.info.retryAfterSeconds;
+      try {
+        await db
+          .update(agentRuns)
+          .set({ status: "failed", error: hint, finishedAt: new Date() })
+          .where(eq(agentRuns.id, run.id));
+      } catch {
+        // ignore
+      }
+      return NextResponse.json(
+        { error: "RATE_LIMITED", message: hint },
+        {
+          status: 429,
+          headers: retryAfter != null ? { "Retry-After": String(retryAfter) } : undefined,
+        },
+      );
+    }
+    const message = error instanceof Error ? error.message : "Unknown provider error";
     try {
       await db
         .update(agentRuns)
