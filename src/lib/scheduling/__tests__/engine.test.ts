@@ -300,7 +300,13 @@ describe("scheduleItem past-date guard", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.reason).toBe("past_date");
-    expect(res.message).toContain("today or a future date");
+    // The error message NAMES the resolved "today" so any timezone
+    // mismatch between the user's spoken day and the workspace timezone
+    // is immediately obvious — without it the user just sees "can't
+    // schedule in the past" with no hint of what's wrong.
+    expect(res.message).toContain(YESTERDAY);
+    expect(res.message).toContain("is in the past");
+    expect(res.message).toContain(TODAY);
     expect(calls).toHaveLength(0); // guard fires before any read or write
   });
 
@@ -319,7 +325,55 @@ describe("scheduleItem past-date guard", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.reason).toBe("past_date");
+    // Same-day past slot reports the current wall-clock time in the
+    // workspace timezone so the user can pick a future slot.
+    expect(res.message).toMatch(/Current time in Asia\/Karachi is \d{2}:\d{2}/);
     expect(calls.filter((c) => c.kind === "insert")).toHaveLength(0);
+  });
+
+  it("hints at timezone mismatch when the date is exactly one day behind the workspace's today", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: YESTERDAY, timezone: TZ });
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toMatch(/one day behind/);
+    expect(res.message).toContain("Today in this workspace timezone");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("accepts a future date at the default slot", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    const res = await scheduleItem({ workspaceId: "ws-1", itemId: "item-1", dateIso: FUTURE, timezone: TZ });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scheduledAt.toISOString()).toBe(parseZonedDateTime(FUTURE, "18:30", TZ).toISOString());
+    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(1);
+  });
+
+  it("accepts today at a future time even when the resolved slot is the same calendar day", async () => {
+    const { db, calls } = reviewableDb();
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+
+    // 23:59 PKT today is still in the future for most of the day; the
+    // engine must accept it (the date guard does NOT reject same-day
+    // bookings, only the time guard rejects past slots).
+    const res = await scheduleItem({
+      workspaceId: "ws-1",
+      itemId: "item-1",
+      dateIso: TODAY,
+      timeStr: "23:59",
+      timezone: TZ,
+    });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(calls.filter((c) => c.kind === "insert")).toHaveLength(1);
   });
 
   it("accepts a future date at the default slot", async () => {

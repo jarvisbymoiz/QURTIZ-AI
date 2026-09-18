@@ -1,9 +1,9 @@
-﻿import "server-only";
+import "server-only";
 
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants } from "@/db/schema";
-import { dateIsoInTz, defaultSlotFor, parseZonedDateTime } from "./time";
+import { dateIsoInTz, defaultSlotFor, hmInTz, parseZonedDateTime } from "./time";
 import { schedulePost } from "@/lib/publishing/service";
 import type { ContentPlatform, PublishProvider } from "@/lib/publish/provider";
 
@@ -31,6 +31,12 @@ export type ScheduleOutcome =
  */
 const SCHEDULABLE_VARIANT_STATUSES = ["approved", "scheduled"] as const;
 
+/** YYYY-MM-DD key for `d + offsetDays` in the workspace timezone. Pure. */
+function isoOffset(tz: string, offsetDays: number): string {
+  const [y, m, d] = dateIsoInTz(tz).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
 /**
  * Schedule a content item: creates one publishing job per variant and flips
  * statuses to scheduled. Approval gate enforced: draft items cannot be
@@ -57,11 +63,30 @@ export async function scheduleItem(args: {
   // default month view, and its publish job goes due immediately on the next
   // scan. Same-day bookings at an earlier wall-clock time stay allowed so
   // "schedule today evening" keeps working.
-  if (args.dateIso < dateIsoInTz(args.timezone)) {
+  //
+  // The error message NAMES the resolved "today" so that any timezone
+  // mismatch (user's wall-clock day vs workspace timezone) is immediately
+  // obvious — without it the user sees "Can't schedule in the past" with
+  // no hint that their browser-day is already tomorrow but the workspace
+  // is still on today, or vice versa.
+  const todayInTz = dateIsoInTz(args.timezone);
+  if (args.dateIso < todayInTz) {
+    const tomorrowInTz = isoOffset(args.timezone, 1);
+    // "Tomorrow" in the user's spoken timezone is the most likely intended
+    // booking when the date is one day behind the workspace's "today" —
+    // they typed "today" in their head, the model resolved it in the
+    // workspace timezone which is already on the next day.
+    const oneDayBehind = args.dateIso === isoOffset(args.timezone, -1);
+    const hint = oneDayBehind
+      ? ` Today in this workspace timezone (${args.timezone}) is already ${todayInTz}; the date you sent (${args.dateIso}) is one day behind. If you meant "today", use ${todayInTz} or the equivalent local date.`
+      : "";
     return {
       ok: false,
       reason: "past_date",
-      message: "Can't schedule in the past — use today or a future date.",
+      message:
+        `Can't schedule on ${args.dateIso} — that date is in the past for ${args.timezone}. ` +
+        `Today is ${todayInTz} and the next valid date is ${tomorrowInTz} (or any later day).` +
+        hint,
     };
   }
 
@@ -80,8 +105,25 @@ export async function scheduleItem(args: {
   }
 
   const scheduledAt = args.timeStr ? parseZonedDateTime(args.dateIso, timeStr, args.timezone) : defaultSlotFor(args.dateIso, args.timezone);
-  if (!Number.isFinite(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now()) {
-    return { ok: false, reason: "past_date", message: "Choose a valid future date and time." };
+  if (!Number.isFinite(scheduledAt.getTime())) {
+    return { ok: false, reason: "invalid_date", message: `Choose a valid future date and time (could not interpret ${args.dateIso} ${timeStr} ${args.timezone}).` };
+  }
+  if (scheduledAt.getTime() <= Date.now()) {
+    // Show the current wall-clock time in the workspace timezone so the
+    // user can pick a slot that's actually in the future without having
+    // to do timezone arithmetic in their head.
+    const nowInTz = hmInTz(args.timezone);
+    const tomorrowInTz = isoOffset(args.timezone, 1);
+    const hint = args.dateIso === todayInTz
+      ? ` Current time in ${args.timezone} is ${nowInTz}; pick a time later today, or use tomorrow (${tomorrowInTz}).`
+      : ` Current time in ${args.timezone} is ${nowInTz} on ${todayInTz}; pick a slot after that.`;
+    return {
+      ok: false,
+      reason: "past_date",
+      message:
+        `Can't schedule for ${args.dateIso} ${timeStr} (${args.timezone}) — that slot has already passed.` +
+        hint,
+    };
   }
 
   const variants = await db
