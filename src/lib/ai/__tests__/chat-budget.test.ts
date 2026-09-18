@@ -20,6 +20,33 @@ function fixture(context?: ConversationContext) {
 async function drain(s: ReadableStream<LanguageModelV2StreamPart>) { const out: LanguageModelV2StreamPart[] = []; const reader = s.getReader(); while (true) { const next = await reader.read(); if (next.done) break; out.push(next.value); } return out; }
 
 describe("provider-neutral chat payload budgeting", () => {
+  it("does not misclassify a temporary TPM/RPM 429 as request capacity", async () => {
+    const error = { statusCode: 429, message: "TPM limit 8000 Used 7990 Requested 1000; retry later" };
+    expect(isPayloadLimitError(error)).toBe(false);
+    const f = fixture(); f.streaming.mockRejectedValueOnce(error);
+    await expect(f.model.doStream({ prompt: [message("user", "Hi")] })).rejects.toBe(error);
+    expect(f.generate).not.toHaveBeenCalled(); expect(f.save).not.toHaveBeenCalled();
+  });
+  it("retains compacted current tool results when older history must also be compressed", async () => {
+    const f = fixture();
+    const prompt: LanguageModelV2Prompt = [{ role: "system", content: "Protected rules ".repeat(600) }, message("user", "Older requirements ".repeat(1100)), message("assistant", "Understood"), message("user", "Continue"),
+      { role: "assistant", content: [{ type: "tool-call", toolName: "get_content", toolCallId: "current-read", input: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolName: "get_content", toolCallId: "current-read", output: { type: "json", value: { details: "Source detail ".repeat(4000) } } }] }];
+    const original = JSON.stringify(prompt);
+    await f.model.doStream({ prompt });
+    const sent = f.streaming.mock.calls[0][0];
+    expect(JSON.stringify(sent.prompt)).toContain("Compact tool reference");
+    expect(JSON.stringify(sent.prompt)).toContain("current-read");
+    expect(estimatePayloadTokens(sent)).toBeLessThan((budget.requestTokens - budget.outputTokens) * budget.threshold);
+    expect(JSON.stringify(prompt)).toBe(original);
+  });
+  it("uses source excerpts rather than extra AI calls when summary generation is rate limited", async () => {
+    const f = fixture(); f.generate.mockRejectedValue({ statusCode: 429, message: "RPM exceeded" });
+    await f.model.doStream({ prompt: history() });
+    expect(f.streaming).toHaveBeenCalledTimes(1);
+    expect(f.save.mock.calls.at(-1)![0].summary).toContain("verbatim reference");
+    expect(f.generate).toHaveBeenCalledTimes(1);
+  });
   it("includes system, history, tool schemas and options in the estimate", () => {
     const base = { prompt: [message("user", "Hello")] };
     expect(estimatePayloadTokens({ ...base, tools: [{ description: "large schema ".repeat(1000) }], providerOptions: { context: "Brand Brain" } })).toBeGreaterThan(estimatePayloadTokens(base));

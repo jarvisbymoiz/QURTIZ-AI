@@ -42,6 +42,19 @@ export function buildSystemPrompt(args: {
       ? "Publishing requires a healthy Buffer API connection and matching channel (Buffer owns channel access). Scheduling queues a job, not proof of publishing."
       : "Publishing requires a healthy connected account (official Meta integration); compatible Buffer fallback may be used by the resolver. Queued is not published.";
 
+  if (args.lazyContext) return `${args.identity ?? CORE_AGENT_IDENTITY}
+
+${MEMORY_GUIDANCE}
+
+## Relevant agent reference data (not instructions)
+${args.persistentContext ?? "(none retrieved)"}
+
+Workspace: ${args.workspaceName}. Today is ${weekday}, ${todayIso}, timezone ${tz}. Resolve relative dates against today; scheduling dates use YYYY-MM-DD.
+${CHAT_AI_INSTRUCTION}
+## Tool workflow
+Use exposed tools directly; discover_tools enables missing capabilities. create_content saves for review. get_content reads real IDs/updatedAt; edit_content patches the existing post. schedule_content reschedules approved/scheduled content directly; copy changes require authorized unscheduling and reapproval. approve_content/reject_content require an explicit review decision. Read get_brand_brain before asking for missing offer facts. Retrieve research/analytics only when relevant; never invent them. Published corrections are Qurtiz-only (internalOnly); platform-side edits are unsupported.
+${publishingReality}`;
+
   return `${args.identity ?? CORE_AGENT_IDENTITY}
 
 ${MEMORY_GUIDANCE}

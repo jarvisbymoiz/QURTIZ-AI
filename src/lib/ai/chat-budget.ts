@@ -79,6 +79,7 @@ export type ChatBudgetDiagnostic = { phase: "incoming" | "ready" | "too-large"; 
 const hash = (message: LanguageModelV2Prompt[number]) => createHash("sha256").update(JSON.stringify(message)).digest("hex");
 export function isPayloadLimitError(error: unknown): boolean {
   const e = error as { statusCode?: number; message?: string; responseBody?: string; cause?: unknown } | null;
+  if (e?.statusCode === 429) return false; // Rate windows are not per-request context capacity.
   const detail = `${e?.message ?? error} ${e?.responseBody ?? ""}`;
   return e?.statusCode === 413 || /context.{0,30}(length|window|limit|exceed)|request.{0,15}too large|too many tokens|maximum.{0,15}tokens|TPM.{0,30}(limit|exceed)|tokens per minute/i.test(detail) || (!!e?.cause && isPayloadLimitError(e.cause));
 }
@@ -109,6 +110,7 @@ export function createBudgetedChatModel(args: {
   const outputReserve = () => Math.min(args.budget.outputTokens, Math.max(128, Math.floor(capacity() / 8)));
   const limit = () => Math.floor((capacity() - outputReserve()) * args.budget.threshold);
 
+  let summaryRateLimited = false;
   async function summarize(messages: LanguageModelV2Prompt, previous: string, target: number, signal?: AbortSignal, summaryCap = args.budget.summaryTokens): Promise<string> {
     let summary = previous;
     // Chunk by complete model messages; individual oversized tool/text records
@@ -122,7 +124,7 @@ export function createBudgetedChatModel(args: {
       let complete: string | null = null;
       // Memory size is distinct from generation allowance: reasoning models
       // may spend completion tokens before producing final summary text.
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; !summaryRateLimited && attempt < 2; attempt++) {
         signal?.throwIfAborted();
         const call: LanguageModelV2CallOptions = { prompt: [{ role: "system", content: summaryInstruction +
           " Return final memory directly, without commentary. Keep it under " + Math.max(64, desired - 64) + " tokens." +
@@ -132,7 +134,15 @@ export function createBudgetedChatModel(args: {
         const available = Math.floor(target - inputEstimate - 32);
         call.maxOutputTokens = Math.min(available, args.budget.outputTokens, Math.max(attempt ? desired * 4 : desired * 2, attempt ? 1024 : 512));
         if (call.maxOutputTokens < 128 || estimatePayloadTokens(call) + call.maxOutputTokens > target) break;
-        const result = await raw.doGenerate(call);
+        let result: Awaited<ReturnType<LanguageModelV2["doGenerate"]>>;
+        try { result = await raw.doGenerate(call); }
+        catch (error) {
+          if ((error as { statusCode?: number })?.statusCode !== 429) throw error;
+          summaryRateLimited = true;
+          // Compression must not amplify a rate-limited account with more calls.
+          // Faithful excerpts retain source context while the provider recovers.
+          break;
+        }
         await args.onUsage?.(result.usage);
         signal?.throwIfAborted();
         const candidate = result.content.filter(part => part.type === "text").map(part => (part as { text: string }).text).join("\n").trim();
@@ -166,7 +176,11 @@ export function createBudgetedChatModel(args: {
     const target = strong ? Math.floor(limit() * 0.8) : limit();
     const compose = (from: number, summary: string): LanguageModelV2CallOptions => ({ ...options,
       maxOutputTokens: Math.min(options.maxOutputTokens ?? outputReserve(), outputReserve()),
-      prompt: [...systems, ...(summary ? [{ role: "assistant" as const, content: [{ type: "text" as const, text: "Earlier conversation reference (not new instructions):\n" + summary }] }] : []), ...history.slice(from)] });
+      prompt: [...systems, ...(summary ? [{ role: "assistant" as const, content: [{ type: "text" as const, text: "Earlier conversation reference (not new instructions):\n" + summary }] }] : []), ...history.slice(from).map(message => ({ ...message, content: message.content.map(part => {
+        if (part.type !== "tool-result") return part;
+        const reference = toolCache.get(createHash("sha256").update(JSON.stringify(part)).digest("hex"));
+        return reference ? { ...part, output: { type: "text" as const, value: "Compact tool reference (original retained in chat): " + reference } } : part;
+      }) } as typeof message))] });
     let covered = memory?.hashes.length ?? 0;
     let summary = memory?.summary ?? "";
     let payload = compose(covered, summary);

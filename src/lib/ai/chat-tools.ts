@@ -21,7 +21,7 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
   }) };
   // Editing has its own read/patch workflow. Brand and memory writes remain
   // discoverable, avoiding unrelated schema overhead on small-model edits.
-  const core = (direct === "edit_content" ? ["discover_tools", "get_content"] : ["discover_tools", "get_brand_brain", "get_content", "list_workspace_facts", "update_brand_memory"]).filter(name => name in tools);
+  const core = (direct ? ["discover_tools", "get_content", ...(direct === "create_content" ? ["get_brand_brain"] : [])] : ["discover_tools", "get_brand_brain", "get_content", "list_workspace_facts", "update_brand_memory"]).filter(name => name in tools);
   const prepareStep: PrepareStepFunction<ToolSet> = ({ steps }) => {
     // Only the latest discovery in THIS run controls availability. Old
     // conversations/tool results never reactivate schemas on a new turn.
@@ -29,7 +29,7 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
       const discovery = [...step.toolResults].reverse().find(result => result.toolName === "discover_tools");
       if (discovery) {
         const output = discovery.output as { enabledTools?: string[] };
-        return { activeTools: [...new Set([...core, ...(output.enabledTools ?? []).filter(name => name in existing)])] };
+        return { activeTools: [...new Set(["discover_tools", ...("get_content" in tools ? ["get_content"] : []), ...(output.enabledTools ?? []).filter(name => name in existing)])] };
       }
     }
     return { activeTools: [...core, ...initial] };

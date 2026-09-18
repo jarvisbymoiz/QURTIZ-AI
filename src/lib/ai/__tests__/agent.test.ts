@@ -200,7 +200,7 @@ describe("short chat with real agent instructions and schemas", () => {
       } }) };
     } };
     const model = createBudgetedChatModel({ model: raw, budget: resolveChatBudget("custom", "fixture", { QURTIZ_CHAT_LIMITS_JSON: JSON.stringify({ default: { requestTokens: 8000, outputTokens: 1024 } }) }), save: async () => { throw Error("Small edits must not need compression"); } });
-    expect(await streamText({ model, system: buildSystemPrompt({ workspaceName: "Fixture", brandSummary: "", memories: [], lazyContext: true, currentTask: request }), messages: [{ role: "user", content: "Create a Facebook post for the synthetic offer" }, { role: "assistant", content: "Saved post with real IDs. " + "Synthetic recent post context ".repeat(25) }, { role: "user", content: request }], tools: lazy.tools, prepareStep: lazy.prepareStep }).text).toBe("Ready");
+    expect(await streamText({ model, system: buildSystemPrompt({ workspaceName: "Fixture", brandSummary: "", memories: [], persistentContext: "Relevant saved style preferences. ".repeat(60), lazyContext: true, currentTask: request }), messages: [{ role: "user", content: "Create a Facebook post for the synthetic offer" }, { role: "assistant", content: "Saved post with real IDs. " + "Synthetic recent post context ".repeat(25) }, { role: "user", content: request }], tools: lazy.tools, prepareStep: lazy.prepareStep }).text).toBe("Ready");
     expect(calls).toHaveLength(1); expect(calls[0].tools?.map(t => t.name)).toContain("edit_content"); expect(calls[0].tools?.map(t => t.name)).not.toContain("create_content");
   });
   it("keeps five small turns under the unchanged learned request limit without compression", async () => {
