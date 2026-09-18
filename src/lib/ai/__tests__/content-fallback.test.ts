@@ -55,10 +55,7 @@ describe("generateContentObjectWithFallbacks: TPD short-circuit", () => {
     });
 
     // Import after the mock is installed.
-    const [{ RateLimitExceededError }, { generateAndPersistContent }] = await Promise.all([
-      import("@/lib/ai/provider"),
-      import("@/lib/ai/content"),
-    ]);
+    const { RateLimitExceededError } = await import("@/lib/ai/provider");
 
     // generateAndPersistContent reaches generateContentObjectWithFallbacks
     // through several DB and config calls we don't want to set up here, so
