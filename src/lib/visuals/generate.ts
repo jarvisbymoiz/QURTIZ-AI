@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 
 import { and, desc, eq } from "drizzle-orm";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -7,6 +7,7 @@ import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAs
 import { generateImage } from "@/lib/ai/image";
 import { getWorkspaceImageTarget } from "@/lib/ai/config";
 import { renderTemplateVisual } from "@/lib/visuals/template";
+import { formatSpecFor } from "@/lib/ai/master-prompt";
 import { createClient } from "@/lib/supabase/server";
 
 export type VisualMode = "template" | "ai";
@@ -128,8 +129,9 @@ export async function generateVisual(args: {
         .filter(Boolean)
         .join(" ");
 
+      const spec = formatSpecFor(variant?.platform ?? "instagram", variant?.format ?? item.format ?? "single_image");
       const result = await generateImage({
-        prompt: `Create a scroll-stopping social media visual for this post.\nTopic: ${item.topic}\nVisual concept: ${slide?.visualPrompt ?? item.visualConcept ?? item.hook ?? item.topic}\n${styleNote}\nPortrait composition, photorealistic where appropriate.`,
+        prompt: `Create a premium, scroll-stopping social media visual for this post — creative-director quality, not a stock template.\nTopic: ${item.topic}\nCreative direction: ${slide?.visualPrompt ?? item.visualConcept ?? item.hook ?? item.topic}\nPlatform format: ${spec.ratio} (${spec.dims}) — ${spec.note} Safe areas: ${spec.safe}\n${styleNote}\nPhotorealistic where appropriate to the stated concept.`,
         references: refs,
         provider: target.provider,
         apiKey: target.apiKey,

@@ -202,7 +202,7 @@ export async function reorderVisualUploadsAction(itemId: string, orderedIds: str
 }
 
 export async function buildMasterPromptAction(itemId: string, variantId?: string): Promise<
-  { ok: true; prompt: string } | { ok: false; error: string }
+  { ok: true; prompt: string; source: "ai" | "template"; model?: string } | { ok: false; error: string }
 > {
   const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false, error: ctx.error };
@@ -240,23 +240,45 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
     ...postUploads.map(() => ({ kind: "post" as const, label: null })),
   ];
 
-  const { buildMasterPrompt } = await import("@/lib/ai/master-prompt");
-  const prompt = buildMasterPrompt({
-    brand: brand ?? null,
-    platform: variant.platform,
-    contentType: variant.format,
-    title: item.topic,
-    objective: item.objective,
-    hook: item.hook,
-    caption: variant.caption || item.caption,
-    cta: variant.cta ?? item.cta,
-    firstComment: variant.firstComment ?? item.firstComment,
-    hashtags: variant.hashtags ?? item.hashtags,
-    visualConcept: item.visualConcept,
-    slides: (variant.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
-    script: variant.format === "reel" ? (variant.script as Record<string, unknown> as never) : null,
-    referenceImages,
+  // Workspace/user memory preferences shape the AI-written prompt
+  // (best-effort — memory must never break the button).
+  let memoryLines: string | null = null;
+  try {
+    const { retrieveAgentMemory } = await import("@/lib/ai/persistent-memory");
+    const { boundedAgentReference } = await import("@/lib/ai/memory-policy");
+    const learned = await retrieveAgentMemory(
+      { workspaceId: ctx.workspaceId, userId: ctx.userId },
+      "master visual prompt for post: " + item.topic,
+    );
+    memoryLines = boundedAgentReference(learned);
+  } catch {
+    memoryLines = null;
+  }
+
+  // Dynamic AI generation first (this post's real data → premium bespoke
+  // master prompt); the deterministic premium template is the honest
+  // fallback only when the AI path is unavailable.
+  const { generateMasterPrompt } = await import("@/lib/ai/master-prompt-ai");
+  const result = await generateMasterPrompt({
+    workspaceId: ctx.workspaceId,
+    input: {
+      brand: brand ?? null,
+      platform: variant.platform,
+      contentType: variant.format,
+      title: item.topic,
+      objective: item.objective,
+      hook: item.hook,
+      caption: variant.caption || item.caption,
+      cta: variant.cta ?? item.cta,
+      firstComment: variant.firstComment ?? item.firstComment,
+      hashtags: variant.hashtags ?? item.hashtags,
+      visualConcept: item.visualConcept,
+      slides: (variant.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
+      script: variant.format === "reel" ? (variant.script as Record<string, unknown> as never) : null,
+      referenceImages,
+    },
+    memoryLines,
   });
 
-  return { ok: true, prompt };
+  return { ok: true, prompt: result.prompt, source: result.source, model: result.model };
 }
