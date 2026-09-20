@@ -11,7 +11,7 @@ import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
 import { overallOpportunity } from "@/lib/ai/scores";
 import { topicScoresSchema } from "@/lib/ai/research-types";
-import { searchResearch } from "@/lib/research/service";
+import { trendSourceBundle } from "@/lib/research/bundle";
 
 const researchedTopicSchema = z.object({
   topic: z.string().min(4).max(200),
@@ -34,13 +34,14 @@ function extractJson(text: string): unknown {
 
 /**
  * Live-web sources for grounding, resolved in priority order:
- * 1. The shared Qurtiz ResearchService (Brave Search, project-level key) —
- *    works for EVERY workspace regardless of its AI provider, with no
- *    per-workspace Brave credential anywhere.
+ * 1. The shared Qurtiz ResearchService (Brave Search, project-level key)
+ *    via a focused multi-source bundle (trends signals + current news +
+ *    Reddit/community) — works for EVERY workspace regardless of its AI
+ *    provider, with no per-workspace Brave credential anywhere.
  * 2. Gemini-only grounding (google_search tool) using the WORKSPACE's own
  *    key + model, as the legacy secondary path.
  * Returns [] when neither is available — callers fall back honestly to
- * AI-knowledge topics and say so.
+ * AI-knowledge topics and say so (never presenting them as live results).
  */
 async function groundedSources(
   ctx: { workspaceId: string; userId: string },
@@ -48,14 +49,21 @@ async function groundedSources(
   resolved: ResolvedTextModel,
 ): Promise<{ url: string; title: string }[]> {
   try {
-    const result = await searchResearch({ workspaceId: ctx.workspaceId, userId: ctx.userId, query, strategy: "web" });
-    if (result.ok && result.results.length > 0) {
-      return result.results.slice(0, 10).map((r) => ({ url: r.url, title: r.title || r.url }));
+    const bundle = await trendSourceBundle(ctx, query, { strategies: ["trends", "news", "community"] });
+    if (bundle.ok) {
+      return bundle.sources.slice(0, 10).map((s) => ({ url: s.url, title: s.title }));
     }
-  } catch {
-    // fall through to the Gemini path — never fail research over grounding
+    console.info(
+      `[research] brave trend bundle produced no sources (failures: ${bundle.failures.map((f) => `${f.strategy}:${f.reason}`).join(", ") || "none"}) — evaluating fallback`,
+    );
+  } catch (error) {
+    console.warn("[research] brave trend bundle errored:", error instanceof Error ? error.message : error);
   }
-  if (resolved.provider !== "gemini") return [];
+  if (resolved.provider !== "gemini") {
+    console.info("[research] no Gemini grounding fallback available on this provider — research proceeds unsourced (honest, no invented sources)");
+    return [];
+  }
+  console.info("[research] fallback attempted: workspace Gemini google_search grounding");
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${resolved.modelId}:generateContent`,

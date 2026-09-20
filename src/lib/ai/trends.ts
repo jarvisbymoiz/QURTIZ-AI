@@ -10,7 +10,7 @@ import { brands } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
-import { searchResearch } from "@/lib/research/service";
+import { trendSourceBundle } from "@/lib/research/bundle";
 
 export const trendsSchema = z.object({
   trendingTopics: z.array(z.object({
@@ -69,17 +69,15 @@ Reply ONLY with JSON: {"trendingTopics":[{"topic","why"}],"visualDirections":[{"
   if (ctx.userId) {
     try {
       const nicheQuery = ctx.niche || `${brand?.businessName ?? ""} ${brand?.industry ?? ""}`.trim() || "social media marketing";
-      const brave = await searchResearch({
-        workspaceId: ctx.workspaceId,
-        userId: ctx.userId,
-        query: `${nicheQuery} trends`.slice(0, 300),
-        strategy: "trends",
-        freshness: "pm",
-      });
-      if (brave.ok && brave.results.length > 0) {
-        pre = brave.results
+      const bundle = await trendSourceBundle(
+        { workspaceId: ctx.workspaceId, userId: ctx.userId },
+        `${nicheQuery} trends`.slice(0, 300),
+        { strategies: ["trends", "news"], countPerStrategy: 5 },
+      );
+      if (bundle.ok) {
+        pre = bundle.sources
           .slice(0, 8)
-          .map((r) => `- ${r.title || r.url}: ${r.url}${r.description ? ` — ${r.description}` : ""}`)
+          .map((s) => `- ${s.title}: ${s.url}`)
           .join("\n")
           .slice(0, 4000);
         sourced = true;

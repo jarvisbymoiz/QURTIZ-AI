@@ -16,7 +16,8 @@ User/Workspace → Qurtiz AI Agent → ResearchService → BraveSearchProvider �
 | `src/lib/research/brave.ts` | **The only file that reads `BRAVE_SEARCH_API_KEY`.** Sends it to Brave in the `X-Subscription-Token` header (never the URL). Typed errors: `disabled` / `unauthorized` / `quota` / `http` / `network` / `timeout`. Bounded timeout (10s) + one small retry for transient 5xx/transport failures; no retry burn on 429 — the `Retry-After` hint is surfaced instead. |
 | `src/lib/research/strategies.ts` | Source-aware query shaping: `trends` (Google Trends/search-interest signals), `official`, `news`, `announcements`, `community` (Reddit), `creators` (YouTube), `web` (broad fallback). All share the same endpoint + key. |
 | `src/lib/research/limits.ts` | Plan defaults (free/pro/business/enterprise: per-minute + monthly **live** allowance), global shared-key QPS guard, cache TTL, env overrides. |
-| `src/lib/research/service.ts` | The internal ResearchService. Validation → anonymous public-result cache → graceful config failure → per-workspace rate limit → request dedup → global QPS → monthly plan cap → Brave. Records usage per workspace/user. Never throws. |
+| `src/lib/research/service.ts` | The internal ResearchService. Validation → anonymous public-result cache → graceful config failure → per-workspace rate limit → request dedup → global QPS → monthly plan cap → Brave. Records usage per workspace/user. Never throws. Emits structured `[research]` diagnostics. |
+| `src/lib/research/bundle.ts` | Multi-source trend research: parallel focused searches across `trends` + `news` + `community` (creators optional), URL-deduplicated, partial-success tolerant. Used by Research Lab grounding + trend suggestions. |
 | `src/lib/research/usage.ts` | `research_usage_events` persistence + per-workspace summary for reporting. Telemetry failures are logged and swallowed — research availability never depends on analytics writes. |
 | `src/app/api/research/usage/route.ts` | `GET /api/research/usage?days=30` — workspace-scoped usage rollup (`brand:read`). Returns booleans/counts only, never secrets. |
 
@@ -25,6 +26,40 @@ Research Lab topic grounding (`src/lib/ai/research.ts`), and trend
 suggestions (`src/lib/ai/trends.ts`). The AI agent does not know or care
 which API key is used — it calls the Research tool and gets either
 results or an honest, typed failure it can explain.
+
+**Provider independence is the whole point.** The ResearchService runs in
+the Qurtiz backend with the shared key; the selected AI model (Gemini,
+OpenAI, Claude, OpenRouter, MiniMax, GLM, NVIDIA, custom
+OpenAI-compatible, …) only calls the `web_search` tool and analyzes the
+results. No provider-native search capability is ever required, and the
+tool implementation never consults workspace AI config
+(`getWorkspaceTextModel`). The agent system prompt explicitly forbids
+attributing research failures to the selected AI provider.
+
+**No silent model-knowledge fallback.** When the user asked for current
+data ("right now" / "latest" / "trending") and live research fails, the
+tool returns the real reason (missing key / invalid key / quota with
+retry window / timeout / zero results) plus anti-hallucination framing;
+the agent relays it instead of producing a stale 2024-style trend list
+presented as live. Research Lab topics without live sources stay labeled
+"AI-knowledge estimates" — never presented as sourced.
+
+**Multi-source trend research.** "What is trending in my niche" requests
+first resolve the niche from Brand Brain / workspace context, then run a
+focused `trendSourceBundle` (`src/lib/research/bundle.ts`): parallel
+Brave searches across `trends` (Google Trends / search-interest
+signals), `news` (past week), and `community` (Reddit) — URL-deduplicated,
+partial-success tolerant, and failures are named per source class.
+
+**Diagnostics.** Development logs emit one structured `[research]` line
+per event: tool selected, public query (truncated), strategy, region,
+freshness, HTTP status, result count, `cache hit` / `dedupe join`,
+blocked reasons (workspace rate limit, global QPS, monthly plan cap),
+provider error message, and fallback attempts (including the Gemini
+grounding fallback in the Research Lab path). No API key, headers, or
+tenant-private context are ever logged. `/api/health` additionally
+reports `BRAVE_SEARCH_API_KEY` as a presence boolean (value never
+returned), so env loading is verifiable at runtime.
 
 ## Security rules (enforced + tested)
 

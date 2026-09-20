@@ -160,6 +160,20 @@ function defaultLanguage(): string {
   return process.env.BRAVE_SEARCH_DEFAULT_LANGUAGE?.trim() || "en";
 }
 
+/**
+ * Development diagnostics: one structured line per research event. Fields
+ * never include the API key, request headers, or tenant-private context —
+ * only the public query (truncated), strategy, transport status, result
+ * counts, and cache/dedupe/fallback markers required to debug the flow.
+ */
+function diag(event: string, fields: Record<string, string | number | boolean | null | undefined>): void {
+  const details = Object.entries(fields)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => `${k}=${v}`)
+    .join(" ");
+  console.info(`[research] ${event}${details ? " " + details : ""}`);
+}
+
 type TrackedFailure = {
   status: ResearchUsageStatus;
   reason: ResearchFailureReason;
@@ -269,9 +283,19 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
       };
     };
 
+    diag("selected", {
+      strategy,
+      query: query.slice(0, 120),
+      region,
+      language,
+      freshness: freshness ?? "-",
+      workspace: request.workspaceId.slice(0, 8),
+    });
+
     // 1. Short-term anonymous cache of normalized PUBLIC results.
     const cached = cacheGet(cacheKey);
     if (cached) {
+      diag("cache hit", { strategy, query: query.slice(0, 120), results: cached.results.length });
       void track("ok", { cacheHit: true });
       return {
         ok: true,
@@ -288,6 +312,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
 
     // 2. Missing key fails gracefully — never a crash, never a fake answer.
     if (!isBraveConfigured()) {
+      diag("unavailable", { reason: "missing BRAVE_SEARCH_API_KEY", strategy });
       return fail({
         status: "provider_unavailable",
         reason: "provider_unavailable",
@@ -302,6 +327,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
     const limits = researchPlanLimits(plan);
     const perMinute = rateLimit(`research:ws:${request.workspaceId}`, limits.perMinute, 60_000);
     if (!perMinute.allowed) {
+      diag("blocked", { reason: "ws_rate_limit", plan, retryAfterSeconds: perMinute.retryAfterSeconds, strategy });
       return fail({
         status: "rate_limited",
         reason: "rate_limited",
@@ -324,6 +350,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
         // consumed only on the initiator's behalf.
         const globalQps = rateLimit("research:brave:global", braveGlobalMaxQps(), 1_000);
         if (!globalQps.allowed) {
+          diag("blocked", { reason: "global_qps", retryAfterSeconds: globalQps.retryAfterSeconds, strategy });
           throw new ResearchSharedError({
             status: "rate_limited",
             reason: "rate_limited",
@@ -335,6 +362,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
         // the shared key nothing extra).
         const monthlyLive = await monthlyLiveSearchCount(request.workspaceId);
         if (monthlyLive >= limits.perMonthLive) {
+          diag("blocked", { reason: "plan_monthly_cap", plan, monthlyLive, cap: limits.perMonthLive, strategy });
           throw new ResearchSharedError({
             status: "plan_limit",
             reason: "plan_limit",
@@ -357,10 +385,15 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
       void job.catch(() => undefined);
     }
 
+    if (!isInitiator) {
+      diag("dedupe join", { strategy, query: query.slice(0, 120) });
+    }
+
     try {
       const results = await job;
       if (isInitiator) {
         inflight.delete(cacheKey);
+        diag("live result", { strategy, http: 200, results: results.length, ms: Date.now() - startedAt });
         const ttlSeconds = braveCacheTtlSeconds();
         if (ttlSeconds > 0 && results.length > 0) {
           cacheSet(cacheKey, { expiresAt: Date.now() + ttlSeconds * 1_000, results });
@@ -380,8 +413,20 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
       };
     } catch (error) {
       if (isInitiator) inflight.delete(cacheKey);
-      if (error instanceof ResearchSharedError) return fail(error.failure);
-      if (error instanceof BraveSearchError) return fail(failureFromBraveError(error));
+      if (error instanceof ResearchSharedError) {
+        diag("live failure", { strategy, reason: error.failure.reason, http: error.failure.httpStatus ?? "-" });
+        return fail(error.failure);
+      }
+      if (error instanceof BraveSearchError) {
+        diag("live failure", {
+          strategy,
+          reason: error.kind,
+          http: error.httpStatus ?? "-",
+          providerError: error.message.slice(0, 120),
+        });
+        return fail(failureFromBraveError(error));
+      }
+      diag("live failure", { strategy, reason: "internal", providerError: error instanceof Error ? error.message.slice(0, 120) : "?" });
       return fail({ status: "error", reason: "error", message: "Live research failed unexpectedly. Try again shortly." });
     }
   } catch (error) {
