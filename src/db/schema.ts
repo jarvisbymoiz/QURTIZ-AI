@@ -803,4 +803,39 @@ export const workspaceStorageQuotas = pgTable(
   },
 );
 
+/* ── Platform research service (0027) ────────────────────────────────
+   Per-request audit log for the SHARED project-level Brave Search
+   integration (see src/lib/research/). One Brave key lives in the server
+   environment and serves every workspace; these rows attribute request
+   volume to a workspace + user for analytics and future SaaS plan
+   limits WITHOUT storing any Brave credential anywhere near a tenant.
+   query_hash is a SHA-256 fingerprint for privacy-preserving dedup
+   analytics; the raw query text is truncated to 300 chars. Rows cascade
+   with the workspace and are server-only (RLS: no anon/authenticated
+   grants; applied by scripts/brave-research-db.mjs). */
+export const researchUsageEvents = pgTable(
+  "research_usage_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: uuid("user_id"),
+    provider: text("provider").notNull().default("brave"),
+    strategy: text("strategy").notNull().default("web"),
+    query: text("query").notNull().default(""),
+    queryHash: text("query_hash").notNull(),
+    region: text("region"),
+    language: text("language"),
+    freshness: text("freshness"),
+    cacheHit: boolean("cache_hit").notNull().default(false),
+    status: text("status").notNull().default("ok"),
+    httpStatus: integer("http_status"),
+    latencyMs: integer("latency_ms").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("research_usage_events_ws_created_idx").on(t.workspaceId, sql`${t.createdAt} DESC`),
+    index("research_usage_events_created_hash_idx").on(t.queryHash, t.createdAt),
+  ],
+);
+
 

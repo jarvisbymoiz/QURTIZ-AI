@@ -615,7 +615,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
-    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId }),
+    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId, userId: ctx.userId }),
     search_content_library: searchContentLibrary,
     get_analytics: getAnalytics,
     generate_visual: generateVisualTool,
