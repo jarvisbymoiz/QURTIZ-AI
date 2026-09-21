@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import Link from "next/link";
 import { and, desc, eq } from "drizzle-orm";
 import {
@@ -23,7 +24,7 @@ import { PageHeader } from "@/components/layout/page-header";
 
 export const metadata = { title: "Dashboard" };
 
-export default async function DashboardPage() {
+async function DashboardPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -295,3 +296,5 @@ export default async function DashboardPage() {
 
 
 
+
+export default withSchemaGuard("(app)/page.tsx", DashboardPage);

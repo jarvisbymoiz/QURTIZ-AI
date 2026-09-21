@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 import Link from "next/link";
 import { desc, eq } from "drizzle-orm";
 import {
@@ -70,7 +71,7 @@ function externalButtonLabel(platform: string): string {
   return `View on ${platform === "facebook" ? "Facebook" : platform === "instagram" ? "Instagram" : platform}`;
 }
 
-export default async function NotificationsPage() {
+async function NotificationsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -172,3 +173,5 @@ export default async function NotificationsPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/notifications/page.tsx", NotificationsPage);

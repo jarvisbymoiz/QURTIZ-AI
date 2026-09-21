@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
 import { ChatPanel } from "@/components/chat/chat-panel";
@@ -7,7 +8,7 @@ import { PageHeader } from "@/components/layout/page-header";
 
 export const metadata = { title: "AI Chat" };
 
-export default async function ChatIndexPage() {
+async function ChatIndexPage() {
   const ctx = await requireWorkspace();
 
   return (
@@ -37,3 +38,5 @@ export default async function ChatIndexPage() {
 
 
 
+
+export default withSchemaGuard("(app)/chat/page.tsx", ChatIndexPage);

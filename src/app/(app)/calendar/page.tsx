@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { and, desc, eq, gte, inArray, isNotNull, lte, or } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, publishingJobs } from "@/db/schema";
@@ -8,7 +9,7 @@ import { CalendarClient } from "@/components/calendar/calendar-client";
 
 export const metadata = { title: "Content Calendar" };
 
-export default async function CalendarPage() {
+async function CalendarPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -85,3 +86,5 @@ export default async function CalendarPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/calendar/page.tsx", CalendarPage);

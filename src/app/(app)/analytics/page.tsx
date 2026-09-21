@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiInsights, contentItems, platformConnections, postMetrics } from "@/db/schema";
@@ -9,7 +10,7 @@ import { AnalyticsClient } from "@/components/analytics/analytics-client";
 
 export const metadata = { title: "Analytics" };
 
-export default async function AnalyticsPage() {
+async function AnalyticsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -91,3 +92,5 @@ export default async function AnalyticsPage() {
   );
 }
 
+
+export default withSchemaGuard("(app)/analytics/page.tsx", AnalyticsPage);

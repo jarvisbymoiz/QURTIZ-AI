@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
 import { campaignItems, campaigns, contentItems, jobs } from "@/db/schema";
@@ -9,7 +10,7 @@ import { CampaignsClient } from "@/components/campaigns/campaigns-client";
 
 export const metadata = { title: "Campaigns" };
 
-export default async function CampaignsPage() {
+async function CampaignsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -48,3 +49,5 @@ export default async function CampaignsPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/campaigns/page.tsx", CampaignsPage);
