@@ -354,6 +354,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         title: "Bulk content plan failed",
         body: failedItems.slice(0, 2).join("; ") || "No posts were generated.",
         link: "/content-studio",
+        meta: { type: "bulk_plan", runId: run.id, createdCount: 0, failedCount: plan.length, publishStatus: "failed" },
       });
       return;
     }
@@ -382,6 +383,14 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       title: "Bulk content plan ready",
       body: `${created.length - qaFailedCount} of ${plan.length} posts generated and waiting for your approval${qaFailedCount ? `; ${qaFailedCount} failed QA and need regeneration` : ""}${failedItems.length ? ` (${failedItems.length} failed)` : ""}${visualWarnings.length ? ` — ${visualWarnings.length} post${visualWarnings.length === 1 ? "" : "s"} saved without a visual` : ""}.`,
       link: "/content-studio",
+      meta: {
+        type: "bulk_plan",
+        runId: run.id,
+        createdCount: created.length,
+        failedCount: failedItems.length,
+        qaFailedCount,
+        publishStatus: qaFailedCount > 0 ? "qa_failed" : "pending_approval",
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Bulk plan failed";
@@ -400,6 +409,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       title: "Bulk content plan failed",
       body: message,
       link: "/content-studio",
+      meta: { type: "bulk_plan", runId: run.id, publishStatus: "failed" },
     });
   }
 }

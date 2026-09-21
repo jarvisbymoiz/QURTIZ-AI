@@ -16,7 +16,7 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 export { summarizeBrandBrain };
 import { appendRateLimitHint, capMessage, normalizeToolOutput, scrubCredentials } from "@/lib/ai/stream-errors";
 import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
-import { AIConfigError } from "@/lib/ai/provider";
+import { AIConfigError, RateLimitExceededError, rateLimitHint } from "@/lib/ai/provider";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
@@ -47,14 +47,23 @@ export type AgentToolContext = {
  * detail; anything else is the error message, defensively scrubbed of
  * key-like strings and capped at 300 chars. Rate-limit/timeout failures get
  * an actionable hint instead of a dead end.
+ *
+ * Special case: RateLimitExceededError (TPD/RPD/quota) carries an
+ * actionable hint with the exact retry-after time. We surface THAT hint
+ * directly so the agent tells the user "switch to a different model" or
+ * "wait N minutes" instead of a generic "rate limited".
  */
 function formatAgentToolError(error: unknown): string {
+  if (error instanceof AIConfigError) return error.detail;
+  if (error instanceof RateLimitExceededError) {
+    // Pre-built hint already encodes kind + retry-after. Trim credentials
+    // (the cause may include them) and cap to 300 chars to stay tool-safe.
+    return capMessage(scrubCredentials(rateLimitHint(error.info)), 300);
+  }
   const message =
-    error instanceof AIConfigError
-      ? error.detail
-      : error instanceof Error
-        ? error.message
-        : "The operation failed.";
+    error instanceof Error
+      ? error.message
+      : "The operation failed.";
   // Defensive scrub + cap + hint come from the shared stream-error helpers
   // (same sanitization the chat route applies to provider errors).
   return appendRateLimitHint(capMessage(scrubCredentials(message)));
@@ -606,7 +615,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
-    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId }),
+    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId, userId: ctx.userId }),
     search_content_library: searchContentLibrary,
     get_analytics: getAnalytics,
     generate_visual: generateVisualTool,

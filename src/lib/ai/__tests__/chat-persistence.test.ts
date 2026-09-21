@@ -203,13 +203,35 @@ describe("persistAssistantMessage", () => {
     expect(fake.rows[0].row.message).toEqual(newer);
   });
 
-  it("does not resurrect a response removed by an edit or thread deletion", async () => {
+  it("still refuses to clobber when a newer run owns the same (thread, message id) key", async () => {
+    // Placeholder exists but was taken over by a NEWER retry (different runId).
+    // The late flush from the older run must NOT resurrect the response — the
+    // race-safety guard is the existingRunId mismatch, not "row missing".
+    const ownedByNewer = uidMessage({ id: "u1:a", metadata: { runId: "newer", runStatus: "running" } });
+    const fake = makeFakeDb({ chatMessageRows: [{ threadId: THREAD, uiId: "u1:a", row: { message: ownedByNewer, createdAt: new Date() } }] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    await persistAssistantMessage({ threadId: THREAD, workspaceId: WORKSPACE, userId: USER,
+      message: uidMessage({ id: "u1:a" }), runStatus: "completed" });
+    // The newer run's placeholder is untouched.
+    expect(fake.rows).toHaveLength(1);
+    expect(fake.writes.filter(write => write.kind === "insert" || write.kind === "delete")).toHaveLength(0);
+  });
+
+  it("writes a late stream response even when the placeholder was already removed (regression: was silent-drop)", async () => {
+    // No placeholder row at all. The old code silently returned, dropping the
+    // user's response on the floor whenever a late SSE finally reconnected or
+    // a retry raced past the original. Now: insert the late response so the
+    // user sees their assistant message.
     const fake = makeFakeDb();
     mockedGetDb.mockReturnValue(fake.db as never);
     await persistAssistantMessage({ threadId: THREAD, workspaceId: WORKSPACE, userId: USER,
       message: uidMessage({ id: "u1:a" }), runStatus: "completed" });
-    expect(fake.rows).toHaveLength(0);
-    expect(fake.writes.filter(write => write.kind !== "select")).toHaveLength(0);
+    expect(fake.rows).toHaveLength(1);
+    const inserts = fake.writes.filter(write => write.kind === "insert" && write.table === chatMessages);
+    expect(inserts).toHaveLength(1);
+    const meta = (inserts[0].values as { message: { metadata: Record<string, unknown> } }).message.metadata;
+    expect(meta.runStatus).toBe("completed");
+    expect(meta.runId).toBe("r1");
   });
   it("upserts the assistant row with parts verbatim and runStatus completed", async () => {
     const parts = [
@@ -498,11 +520,22 @@ describe("resolveStaleAssistantMetadata (loader)", () => {
 });
 
 describe("filterEmptyAssistantPlaceholders", () => {
-  it("keeps user rows and drops empty assistant placeholders", () => {
+  it("keeps user rows and drops empty assistant placeholders (no parts)", () => {
     const user = { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] } as unknown as UIMessage;
     const good = uidMessage({ id: "u1:a" });
     const empty = uidMessage({ id: "u2:a", parts: [] as never });
     const out = filterEmptyAssistantPlaceholders([user, empty, good]);
+    expect(out).toEqual([user, good]);
+  });
+
+  it("also drops assistant placeholders with a single empty-text part (no phantom bubble)", () => {
+    // prepareChatTurn inserts exactly this shape until the stream finishes;
+    // a reload before that point must NOT render an empty assistant bubble.
+    const user = { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] } as unknown as UIMessage;
+    const emptyText = uidMessage({ id: "u2:a", parts: [{ type: "text", text: "" } as never] });
+    const whitespace = uidMessage({ id: "u3:a", parts: [{ type: "text", text: "   \n\t  " } as never] });
+    const good = uidMessage({ id: "u1:a" });
+    const out = filterEmptyAssistantPlaceholders([user, emptyText, whitespace, good]);
     expect(out).toEqual([user, good]);
   });
 });

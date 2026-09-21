@@ -6,6 +6,7 @@ vi.mock("@/lib/workspace",()=>({getActiveContext:async()=>({workspaceId:"1111111
 vi.mock("@/lib/supabase/server",()=>({createClient:async()=>({storage:{from:()=>({createSignedUploadUrl:mocks.sign})}})}));
 vi.mock("@/lib/crypto/tokens",()=>({encryptToken:(value:string)=>value,decryptToken:(value:string)=>value}));
 vi.mock("@/lib/security/rate-limit",()=>({rateLimit:()=>({allowed:true})}));
+vi.mock("@/lib/media/lifecycle",()=>({checkUploadQuota:async()=>null}));
 vi.mock("next/cache",()=>({revalidatePath:vi.fn()}));
 import { beginMediaUploadAction } from "@/server/actions/media-upload";
 const itemId="33333333-3333-4333-a333-333333333333";

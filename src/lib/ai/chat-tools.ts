@@ -7,7 +7,38 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
   // Expose one obvious requested action immediately, avoiding a discovery-only
   // step. This changes schemas, never permissions or automatic execution.
   // Unrecognized/ambiguous requests still use model-directed discovery.
-  const editing = /\b(edit|update|change|remove|replace|improve|rewrite|revise|shorten)\b/i.test(currentRequest) || /\bmake (it|this) (more|less)|\buse my usual style/i.test(currentRequest);
+  //
+  // The editing-detection regex is intentionally permissive: any natural
+  // cue that the user is modifying an existing post (rather than creating
+  // a new one) must pre-load `edit_content` + `find_posts`. The previous
+  // narrow list missed common phrasings like "make this post better",
+  // "add a CTA", "fix the typo", "the last post needs a caption",
+  // "use my usual style" — and on those turns the model would emit an
+  // `edit_content` tool-call that the SDK then rejected with
+  // "attempted to call tool 'edit_content' which was not in request.tools"
+  // (code: tool_use_failed). The system prompt explicitly tells the model
+  // to use `edit_content` for modifications; the schema list has to agree
+  // with that guidance or the very first step is a hard validation failure.
+  // Editing verbs (broadly inclusive so natural phrasings like
+  // "make the caption friendlier" or "replace the headline" still pre-load
+  // the edit_content schema rather than triggering a tool-call validation
+  // failure when the model decides to call edit_content directly).
+  const editingVerb =
+    /\b(edit|update|change|modify|alter|fix|polish|tweak|refine|adjust|amend|rework|reword|rewrite|revise|shorten|trim|expand|correct|revamp|rephrase|restyle|spruce|punch\s*up|clean\s*up|buff|touch\s*up|fix\s*up|paraphrase|improve|replace|swap|swap\s+out|drop|strip|delete|remove|rename|move|combine|merge|split|duplicate|copy|switch|tone\s+down|tone\s+up|tighten|loosen)\b/i;
+  const editingImperative =
+    /\bmake\s+(it|this|that|the\s+\w+|my)\s+(better|worse|nicer|cleaner|stronger|friendlier|engaging|more\s+(engaging|clickable|playful|formal|warm|bold|friendly|casual|serious|curious|confident|punchy|concise)|less\s+(formal|casual))\b/i;
+  const editingReference =
+    /\b(this\s+(post|one|caption|reel|carousel|script)|my\s+(last|recent|previous|saved|draft)|the\s+(last|recent|previous|saved|draft|existing)\s+(post|one)?|existing\s+(post|one))\b/i;
+  const editingAdditions =
+    /\b(add|insert|drop|remove|delete|strip|tweak)\s+(a|an|the|my)?\s*(cta|hashtag|hashtags|link|hook|emoji|emojis|tags?)\b/i;
+  const editingStyle =
+    /\b(use\s+my\s+(usual|favorite|saved|preferred)\s+style)\b/i;
+  const editing =
+    editingVerb.test(currentRequest) ||
+    editingImperative.test(currentRequest) ||
+    editingReference.test(currentRequest) ||
+    editingAdditions.test(currentRequest) ||
+    editingStyle.test(currentRequest);
   const direct = /\b(schedule|reschedule)\b/i.test(currentRequest) ? "schedule_content"
     : editing ? "edit_content"
     : /\b(create|generate|write|make|turn|convert)\b/i.test(currentRequest) && /\b(post|content|carousel|reel|version)\b/i.test(currentRequest) ? "create_content"

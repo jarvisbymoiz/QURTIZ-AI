@@ -10,6 +10,7 @@ import { brands } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
+import { trendSourceBundle } from "@/lib/research/bundle";
 
 export const trendsSchema = z.object({
   trendingTopics: z.array(z.object({
@@ -28,7 +29,7 @@ export type Trends = z.infer<typeof trendsSchema>;
  * Structured trend suggestions via grounded search when available;
  * falls back to AI-knowledge suggestions, clearly labeled by the caller.
  */
-export async function suggestTrends(ctx: { workspaceId: string; niche?: string }): Promise<
+export async function suggestTrends(ctx: { workspaceId: string; userId?: string; niche?: string }): Promise<
   | { ok: true; trends: Trends; sourced: boolean }
   | { ok: false; reason: string; message: string }
 > {
@@ -58,12 +59,35 @@ Niche focus: ${ctx.niche || "the brand's general niche"}
 Produce structured suggestions: 3-5 trending topics relevant to this brand, 3-5 visual directions matching its visual identity, 3-5 scroll-stopping hook ideas.
 Reply ONLY with JSON: {"trendingTopics":[{"topic","why"}],"visualDirections":[{"direction","style"}],"hookIdeas":["..."]}`;
 
-  // Gemini-only live grounding with the workspace's own key/model; other
-  // providers fall through honestly to AI-knowledge suggestions.
+  // Live grounding, priority order:
+  // 1. Shared Qurtiz ResearchService (Brave, project-level key) — provider-
+  //    agnostic: every workspace benefits, no per-tenant Brave credential.
+  // 2. Gemini-only grounding via the workspace's own key/model (legacy path).
   let sourced = false;
   let pre = "";
 
-  if (resolved.provider === "gemini") {
+  if (ctx.userId) {
+    try {
+      const nicheQuery = ctx.niche || `${brand?.businessName ?? ""} ${brand?.industry ?? ""}`.trim() || "social media marketing";
+      const bundle = await trendSourceBundle(
+        { workspaceId: ctx.workspaceId, userId: ctx.userId },
+        `${nicheQuery} trends`.slice(0, 300),
+        { strategies: ["trends", "news"], countPerStrategy: 5 },
+      );
+      if (bundle.ok) {
+        pre = bundle.sources
+          .slice(0, 8)
+          .map((s) => `- ${s.title}: ${s.url}`)
+          .join("\n")
+          .slice(0, 4000);
+        sourced = true;
+      }
+    } catch {
+      // fall through to the Gemini path silently — grounding is optional
+    }
+  }
+
+  if (!sourced && resolved.provider === "gemini") {
     try {
       const res = await fetch(
         "https://generativelanguage.googleapis.com/v1beta/models/" + resolved.modelId + ":generateContent",

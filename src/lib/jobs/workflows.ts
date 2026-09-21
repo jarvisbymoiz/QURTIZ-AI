@@ -23,8 +23,9 @@ import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { publishNow, reconcileBufferDeliveries } from "@/lib/publishing/service";
+import { publishNow, reconcileBufferDeliveries, type PublishResult } from "@/lib/publishing/service";
 import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
+import { buildPublishedNotification, buildPublishFailedNotification, type PublishedDestination } from "@/lib/notifications/payload";
 
 const MAX_PUBLISH_ATTEMPTS = 3;
 const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
@@ -91,24 +92,7 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
   });
 
   if (result.ok) {
-    await db.insert(notifications).values({
-      workspaceId: job.workspaceId,
-      userId: recipientId,
-      kind: "publishing_completed",
-      title: result.pendingDelivery ? "Buffer accepted the post" : "Published successfully",
-      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} ${result.pendingDelivery ? "delivery is awaiting confirmation from Buffer." : "post is live."}${result.firstCommentSkipped ? "\n\nFirst Comment: Skipped (unavailable on current Buffer plan)." : ""}${
-        result.comment
-          ? `\n\nFirst Comment: ${result.comment.status}${
-              result.comment.status === "published" && result.comment.providerCommentId
-                ? ` (id ${result.comment.providerCommentId})`
-                : result.comment.error
-                  ? ` - ${result.comment.error}`
-                  : ""
-            }.`
-          : ""
-      }`,
-      link: "/content-studio",
-    });
+    await recordPublishedNotification({ job, recipientId, result });
     return;
   }
 
@@ -152,15 +136,131 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
       title: "Reconnection required",
       body: `${result.message} Reconnect the account on the Connections page.`,
       link: "/connections",
+      meta: { type: "auth_expired", contentItemId: job.contentItemId, platform: job.platform as "facebook" | "instagram", publishStatus: "failed" },
     });
+  } else {
+    const [failedItem] = await db
+      .select({ topic: contentItems.topic })
+      .from(contentItems)
+      .where(eq(contentItems.id, job.contentItemId))
+      .limit(1);
+    const failed = buildPublishFailedNotification({
+      contentItemId: job.contentItemId,
+      platform: job.platform as "facebook" | "instagram",
+      topic: failedItem?.topic ?? undefined,
+      error: result.message,
+    });
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: recipientId,
+      kind: failed.kind,
+      title: failed.title,
+      body: failed.body,
+      link: failed.link,
+      meta: failed.meta,
+    });
+  }
+}
+
+/**
+ * Record the "published" notification for a successful platform job. Both the
+ * Facebook and Instagram sides of one content item land on ONE consolidated
+ * notification, enriched with every real platform permalink captured so far —
+ * so the UI can offer "View on Facebook" / "View on Instagram" buttons that
+ * open the LIVE platform post, never Content Studio. When no platform
+ * returned a permalink (Buffer: none officially reliable), the notification
+ * keeps the internal Content Studio link — we never fabricate URLs from IDs.
+ */
+async function recordPublishedNotification(args: {
+  job: typeof publishingJobs.$inferSelect;
+  recipientId: string;
+  result: Extract<PublishResult, { ok: true }>;
+}): Promise<void> {
+  const db = getDb();
+  const { job, recipientId, result } = args;
+
+  const [item] = await db
+    .select({ topic: contentItems.topic })
+    .from(contentItems)
+    .where(eq(contentItems.id, job.contentItemId))
+    .limit(1);
+
+  // Every sibling platform job that already reached "published" contributes
+  // its stored permalink (flipToPublished persisted it to the job result row
+  // before publishNow returned — the current job is included here).
+  const publishedSiblings = await db
+    .select({ platform: publishingJobs.platform, result: publishingJobs.result })
+    .from(publishingJobs)
+    .where(and(eq(publishingJobs.contentItemId, job.contentItemId), eq(publishingJobs.status, "published"), eq(publishingJobs.workspaceId, job.workspaceId)));
+
+  const destinations: PublishedDestination[] = [];
+  for (const row of publishedSiblings) {
+    if (row.platform !== "facebook" && row.platform !== "instagram") continue;
+    const result = (row.result ?? {}) as Record<string, unknown>;
+    const permalink = typeof result.permalink === "string" && /^https?:\/\//i.test(result.permalink) ? result.permalink : null;
+    if (!permalink || destinations.some((d) => d.platform === row.platform && d.permalink === permalink)) continue;
+    destinations.push({ platform: row.platform, permalink });
+  }
+
+  const platforms = [...new Set([...publishedSiblings.map((s) => s.platform), job.platform])] as Array<"facebook" | "instagram">;
+
+  const commentNote = result.firstCommentSkipped
+    ? "Skipped (unavailable on current Buffer plan)."
+    : result.comment
+      ? `${result.comment.status}${
+          result.comment.status === "published" && result.comment.providerCommentId
+            ? ` (id ${result.comment.providerCommentId})`
+            : result.comment.error
+              ? ` - ${result.comment.error}`
+              : ""
+        }.`
+      : null;
+
+  const note = buildPublishedNotification({
+    contentItemId: job.contentItemId,
+    topic: item?.topic ?? "Post",
+    publishedPlatforms: platforms,
+    destinations,
+    pendingDelivery: result.pendingDelivery === true,
+    commentNote,
+  });
+
+  // One notification per content item — a second platform publishing updates
+  // (and resurfaces) the existing row instead of spamming a duplicate.
+  const [existing] = await db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.workspaceId, job.workspaceId),
+        eq(notifications.kind, "publishing_completed"),
+        sql`${notifications.meta}->>'contentItemId' = ${job.contentItemId}`,
+      ),
+    )
+    .orderBy(desc(notifications.createdAt))
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(notifications)
+      .set({
+        title: note.title,
+        body: note.body,
+        link: note.link,
+        meta: note.meta,
+        // Resurface as unread — the post just gained a new live destination.
+        read: false,
+      })
+      .where(eq(notifications.id, existing.id));
   } else {
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
       userId: recipientId,
-      kind: "publishing_failed",
-      title: "Publishing failed",
-      body: result.message,
-      link: "/content-studio",
+      kind: note.kind,
+      title: note.title,
+      body: note.body,
+      link: note.link,
+      meta: note.meta,
     });
   }
 }
@@ -170,7 +270,7 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
 export async function recoverStuckPublishJobs(): Promise<void> {
   const db = getDb();
   const stale = await db
-    .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId })
+    .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId, contentItemId: publishingJobs.contentItemId, platform: publishingJobs.platform })
     .from(publishingJobs)
     .where(
       and(
@@ -200,6 +300,7 @@ export async function recoverStuckPublishJobs(): Promise<void> {
         title: "Publishing failed",
         body: reason,
         link: "/content-studio",
+        meta: { type: "publish_failed", contentItemId: job.contentItemId, platform: job.platform as "facebook" | "instagram", publishStatus: "failed" },
       });
     }
   }
@@ -667,6 +768,10 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   });
   await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();
+  });
+  await boss.work(QUEUES.mediaCleanup, async () => {
+    const { mediaCleanupTick } = await import("@/lib/media/cleanup-worker");
+    await mediaCleanupTick();
   });
   await boss.work<{ jobId: string }>(QUEUES.autopilotRun, async batch => {
     const { executeAutoRun } = await import("@/lib/autopilot/run");

@@ -1,76 +1,109 @@
-﻿import "server-only";
+import "server-only";
 
 import { tool } from "ai";
 import { z } from "zod";
-import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { searchResearch } from "@/lib/research/service";
+import { RESEARCH_STRATEGY_IDS, type ResearchStrategy } from "@/lib/research/strategies";
 
 type LogFn = (toolName: string, input: unknown, output: unknown) => Promise<void>;
 
 /**
- * Live web search via Gemini grounding (google_search tool) using the
- * WORKSPACE's own AI key + model. Honest fallback: on quota/billing blocks
- * or non-Gemini providers it returns searched:false with a clear reason.
+ * The agent's live Research tool, backed by the Qurtiz ResearchService
+ * (shared project-level Brave Search integration).
+ *
+ * This tool is INDEPENDENT of the workspace's selected AI provider: the
+ * model only calls the tool and receives results to analyze; Brave
+ * authentication, caching, source prioritization, rate limits and
+ * failures are handled entirely in the Qurtiz backend. Every workspace
+ * (Gemini, OpenAI, Claude, OpenRouter, MiniMax, GLM, NVIDIA, custom
+ * OpenAI-compatible, …) uses the same platform integration.
  */
-export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string }) {
+
+/** Honest failure framing the model can relay verbatim without inventing causes. */
+function agentFacingFailure(userMessage: string): string {
+  return (
+    `${userMessage} ` +
+    "This came from the built-in Qurtiz research service (Brave Search, platform-level) — " +
+    "it is independent of the selected AI model, so do NOT attribute it to the AI provider or model. " +
+    "Tell the user the real reason briefly and do NOT present model-knowledge lists as current/live data."
+  );
+}
+
+export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; userId: string }) {
   return tool({
     description:
-      "Search the live web for current information (trends, news, prices, recent events). Returns a sourced summary. Use when the user asks about anything current or external to the brand.",
+      "Search the live web right now through Qurtiz's built-in research service (works with ANY selected AI model — no provider-native search needed). Use for anything current or external to the brand: trends in the workspace niche, latest news, prices, recent events, what communities and creators are saying. Returns sourced results for you to analyze.",
     inputSchema: z.object({
       query: z.string().min(3).max(300).describe("What to search for"),
+      strategy: z
+        .enum(RESEARCH_STRATEGY_IDS as [ResearchStrategy, ...ResearchStrategy[]])
+        .optional()
+        .describe(
+          "Source focus: trends (Google Trends/search interest), official (official sources), news (current news), announcements (product/company news), community (Reddit), creators (YouTube), or web (broad fallback, the default).",
+        ),
+      region: z.string().max(10).optional().describe("2-letter region code, e.g. US. Defaults to the platform default."),
+      freshness: z.enum(["pd", "pw", "pm", "py"]).optional().describe("Recency window: pd=past day, pw=past week, pm=past month, py=past year."),
     }),
     execute: async (input) => {
-      // Resolved per-call from the workspace config: no global key, and the
-      // provider is re-checked so a provider change takes effect immediately.
-      let resolved;
       try {
-        resolved = await getWorkspaceTextModel(ctx.workspaceId, "research");
-      } catch {
-        await ctx.logStep("web_search", input, { ok: false });
-        return { searched: false, message: "AI is not configured for this workspace — add your provider + API key in Workspace Settings." };
-      }
-      if (resolved.provider !== "gemini") {
+        const result = await searchResearch({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          query: input.query,
+          strategy: input.strategy ?? null,
+          region: input.region ?? null,
+          freshness: input.freshness ?? null,
+        });
+
+        if (!result.ok) {
+          console.info(
+            `[research] web_search failed reason=${result.reason} query="${input.query.slice(0, 120)}"${result.retryAfterSeconds !== undefined ? ` retryAfterSeconds=${result.retryAfterSeconds}` : ""}`,
+          );
+          await ctx.logStep("web_search", input, { ok: false, reason: result.reason });
+          return { searched: false, reason: result.reason, message: agentFacingFailure(result.message) };
+        }
+
+        if (result.count === 0) {
+          console.info(`[research] web_search no_results query="${input.query.slice(0, 120)}" strategy=${result.strategy}`);
+          await ctx.logStep("web_search", input, { ok: true, count: 0 });
+          return {
+            searched: true,
+            found: false,
+            message:
+              "The live search completed successfully but returned zero results for this query. Suggest different keywords, a broader freshness window, or a different source strategy — do NOT fill the gap with older model knowledge presented as current.",
+          };
+        }
+
+        const lines = result.results.map(
+          (r) => `- [${r.title || r.url}](${r.url})${r.age ? ` (${r.age})` : ""}${r.description ? ` — ${r.description}` : ""}`,
+        );
+        const summary = `Live web results (${result.strategyLabel}${result.fromCache ? ", cached" : ""}):\n${lines.join("\n")}`.slice(
+          0,
+          4000,
+        );
+        console.info(
+          `[research] web_search ok results=${result.count} strategy=${result.strategy} fromCache=${result.fromCache} deduped=${result.deduped} query="${input.query.slice(0, 120)}"`,
+        );
+        await ctx.logStep("web_search", input, { ok: true, count: result.count, fromCache: result.fromCache });
+        return {
+          searched: true,
+          found: true,
+          provider: result.provider,
+          fromCache: result.fromCache,
+          summary,
+          sources: result.results.map((r) => ({ title: r.title, url: r.url })),
+        };
+      } catch (error) {
+        // Absolute safety net: a research failure must surface as a tool
+        // result the agent can explain — never a broken agent stream.
+        const message = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
+        console.warn(`[research] web_search internal error: ${message}`);
         await ctx.logStep("web_search", input, { ok: false });
         return {
           searched: false,
-          message:
-            "Live web search requires the Google (Gemini) provider — your current provider doesn't support it. Tell the user honestly.",
+          reason: "error",
+          message: agentFacingFailure(`Live research failed (${message}).`),
         };
-      }
-      try {
-        const res = await fetch(
-          "https://generativelanguage.googleapis.com/v1beta/models/" + resolved.modelId + ":generateContent",
-          {
-            method: "POST",
-            headers: { "x-goog-api-key": resolved.apiKey, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: "Search the web and summarize concisely with source URLs: " + input.query }] }],
-              tools: [{ google_search: {} }],
-            }),
-            signal: AbortSignal.timeout(60_000),
-          },
-        );
-        const json = (await res.json()) as {
-          candidates?: { content?: { parts?: { text?: string }[] } }[];
-          error?: { message?: string };
-        };
-        if (!res.ok || json.error) {
-          const msg = json.error?.message ?? "HTTP " + res.status;
-          await ctx.logStep("web_search", input, { ok: false, msg: msg.slice(0, 120) });
-          return {
-            searched: false,
-            message: msg.toLowerCase().includes("quota")
-              ? "Live web search is not available on the current API plan (quota). Tell the user honestly."
-              : "Search failed: " + msg.slice(0, 200),
-          };
-        }
-        const text = (json.candidates?.[0]?.content?.parts ?? [])
-          .map((p) => p.text)
-          .filter(Boolean)
-          .join("\n");
-        await ctx.logStep("web_search", input, { ok: true, len: text.length });
-        return { searched: true, summary: text.slice(0, 4000) };
-      } catch (e) {
-        return { searched: false, message: "Search failed: " + (e instanceof Error ? e.message : "unknown error") };
       }
     },
   });

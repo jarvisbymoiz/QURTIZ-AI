@@ -90,6 +90,20 @@ describe("prepareChatTurn", () => {
     const result = await prepareChatTurn(args);
     expect(result.messages.map(message => message.id)).toEqual(["u1", "u2"]);
   });
+
+  it("re-shapes history so the first message handed to the SDK is always a user role", async () => {
+    // Regression: filter-empty-parts ran BEFORE the leading-user shift, so an
+    // empty-text assistant placeholder left a non-user row at the head and
+    // streamText() rejected the history ("first message must be user role").
+    // The fix re-loops the shift AFTER the empty-parts filter so we never
+    // send a history that starts with anything other than a user role.
+    const emptyAssistant = { id: "u1:a", role: "assistant", parts: [{ type: "text", text: "" }] } as UIMessage;
+    const goodAssistant = { id: "u0:a", role: "assistant", parts: [{ type: "text", text: "previous reply" }] } as UIMessage;
+    fakeDatabase([row(goodAssistant), row(emptyAssistant), row(user("u1", "First"))]);
+    const result = await prepareChatTurn(args);
+    expect(result.messages[0]?.role).toBe("user");
+    expect(result.messages.map(message => message.id)).toEqual(["u1", "u2"]);
+  });
   it("returns older trusted messages for budgeted compression instead of dropping a fixed tail", async () => {
     const messages = Array.from({ length: 40 }, (_, i) => row(user("old-" + i, "Requirement " + i)));
     fakeDatabase(messages);

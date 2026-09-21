@@ -11,6 +11,7 @@ import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { summarizeBrandBrain } from "@/lib/ai/tools";
 import { overallOpportunity } from "@/lib/ai/scores";
 import { topicScoresSchema } from "@/lib/ai/research-types";
+import { trendSourceBundle } from "@/lib/research/bundle";
 
 const researchedTopicSchema = z.object({
   topic: z.string().min(4).max(200),
@@ -32,12 +33,37 @@ function extractJson(text: string): unknown {
 }
 
 /**
- * Gemini-only grounded web search (google_search tool) using the
- * WORKSPACE's own key + model. Returns [] for non-Gemini providers —
- * callers fall back honestly to AI-knowledge topics.
+ * Live-web sources for grounding, resolved in priority order:
+ * 1. The shared Qurtiz ResearchService (Brave Search, project-level key)
+ *    via a focused multi-source bundle (trends signals + current news +
+ *    Reddit/community) — works for EVERY workspace regardless of its AI
+ *    provider, with no per-workspace Brave credential anywhere.
+ * 2. Gemini-only grounding (google_search tool) using the WORKSPACE's own
+ *    key + model, as the legacy secondary path.
+ * Returns [] when neither is available — callers fall back honestly to
+ * AI-knowledge topics and say so (never presenting them as live results).
  */
-async function groundedSources(prompt: string, resolved: ResolvedTextModel): Promise<{ url: string; title: string }[]> {
-  if (resolved.provider !== "gemini") return [];
+async function groundedSources(
+  ctx: { workspaceId: string; userId: string },
+  query: string,
+  resolved: ResolvedTextModel,
+): Promise<{ url: string; title: string }[]> {
+  try {
+    const bundle = await trendSourceBundle(ctx, query, { strategies: ["trends", "news", "community"] });
+    if (bundle.ok) {
+      return bundle.sources.slice(0, 10).map((s) => ({ url: s.url, title: s.title }));
+    }
+    console.info(
+      `[research] brave trend bundle produced no sources (failures: ${bundle.failures.map((f) => `${f.strategy}:${f.reason}`).join(", ") || "none"}) — evaluating fallback`,
+    );
+  } catch (error) {
+    console.warn("[research] brave trend bundle errored:", error instanceof Error ? error.message : error);
+  }
+  if (resolved.provider !== "gemini") {
+    console.info("[research] no Gemini grounding fallback available on this provider — research proceeds unsourced (honest, no invented sources)");
+    return [];
+  }
+  console.info("[research] fallback attempted: workspace Gemini google_search grounding");
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${resolved.modelId}:generateContent`,
@@ -127,7 +153,11 @@ Research content opportunities: trending angles, audience questions, content gap
   const supplementaryTopics = new Set<string>();
 
   try {
-    const grounded = await groundedSources(userPrompt, resolved);
+    const grounded = await groundedSources(
+      { workspaceId: ctx.workspaceId, userId: ctx.userId },
+      `${ctx.niche}${ctx.notes ? ` ${ctx.notes}` : ""}`.slice(0, 300),
+      resolved,
+    );
     const res = await generateText({
       model,
       system,
@@ -182,8 +212,8 @@ Research content opportunities: trending angles, audience questions, content gap
     } else {
       note =
         resolved.provider === "gemini"
-          ? "Live web search unavailable on the current API plan — topics are AI-knowledge estimates without live sources. Enable billing or add a search API key for sourced research."
-          : "Live web grounding requires the Google (Gemini) provider — topics are AI-knowledge estimates without live sources on your current provider.";
+          ? "Live web search is unavailable right now (platform research service and the workspace's Gemini plan both unavailable) — topics are AI-knowledge estimates without live sources."
+          : "Live web research is temporarily unavailable on this deployment — topics are AI-knowledge estimates without live sources.";
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Research failed";

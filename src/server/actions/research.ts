@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
@@ -124,7 +124,7 @@ export async function suggestTrendsAction(input: { niche?: string }): Promise<
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   try {
-    const result = await suggestTrends({ workspaceId: ctx.workspaceId, niche: input.niche });
+    const result = await suggestTrends({ workspaceId: ctx.workspaceId, userId: ctx.userId, niche: input.niche });
     if (!result.ok) return { ok: false, error: result.message };
     return { ok: true, sourced: result.sourced, trends: result.trends };
   } catch (error) {

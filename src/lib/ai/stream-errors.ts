@@ -1,5 +1,6 @@
 import { APICallError } from "@ai-sdk/provider";
 import { InvalidToolInputError } from "ai";
+import { parseRateLimitError, rateLimitHint, type RateLimitInfo } from "./provider";
 
 const RATE_LIMIT_HINT =
   " (Rate limit reached — consider switching to a non-free model or increasing retry backoff if rate limits persist).";
@@ -82,8 +83,22 @@ export function describeStreamError(error: unknown): string {
   }
 
   const scrubbed = scrubCredentials(trimmed);
+
+  // TPD/RPD/quota errors get a precise, actionable hint instead of the
+  // generic "switch to a non-free model" — the user deserves to know
+  // whether retrying in 30 seconds will help (no) or whether they need to
+  // pick a different model right now (yes).
+  const info = parseRateLimitError(error);
+  if (isClassifiedRateLimit(info)) {
+    return capMessage(rateLimitHint(info), 300);
+  }
+
   const hinted = appendRateLimitHint(scrubbed);
   return capMessage(hinted, 300);
+}
+
+function isClassifiedRateLimit(info: RateLimitInfo): boolean {
+  return info.kind === "tpd" || info.kind === "rpd" || info.kind === "quota";
 }
 
 export function safeToolResultJson(value: unknown): string {

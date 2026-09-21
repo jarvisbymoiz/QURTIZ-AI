@@ -19,6 +19,9 @@ export async function GET() {
     SUPABASE_SERVICE_ROLE_KEY: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
     ENCRYPTION_KEY: Boolean(process.env.ENCRYPTION_KEY),
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL || null,
+    // Presence boolean only for the shared platform research key — the
+    // value itself must never be returned anywhere.
+    BRAVE_SEARCH_API_KEY: Boolean(process.env.BRAVE_SEARCH_API_KEY),
   };
 
   const missingEnvVars = Object.entries(envStatus)

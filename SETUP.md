@@ -131,7 +131,27 @@ permanently with a reconnection prompt.
    sanitized `detail` params in the Connections toast. Refresh tokens stay
    single-use and are already rotated + persisted by the publishing worker.
 
-## 8. Deploying to Vercel (https://qurtiz-ai.vercel.app)
+## 8. Brave Search (built-in platform research service)
+
+Live web research (the agent's `web_search` tool, Research Lab grounding,
+trend suggestions) is powered by **one shared project-level Brave Search
+API key** — not by per-user or per-workspace credentials.
+
+1. Create a key at https://brave.com/search/api/ (the free tier works).
+2. Add it to the project environment only: `BRAVE_SEARCH_API_KEY=...`
+   (server-only; never `NEXT_PUBLIC_`, never in any Supabase table or
+   workspace settings field).
+3. Apply the usage-tracking migration on a network with DB access:
+   `node scripts/brave-research-db.mjs --apply`.
+4. Restart the app. All workspaces immediately share the integration,
+   with per-workspace rate limits, plan allowances, anonymous public-result
+   caching and per-workspace usage attribution (`GET /api/research/usage`).
+
+Missing or invalid key = research tools degrade gracefully to an honest
+"live research unavailable" result; AI Chat keeps working. Full
+architecture and security rules: `docs/RESEARCH_BRAVE.md`.
+
+## 9. Deploying to Vercel (https://qurtiz-ai.vercel.app)
 
 When deploying to Vercel with your custom or assigned URL (e.g. `https://qurtiz-ai.vercel.app`):
 

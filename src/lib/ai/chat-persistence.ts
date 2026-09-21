@@ -14,13 +14,16 @@ import "server-only";
  *
  * Upsert key: `(thread_id, message->>'id')` — chat_messages has no natural
  * unique index and migrations are out of scope, so the upsert is
- * delete-then-insert inside one transaction. This is race-free in practice:
- * the SDK awaits `onFinish` during the response stream's flush, so the
- * server row always lands BEFORE the client's own persist request arrives
- * (which then cleanly replaces it via the same key). Retries re-derive the
- * SAME assistant id from the retried user message id
+ * delete-then-insert inside one transaction. Retries re-derive the SAME
+ * assistant id from the retried user message id
  * (`assistantMessageIdForTurn`), so the replaced tail collapses into one
  * row — never a duplicate.
+ *
+ * Late-flush safety: if the SDK fires `onFinish` AFTER the placeholder was
+ * already gone (interrupted SSE that finally reconnected, or a retry that
+ * raced past the original), the function now INSERTS the late response
+ * rather than silently dropping it. A newer run that owns the same key
+ * still wins via the `existingRunId` guard.
  *
  * ── Interrupted-run recovery (fix 2) ────────────────────────────────────
  * `failInterruptedChatRuns` (boot) and `recoverStaleChatRuns` (every-minute
@@ -58,7 +61,21 @@ export function textOf(message: UIMessage): string {
 }
 
 export function isEmptyAssistantPlaceholder(message: UIMessage): boolean {
-  return message.role === "assistant" && (message.parts ?? []).length === 0;
+  if (message.role !== "assistant") return false;
+  const parts = message.parts ?? [];
+  // True empties — the old phantom "running" bubble.
+  if (parts.length === 0) return true;
+  // A single empty text part is equally empty: nothing to render, nothing
+  // useful to retry from, and the SDK treats it as a non-message. Drop it
+  // at every load boundary so the chat panel never paints a blank bubble.
+  if (
+    parts.length === 1 &&
+    parts[0].type === "text" &&
+    (parts[0] as { text?: string }).text?.trim() === ""
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Drop empty assistant placeholders — they carry zero information and were
@@ -137,11 +154,17 @@ export type PersistArgs = {
 /**
  * Upsert one assistant message by `(thread_id, message->>'id')`.
  * - Parts are stored VERBATIM (tool inputs/outputs, reasoning, metadata).
- * - Empty placeholders are skipped entirely (nothing to render, nothing to
- *   retry from) — a failed run never leaves a phantom row.
  * - The metadata's runStatus is always overwritten with the caller's terminal
  *   state; a "running" claim never survives persistence.
  * - Bumps chat_threads.updated_at (loadThreadsAction sorts by it).
+ *
+ * Race safety: the SDK may fire `onFinish` AFTER a later turn has already
+ * overwritten the placeholder (e.g. user closed the tab mid-stream, another
+ * tab retried the turn, then a stranded SSE finally flushed). The unique
+ * guard is `existing.metadata.runId === incomingRunId`: if a NEWER run owns
+ * the same message id, the old run silently loses — but if NO row exists at
+ * all (placeholder deleted, thread not edited, late flush from the same run),
+ * we INSERT instead of dropping the user's response on the floor.
  */
 export async function persistAssistantMessage(args: PersistArgs): Promise<void> {
   if (!args.threadId || !args.workspaceId || !args.userId) return;
@@ -170,23 +193,28 @@ export async function persistAssistantMessage(args: PersistArgs): Promise<void> 
     const [existing] = await tx.select().from(chatMessages).where(and(eq(chatMessages.threadId, args.threadId),
       sql`${chatMessages.message} ->> 'id' = ${param(messageId)}`));
     const existingRunId = (existing?.message as { metadata?: { runId?: string } } | undefined)?.metadata?.runId;
+    // Race-safety guard: a newer run owns this key. The old run silently
+    // loses (its onFinish was late) — the right behaviour.
     if (existingRunId && existingRunId !== incomingMeta.runId) return;
-    if (!existing) return; // edited/deleted while the old stream was finishing
-    await tx.delete(chatMessages).where(
-      and(
-        eq(chatMessages.threadId, args.threadId),
-        // param(): plain strings in sql`` are interpolated as RAW SQL — the
-        // message id is client-influenced and must be a bound parameter.
-        sql`${chatMessages.message} ->> 'id' = ${param(messageId)}`,
-      ),
-    );
+    if (existing) {
+      await tx.delete(chatMessages).where(
+        and(
+          eq(chatMessages.threadId, args.threadId),
+          // param(): plain strings in sql`` are interpolated as RAW SQL — the
+          // message id is client-influenced and must be a bound parameter.
+          sql`${chatMessages.message} ->> 'id' = ${param(messageId)}`,
+        ),
+      );
+    }
     await tx.insert(chatMessages).values({
       threadId: args.threadId,
       workspaceId: args.workspaceId,
       role: args.message.role,
       content: textOf(args.message),
       message: finalMessage as unknown as Record<string, unknown>,
-      createdAt: existing.createdAt,
+      // No existing row → use "now" (we don't know the original createdAt).
+      // The thread's updated_at bump below keeps loadThreadsAction sorted.
+      createdAt: existing?.createdAt ?? new Date(),
     });
     await tx
       .update(chatThreads)

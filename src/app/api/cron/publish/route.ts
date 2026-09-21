@@ -18,6 +18,16 @@ export async function GET(req: NextRequest) {
   try {
     await publishDueScan();
     await autopilotLoop();
+    // Hourly media cleanup runs alongside the publishing cron so serverless
+    // deployments (no persistent pg-boss) get the same lifecycle guarantees
+    // as self-hosted instances. Cheap when nothing is queued; bounded so
+    // a 60s cron budget isn't blown.
+    try {
+      const { mediaCleanupTick } = await import("@/lib/media/cleanup-worker");
+      await mediaCleanupTick();
+    } catch (error) {
+      console.error("[cron/media-cleanup]", error instanceof Error ? error.message : error);
+    }
     return NextResponse.json({ ok: true, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error("[cron/publish error]", error);
