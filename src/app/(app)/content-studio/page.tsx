@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 import { effectiveContent } from "@/lib/content/edit";
 ﻿import { desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
@@ -11,7 +12,7 @@ import { StudioClient } from "@/components/studio/studio-client";
 
 export const metadata = { title: "Content Studio" };
 
-export default async function ContentStudioPage() {
+async function ContentStudioPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -65,3 +66,5 @@ export default async function ContentStudioPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/content-studio/page.tsx", ContentStudioPage);

@@ -64,7 +64,8 @@ function makeAttemptDb(job: Row) {
   const inserts: Row[] = [];
   const db = {
     select: () => ({
-      from: () => {
+      from: (table: unknown) => {
+        void table; // Match the real query signature and table-aware overrides.
         // Default rows for EVERY select: the recipient lookup consumes
         // createdBy; the item-topic/sibling selects tolerate the extra keys.
         const rows: Row[] = [{ createdBy: "user-1" }];

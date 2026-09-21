@@ -1,16 +1,17 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 import { Sidebar } from "@/components/layout/sidebar";
 import { requireWorkspace } from "@/lib/workspace";
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { notifications } from "@/db/schema";
 
-export default async function AppLayout({ children }: { children: React.ReactNode }) {
+async function AppLayout({ children }: { children: React.ReactNode }) {
   const ctx = await requireWorkspace();
   const db = getDb();
   let unreadCount = 0;
   try {
     const latestNotifications = await db
-      .select()
+      .select({ read: notifications.read })
       .from(notifications)
       .where(eq(notifications.workspaceId, ctx.workspace.id))
       .orderBy(desc(notifications.createdAt))
@@ -36,3 +37,5 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/layout.tsx", AppLayout);

@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 import { AgentMemoryCard } from "@/components/settings/agent-memory-card";
 import { listAgentMemory } from "@/lib/ai/persistent-memory";
 ﻿import { can } from "@/lib/permissions";
@@ -17,7 +18,7 @@ export const metadata = { title: "Settings" };
 
 import { AutopilotCard } from "@/components/settings/autopilot-card";
 
-export default async function SettingsPage() {
+async function SettingsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
   const agentMemory = await listAgentMemory({ userId: ctx.user.id, workspaceId: ctx.workspace.id });
@@ -93,3 +94,5 @@ export default async function SettingsPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/settings/page.tsx", SettingsPage);
