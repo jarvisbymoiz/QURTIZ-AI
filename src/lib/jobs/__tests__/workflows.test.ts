@@ -64,9 +64,18 @@ function makeAttemptDb(job: Row) {
   const inserts: Row[] = [];
   const db = {
     select: () => ({
-      from: () => ({
-        where: async () => [{ createdBy: "user-1" }], // workspaces → recipient
-      }),
+      from: () => {
+        // Default rows for EVERY select: the recipient lookup consumes
+        // createdBy; the item-topic/sibling selects tolerate the extra keys.
+        const rows: Row[] = [{ createdBy: "user-1" }];
+        // Awaitable AND chainable: .limit(1) (topic/item selects),
+        // .orderBy(...).limit(1) (notification-consolidation lookup → none → insert).
+        const whereResult = Object.assign(Promise.resolve(rows), {
+          limit: async () => rows.slice(0, 1),
+          orderBy: () => ({ limit: async () => [] as Row[] }),
+        });
+        return { where: () => whereResult };
+      },
     }),
     update: (table: unknown) => ({
       set: (values: Row) => ({
@@ -183,6 +192,42 @@ describe("attemptPublish — firstComment skipped note", () => {
     expect(inserts[0].kind).toBe("publishing_completed");
     expect(String(inserts[0].body)).toContain("First Comment: Skipped (unavailable on current Buffer plan)");
     expect(inserts[0].userId).toBe("user-1"); // workspace creator, not the ws UUID
+  });
+});
+
+describe("attemptPublish — published-post destinations", () => {
+  it("links the notification to the live platform permalink stored on the job row (never Content Studio)", async () => {
+    const { db, inserts } = makeAttemptDb(JOB);
+    // The sibling/permalink select for THIS run: table-aware fake rows.
+    const originalFrom = db.select;
+    db.select = () => ({
+      from: (table: unknown) => {
+        if (table === publishingJobs) {
+          // flipToPublished already persisted the real Meta permalink.
+          const rows: Row[] = [{ platform: "facebook", result: { permalink: "https://www.facebook.com/123/posts/456" } }];
+          const whereResult = Object.assign(Promise.resolve(rows), {
+            limit: async () => rows.slice(0, 1),
+            orderBy: () => ({ limit: async () => [] as Row[] }),
+          });
+          return { where: () => whereResult };
+        }
+        return originalFrom().from(table);
+      },
+    });
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue(okResult("meta"));
+
+    await attemptPublish("pj-1");
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].kind).toBe("publishing_completed");
+    // The resolver-facing contract: destinations carry the REAL permalink and
+    // the stored link is null — the UI renders "View on Facebook", not a
+    // Content Studio redirect.
+    expect(inserts[0].link).toBeNull();
+    const meta = inserts[0].meta as { destinations?: Array<{ platform: string; permalink: string }> };
+    expect(meta.destinations).toEqual([{ platform: "facebook", permalink: "https://www.facebook.com/123/posts/456" }]);
   });
 });
 

@@ -615,6 +615,10 @@ export const notifications = pgTable(
     title: text("title").notNull(),
     body: text("body"),
     link: text("link"),
+    // Structured metadata (0028): contentItemId, topic, format, platforms,
+    // destinations (real platform permalinks), error. The Notifications UI
+    // resolves click destinations from this instead of parsing text.
+    meta: jsonb("meta").notNull().default({}),
     read: boolean("read").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
