@@ -19,6 +19,7 @@ import { approveItem } from "@/lib/content/lifecycle";
 import { schedulePost, selectItemMedia } from "@/lib/publishing/service";
 import { autopilotSettingsSchema, type AutopilotSettings } from "./schema";
 import { dueOccurrence, postingTimes } from "./timing";
+import { buildAutoRunCompletedNotification, buildAutoRunTerminalNotification } from "@/lib/notifications/payload";
 
 type RunInput = { config: AutopilotSettings; occurrence: string; timezone: string };
 type Checkpoint = { attempts?: number; topics?: string[]; createdIds?: string[]; errors?: string[]; stage?: string; context?: Awaited<ReturnType<typeof buildAutopilotRunContext>> };
@@ -157,13 +158,47 @@ export async function executeAutoRun(jobId: string): Promise<void> {
     }
     await checkpoint(state.errors.length ? "Completed with warnings" : "Completed");
     await db.update(jobs).set({ status: "completed", error: null, updatedAt: new Date() }).where(eq(jobs.id, job.id));
-    await db.insert(notifications).values({ workspaceId: job.workspaceId, userId: job.userId, kind: "content_ready", title: "Auto Run completed", body: `${state.createdIds.length} / ${cfg.maxPostsPerRun} QA-passed posts saved. ${state.errors.length ? state.errors.join("; ").slice(0, 600) : "Check Content Studio and Calendar for review and scheduling status."}`, link: "/content-studio" });
+
+    // Build a human-useful notification: real post topics, content types,
+    // platforms and status — never a bare "Auto Run completed".
+    const createdItems = await db
+      .select({ id: contentItems.id, topic: contentItems.topic, format: contentItems.format, status: contentItems.status, scheduledAt: contentItems.scheduledAt })
+      .from(contentItems)
+      .where(and(inArray(contentItems.id, state.createdIds), eq(contentItems.workspaceId, job.workspaceId)));
+    const createdVariants = await db
+      .select({ contentItemId: contentVariants.contentItemId, platform: contentVariants.platform, scheduledVariantStatus: contentVariants.status })
+      .from(contentVariants)
+      .where(and(inArray(contentVariants.contentItemId, state.createdIds), eq(contentVariants.workspaceId, job.workspaceId)));
+    const summary = buildAutoRunCompletedNotification({
+      jobId: job.id,
+      targetCount: cfg.maxPostsPerRun,
+      errors: state.errors,
+      posts: createdItems.map((item) => ({
+        id: item.id,
+        topic: item.topic,
+        format: item.format,
+        status: item.status,
+        scheduledAt: item.scheduledAt ? item.scheduledAt.toISOString() : null,
+        platforms: createdVariants.filter((v) => v.contentItemId === item.id).map((v) => v.platform as "facebook" | "instagram"),
+      })),
+    });
+    await db.insert(notifications).values({
+      workspaceId: job.workspaceId,
+      userId: job.userId,
+      kind: summary.kind,
+      title: summary.title,
+      body: summary.body,
+      link: summary.link,
+      meta: summary.meta,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Auto Run failed";
     const disabled = message === "AUTO_RUN_DISABLED";
     const terminal = state.attempts >= 3 || message.startsWith("INVALID_AUTO_RUN_CONFIG:");
     await db.update(jobs).set({ status: disabled ? "cancelled" : terminal ? "failed" : "queued", error: message, result: state as Record<string, unknown>, updatedAt: new Date() }).where(eq(jobs.id, job.id));
-    if (disabled || terminal) await db.insert(notifications).values({ workspaceId: job.workspaceId, userId: job.userId, kind: "system", title: disabled ? "Auto Run stopped" : "Auto Run failed", body: `${state.createdIds.length} / ${job.total} valid posts preserved. ${disabled ? "Disabled in Settings." : message}`, link: "/content-studio" });
-    else throw error;
+    if (disabled || terminal) {
+      const terminalNote = buildAutoRunTerminalNotification({ jobId: job.id, createdCount: state.createdIds.length, total: job.total, disabled, message });
+      await db.insert(notifications).values({ workspaceId: job.workspaceId, userId: job.userId, kind: terminalNote.kind, title: terminalNote.title, body: terminalNote.body, link: terminalNote.link, meta: terminalNote.meta });
+    } else throw error;
   }
 }

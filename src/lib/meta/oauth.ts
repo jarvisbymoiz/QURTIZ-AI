@@ -157,6 +157,7 @@ export type MetaHealthCheckResult = {
 };
 
 export type MetaGraphErrorPayload = {
+  is_transient?: boolean;
   message?: string;
   type?: string;
   code?: number;
@@ -765,4 +766,3 @@ export async function verifyMetaHealth(params: {
     };
   }
 }
-

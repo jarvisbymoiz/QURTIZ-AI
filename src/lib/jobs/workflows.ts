@@ -19,16 +19,18 @@ import {
   jobs,
 } from "@/db/schema";
 import { QUEUES } from "./boss";
+import { claimScheduledPublishJob } from "./publish-claim";
 import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import type { PgBoss } from "pg-boss";
 import { generateAndPersistContent } from "@/lib/ai/content";
-import { publishNow, reconcileBufferDeliveries } from "@/lib/publishing/service";
+import { publishNow, readCommentState, reconcileBufferDeliveries, type PublishResult } from "@/lib/publishing/service";
 import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
+import { buildPublishedNotification, buildPublishFailedNotification, type PublishedDestination } from "@/lib/notifications/payload";
 
 const MAX_PUBLISH_ATTEMPTS = 3;
 const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
-const STUCK_PROCESSING_MS = 10 * 60_000; // a claim older than this is treated as lost
+const STUCK_PROCESSING_MS = 30 * 60_000; // longer than the 800s cron execution budget
 const STUCK_GENERATION_MS = 30 * 60_000;
 
 /**
@@ -48,17 +50,7 @@ const STUCK_GENERATION_MS = 30 * 60_000;
 export async function attemptPublish(publishingJobId: string): Promise<void> {
   const db = getDb();
 
-  // Atomic claim — conditional UPDATE (status='pending') means only one
-  // worker wins; a concurrent claim matches 0 rows and returns immediately.
-  const [job] = await db
-    .update(publishingJobs)
-    .set({
-      status: "processing",
-      attempts: sql`${publishingJobs.attempts} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(publishingJobs.id, publishingJobId), eq(publishingJobs.status, "pending"), isNull(publishingJobs.providerPostId)))
-    .returning();
+  const job = await claimScheduledPublishJob(publishingJobId);
   if (!job) return;
 
   // Notification recipient: the workspace creator, never the workspace UUID.
@@ -91,38 +83,21 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
   });
 
   if (result.ok) {
-    await db.insert(notifications).values({
-      workspaceId: job.workspaceId,
-      userId: recipientId,
-      kind: "publishing_completed",
-      title: result.pendingDelivery ? "Buffer accepted the post" : "Published successfully",
-      body: `${job.platform === "facebook" ? "Facebook" : "Instagram"} ${result.pendingDelivery ? "delivery is awaiting confirmation from Buffer." : "post is live."}${result.firstCommentSkipped ? "\n\nFirst Comment: Skipped (unavailable on current Buffer plan)." : ""}${
-        result.comment
-          ? `\n\nFirst Comment: ${result.comment.status}${
-              result.comment.status === "published" && result.comment.providerCommentId
-                ? ` (id ${result.comment.providerCommentId})`
-                : result.comment.error
-                  ? ` - ${result.comment.error}`
-                  : ""
-            }.`
-          : ""
-      }`,
-      link: "/content-studio",
-    });
+    await recordPublishedNotification({ job, recipientId, result });
     return;
   }
 
-  // Failure classification: transient (network/429/5xx) requeue up to
+  // Failure classification: confirmed throttling/transient rejections requeue up to
   // MAX_PUBLISH_ATTEMPTS; everything else fails permanently.
   // Retry only a confirmed rejection. A lost response may mean the provider
   // accepted the post; replaying that mutation could publish it twice.
-  const transient = result.reason === "rate_limited";
+  const transient = result.reason === "rate_limited" || result.reason === "transient_provider";
   if (transient && job.attempts < MAX_PUBLISH_ATTEMPTS) {
     await db
       .update(publishingJobs)
       .set({
         status: "pending",
-        scheduledAt: new Date(Date.now() + PUBLISH_RETRY_BACKOFF_MS),
+        scheduledAt: new Date(Date.now() + PUBLISH_RETRY_BACKOFF_MS * 2 ** Math.max(0, job.attempts - 1)),
         lastError: result.message,
         updatedAt: new Date(),
       })
@@ -152,25 +127,172 @@ export async function attemptPublish(publishingJobId: string): Promise<void> {
       title: "Reconnection required",
       body: `${result.message} Reconnect the account on the Connections page.`,
       link: "/connections",
+      meta: { type: "auth_expired", contentItemId: job.contentItemId, platform: job.platform as "facebook" | "instagram", publishStatus: "failed" },
     });
   } else {
+    const [failedItem] = await db
+      .select({ topic: contentItems.topic })
+      .from(contentItems)
+      .where(eq(contentItems.id, job.contentItemId))
+      .limit(1);
+    const failed = buildPublishFailedNotification({
+      contentItemId: job.contentItemId,
+      platform: job.platform as "facebook" | "instagram",
+      topic: failedItem?.topic ?? undefined,
+      error: result.message,
+    });
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
       userId: recipientId,
-      kind: "publishing_failed",
-      title: "Publishing failed",
-      body: result.message,
-      link: "/content-studio",
+      kind: failed.kind,
+      title: failed.title,
+      body: failed.body,
+      link: failed.link,
+      meta: failed.meta,
     });
   }
 }
 
-/** Recover publish jobs stuck in "processing" (a worker died mid-publish):
- *  requeue them while attempts remain, otherwise fail them permanently. */
+/**
+ * Record the "published" notification for a successful platform job. Both the
+ * Facebook and Instagram sides of one content item land on ONE consolidated
+ * notification, enriched with every real platform permalink captured so far —
+ * so the UI can offer "View on Facebook" / "View on Instagram" buttons that
+ * open the LIVE platform post, never Content Studio. When no platform
+ * returned a permalink (Buffer: none officially reliable), the notification
+ * keeps the internal Content Studio link — we never fabricate URLs from IDs.
+ */
+async function recordPublishedNotification(args: {
+  job: typeof publishingJobs.$inferSelect;
+  recipientId: string;
+  result: Pick<Extract<PublishResult, { ok: true }>, "comment" | "firstCommentSkipped" | "pendingDelivery">;
+}): Promise<void> {
+  const { job, recipientId, result } = args;
+  await getDb().transaction(async db => {
+    // Serialize notification consolidation for sibling platform jobs.
+    await db.execute(sql`select id from content_items where id = ${job.contentItemId} and workspace_id = ${job.workspaceId} for update`);
+
+    const [item] = await db
+      .select({ topic: contentItems.topic, format: contentItems.format })
+      .from(contentItems)
+      .where(eq(contentItems.id, job.contentItemId))
+      .limit(1);
+
+    // Every sibling platform job that already reached "published" contributes
+    // its stored permalink (flipToPublished persisted it to the job result row
+    // before publishNow returned — the current job is included here).
+    const publishedSiblings = await db
+      .select({ platform: publishingJobs.platform, result: publishingJobs.result })
+      .from(publishingJobs)
+      .where(and(eq(publishingJobs.contentItemId, job.contentItemId), eq(publishingJobs.status, "published"), eq(publishingJobs.workspaceId, job.workspaceId)));
+
+    const destinations: PublishedDestination[] = [];
+    for (const row of publishedSiblings) {
+      if (row.platform !== "facebook" && row.platform !== "instagram") continue;
+      const result = (row.result ?? {}) as Record<string, unknown>;
+      const permalink = typeof result.permalink === "string" && /^https?:\/\//i.test(result.permalink) ? result.permalink : null;
+      if (!permalink || destinations.some((d) => d.platform === row.platform && d.permalink === permalink)) continue;
+      destinations.push({ platform: row.platform, permalink });
+    }
+
+    const platforms = [...new Set([...publishedSiblings.map((s) => s.platform), job.platform])] as Array<"facebook" | "instagram">;
+
+    const commentNote = result.firstCommentSkipped
+      ? "Skipped (unavailable on current Buffer plan)."
+      : result.comment
+        ? `${result.comment.status}${
+            result.comment.status === "published" && result.comment.providerCommentId
+              ? ` (id ${result.comment.providerCommentId})`
+              : result.comment.error
+                ? ` - ${result.comment.error}`
+                : ""
+          }.`
+        : null;
+
+    const note = buildPublishedNotification({
+      contentItemId: job.contentItemId,
+      topic: item?.topic ?? "Post",
+      format: item?.format,
+      publishedPlatforms: platforms,
+      destinations,
+      pendingDelivery: result.pendingDelivery === true,
+      commentNote,
+    });
+
+    // One notification per content item — a second platform publishing updates
+    // (and resurfaces) the existing row instead of spamming a duplicate.
+    const [existing] = await db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.workspaceId, job.workspaceId),
+          eq(notifications.kind, "publishing_completed"),
+          sql`${notifications.meta}->>'contentItemId' = ${job.contentItemId}`,
+        ),
+      )
+      .orderBy(desc(notifications.createdAt))
+      .limit(1);
+
+    if (existing) {
+      await db
+        .update(notifications)
+        .set({
+          title: note.title,
+          body: note.body,
+          link: note.link,
+          meta: { ...note.meta, jobId: job.id },
+          // Resurface as unread — the post just gained a new live destination.
+          read: false,
+        })
+        .where(eq(notifications.id, existing.id));
+    } else {
+      await db.insert(notifications).values({
+        workspaceId: job.workspaceId,
+        userId: recipientId,
+        kind: note.kind,
+        title: note.title,
+        body: note.body,
+        link: note.link,
+        meta: { ...note.meta, jobId: job.id },
+      });
+    }
+  });
+}
+
+/** Buffer acceptance is not publication. Refresh the existing pending notice
+ * from durable terminal job results, including after a process restart. */
+export async function refreshPendingDeliveryNotifications(workspaceId?: string): Promise<void> {
+  const db = getDb();
+  const rows = await db.select({ job: publishingJobs, notice: notifications }).from(notifications)
+    .innerJoin(publishingJobs, and(eq(publishingJobs.workspaceId, notifications.workspaceId),
+      sql`${notifications.meta}->>'contentItemId' = ${publishingJobs.contentItemId}::text`))
+    .where(and(eq(notifications.kind, "publishing_completed"),
+      workspaceId ? eq(notifications.workspaceId, workspaceId) : undefined,
+      sql`${notifications.meta}->>'publishStatus' = 'pending'`,
+      eq(publishingJobs.provider, "buffer"), sql`${publishingJobs.providerPostId} is not null`,
+      sql`(${notifications.meta}->>'jobId' is null or ${notifications.meta}->>'jobId' = ${publishingJobs.id}::text)`,
+      inArray(publishingJobs.status, ["published", "failed"])))
+    .limit(20);
+  for (const { job, notice } of rows) {
+    if (job.status === "published") {
+      await recordPublishedNotification({ job, recipientId: notice.userId,
+        result: { comment: readCommentState(job.result) ?? undefined,
+          firstCommentSkipped: (job.result as Record<string, unknown>)?.firstCommentSkipped === true } });
+    } else {
+      const note = buildPublishFailedNotification({ contentItemId: job.contentItemId,
+        platform: job.platform, error: job.lastError ?? "Provider delivery failed. Review this post in the connected account." });
+      await db.update(notifications).set({ ...note, read: false }).where(eq(notifications.id, notice.id));
+    }
+  }
+}
+
+/** A lost worker can have sent the post already. Require reconciliation,
+ * never automatically replay a potentially accepted external mutation. */
 export async function recoverStuckPublishJobs(): Promise<void> {
   const db = getDb();
   const stale = await db
-    .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId })
+    .select({ id: publishingJobs.id, attempts: publishingJobs.attempts, workspaceId: publishingJobs.workspaceId, contentItemId: publishingJobs.contentItemId, platform: publishingJobs.platform })
     .from(publishingJobs)
     .where(
       and(
@@ -183,12 +305,14 @@ export async function recoverStuckPublishJobs(): Promise<void> {
   for (const job of stale) {
     {
       const reason = "The worker stopped before delivery was confirmed. Check the connected account before retrying to avoid a duplicate post.";
-      await db
+      const [recovered] = await db
         .update(publishingJobs)
         .set({ status: "failed", lastError: reason,
           result: sql`coalesce(${publishingJobs.result}, '{}'::jsonb) || '{"reconciliationRequired":true}'::jsonb`, updatedAt: new Date() })
         .where(and(eq(publishingJobs.id, job.id), eq(publishingJobs.status, "processing"), isNull(publishingJobs.providerPostId),
-          lte(publishingJobs.updatedAt, new Date(Date.now() - STUCK_PROCESSING_MS))));
+          lte(publishingJobs.updatedAt, new Date(Date.now() - STUCK_PROCESSING_MS))))
+        .returning({ id: publishingJobs.id });
+      if (!recovered) continue;
       const [ws] = await db
         .select({ createdBy: workspaces.createdBy })
         .from(workspaces)
@@ -200,6 +324,7 @@ export async function recoverStuckPublishJobs(): Promise<void> {
         title: "Publishing failed",
         body: reason,
         link: "/content-studio",
+        meta: { type: "publish_failed", contentItemId: job.contentItemId, platform: job.platform as "facebook" | "instagram", publishStatus: "failed" },
       });
     }
   }
@@ -208,19 +333,34 @@ export async function recoverStuckPublishJobs(): Promise<void> {
 /** Scan for due publishing jobs (runs every minute via pg-boss cron or vercel cron).
  *  All providers (Meta + Buffer) now route through the unified `attemptPublish`
  *  entry — the per-provider adapter lives inside the publishing service. */
-export async function publishDueScan(): Promise<void> {
+export async function publishDueScan(options: { limit?: number; reconcile?: boolean; parallel?: boolean } = {}): Promise<{ checked: number; interrupted: number }> {
   const db = getDb();
-  await reconcileBufferDeliveries();
+  if (options.reconcile !== false) {
+    await reconcileBufferDeliveries();
+    await refreshPendingDeliveryNotifications();
+  }
   await recoverStuckPublishJobs();
   await recoverStuckGenerationJobs();
   const due = await db
     .select({ id: publishingJobs.id })
     .from(publishingJobs)
-    .where(and(eq(publishingJobs.status, "pending"), lte(publishingJobs.scheduledAt, new Date())))
-    .limit(10);
-  for (const j of due) {
-    await attemptPublish(j.id);
-  }
+    .where(and(eq(publishingJobs.status, "pending"), isNull(publishingJobs.providerPostId), lte(publishingJobs.scheduledAt, new Date())))
+    .orderBy(asc(publishingJobs.scheduledAt), asc(publishingJobs.id))
+    .limit(options.limit ?? 10);
+  let interrupted = 0;
+  const run = async (j: { id: string }) => {
+    try {
+      await attemptPublish(j.id);
+    } catch (error) {
+      interrupted++;
+      // Keep the durable processing claim for conservative crash recovery;
+      // one database/provider exception must not starve every later job.
+      console.error("[publish-scan] Job interrupted", { jobId: j.id, error: error instanceof Error ? error.message : "Unknown error" });
+    }
+  };
+  if (options.parallel) await Promise.all(due.map(run));
+  else for (const j of due) await run(j);
+  return { checked: due.length, interrupted };
 }
 
 /** Long AI jobs must reach a terminal state after a worker/process loss. We do
@@ -667,6 +807,10 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   });
   await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();
+  });
+  await boss.work(QUEUES.mediaCleanup, async () => {
+    const { mediaCleanupTick } = await import("@/lib/media/cleanup-worker");
+    await mediaCleanupTick();
   });
   await boss.work<{ jobId: string }>(QUEUES.autopilotRun, async batch => {
     const { executeAutoRun } = await import("@/lib/autopilot/run");

@@ -2,6 +2,15 @@
 import { parseZonedDateTime, planContentDays, defaultSlotFor, isValidTimezone, dateIsoInTz, hmInTz, tomorrowIsoInTz } from "@/lib/scheduling/time";
 
 describe("parseZonedDateTime", () => {
+  it("rejects nonexistent DST times and invalid dates instead of shifting the schedule", () => {
+    expect(Number.isNaN(parseZonedDateTime("2026-03-08", "02:30", "America/New_York").getTime())).toBe(true);
+    expect(Number.isNaN(parseZonedDateTime("2026-02-30", "18:30", "UTC").getTime())).toBe(true);
+    expect(Number.isNaN(parseZonedDateTime("2026-09-01", "25:30", "UTC").getTime())).toBe(true);
+  });
+  it("converts half-hour and date-boundary timezones", () => {
+    expect(parseZonedDateTime("2026-09-01", "00:15", "Asia/Kolkata").toISOString()).toBe("2026-08-31T18:45:00.000Z");
+    expect(parseZonedDateTime("2026-09-01", "18:30", "Pacific/Auckland").toISOString()).toBe("2026-09-01T06:30:00.000Z");
+  });
   it("converts Asia/Karachi 18:30 to 13:30 UTC (no DST)", () => {
     const d = parseZonedDateTime("2026-09-01", "18:30", "Asia/Karachi");
     expect(d.toISOString()).toBe("2026-09-01T13:30:00.000Z");

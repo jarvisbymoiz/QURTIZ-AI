@@ -5,7 +5,8 @@ import { revalidatePath } from "next/cache";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { workspaces } from "@/db/schema";
+import { brandAssets, contentVariants, visualAssets, workspaces } from "@/db/schema";
+import { and } from "drizzle-orm";
 import { createClient } from "@/lib/supabase/server";
 import { rateLimit } from "@/lib/security/rate-limit";
 import {
@@ -19,6 +20,34 @@ import {
   WORKSPACE_DELETE_COOKIE,
   WORKSPACE_DELETE_TOKEN_TTL_SECONDS,
 } from "@/lib/workspace-delete";
+
+/**
+ * Collect every storage path the workspace owns. The DB rows are about to
+ * cascade-delete, so we snapshot paths first and then call
+ * supabase.storage.remove() AFTER the cascade fires. Anything that survives
+ * the cascade (which it shouldn't — every reference is in this list) gets
+ * purged as well.
+ */
+async function collectWorkspaceStoragePaths(workspaceId: string): Promise<string[]> {
+  const db = getDb();
+  const [visualRows, brandRows] = await Promise.all([
+    db
+      .select({ path: visualAssets.storagePath })
+      .from(visualAssets)
+      // Includes variants whose parent contentItem has been deleted too —
+      // that path still owns Storage objects the workspace must reclaim.
+      .leftJoin(contentVariants, and(eq(visualAssets.contentItemId, contentVariants.contentItemId)))
+      .where(eq(visualAssets.workspaceId, workspaceId)),
+    db
+      .select({ path: brandAssets.storagePath })
+      .from(brandAssets)
+      .where(eq(brandAssets.workspaceId, workspaceId)),
+  ]);
+  const paths = new Set<string>();
+  for (const r of visualRows) paths.add(r.path);
+  for (const r of brandRows) paths.add(r.path);
+  return [...paths];
+}
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -215,7 +244,35 @@ export async function deleteWorkspaceAction(input: { workspaceName: string }): P
   }
 
   const db = getDb();
+  // Collect every storage path the workspace owns BEFORE the workspace row
+  // is deleted — once the FK cascade fires, visual_assets and brand_assets
+  // rows (which hold the storage paths) are gone. Supabase Storage is
+  // external to Postgres and is NOT cascade-deleted, so we must do it
+  // here. The cleanup queue rows are also cascade-deleted with the
+  // workspace, which is the correct outcome — there is no point in
+  // queueing cleanup for a workspace that no longer exists, but we
+  // still want to delete the underlying Storage objects.
+  const storagePaths = await collectWorkspaceStoragePaths(ctx.workspaceId);
   await db.delete(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+
+  // Best-effort Storage cleanup. The workspace is gone from Postgres but
+  // the user can recreate it later; we don't want stale files waiting for
+  // them. A failure here is logged but never blocks the delete — the DB
+  // state is the source of truth.
+  if (storagePaths.length > 0) {
+    try {
+      const { createServiceClient } = await import("@/lib/supabase/service");
+      const service = createServiceClient();
+      if (service) {
+        const { error } = await service.storage.from("brand-assets").remove(storagePaths);
+        if (error) {
+          console.error("[workspace-delete] storage cleanup failed", ctx.workspaceId, error.message);
+        }
+      }
+    } catch (error) {
+      console.error("[workspace-delete] storage cleanup error", ctx.workspaceId, error);
+    }
+  }
 
   // Stale-cookie healing: when the deleted workspace was this browser's
   // active workspace, the cookie now points at a workspace that no longer

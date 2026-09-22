@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 
 import { PgBoss } from "pg-boss";
 
@@ -17,6 +17,7 @@ export const QUEUES = {
   autopilotLoop: "autopilot-loop",
   autopilotRun: "autopilot-run",
   chatRunSweep: "chat-run-sweep",
+  mediaCleanup: "media-cleanup",
 } as const;
 
 export async function getBoss(): Promise<PgBoss> {

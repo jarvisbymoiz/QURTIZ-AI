@@ -13,6 +13,7 @@ import { campaigns, jobs, notifications, publishingJobs } from "@/db/schema";
  */
 
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
+vi.mock("@/lib/jobs/publish-claim", () => ({ claimScheduledPublishJob: vi.fn() }));
 
 vi.mock("@/lib/publishing/service", () => ({ publishNow: vi.fn() }));
 vi.mock("@/lib/publish/provider", () => ({ resolvePublishProviderForPlatform: vi.fn() }));
@@ -36,6 +37,7 @@ vi.mock("@/lib/visuals/generate", () => ({ generateVisual: vi.fn() }));
 
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
+const { claimScheduledPublishJob } = await import("@/lib/jobs/publish-claim");
 const { attemptPublish, recoverStuckGenerationJobs } = await import("@/lib/jobs/workflows");
 const { publishNow } = await import("@/lib/publishing/service");
 const { resolvePublishProviderForPlatform } = await import("@/lib/publish/provider");
@@ -60,13 +62,26 @@ const JOB: Row = {
  *  called (the claim ALSO flows through here — its `.returning()` replay
  *  returns the claimed row without re-recording). */
 function makeAttemptDb(job: Row) {
+  vi.mocked(claimScheduledPublishJob).mockResolvedValue(job as never);
   const updates: Array<{ table: unknown; values: Row }> = [];
   const inserts: Row[] = [];
   const db = {
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+    execute: async () => ({ rows: [] }),
     select: () => ({
-      from: () => ({
-        where: async () => [{ createdBy: "user-1" }], // workspaces → recipient
-      }),
+      from: (_table?: unknown) => {
+        void _table;
+        // Default rows for EVERY select: the recipient lookup consumes
+        // createdBy; the item-topic/sibling selects tolerate the extra keys.
+        const rows: Row[] = [{ createdBy: "user-1" }];
+        // Awaitable AND chainable: .limit(1) (topic/item selects),
+        // .orderBy(...).limit(1) (notification-consolidation lookup → none → insert).
+        const whereResult = Object.assign(Promise.resolve(rows), {
+          limit: async () => rows.slice(0, 1),
+          orderBy: () => ({ limit: async () => [] as Row[] }),
+        });
+        return { where: () => whereResult };
+      },
     }),
     update: (table: unknown) => ({
       set: (values: Row) => ({
@@ -104,6 +119,34 @@ beforeEach(() => {
 });
 
 describe("attemptPublish — provider re-resolution at fire time", () => {
+  it("does not publish when another worker has claimed the job", async () => {
+    const { db } = makeAttemptDb(JOB);
+    mockedGetDb.mockReturnValue(db as never);
+    vi.mocked(claimScheduledPublishJob).mockResolvedValue(undefined);
+    await attemptPublish("pj-1");
+    expect(mockedPublishNow).not.toHaveBeenCalled();
+  });
+  it.each(["rate_limited", "transient_provider"])("persists bounded backoff for %s", async reason => {
+    const { db, updates, inserts } = makeAttemptDb({ ...JOB, attempts: 2 });
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue({ ok: false, reason, message: "Try later" });
+    const now = Date.now();
+    await attemptPublish("pj-1");
+    const retry = updates.find(u => u.values.status === "pending");
+    expect(retry).toBeDefined();
+    expect((retry!.values.scheduledAt as Date).getTime()).toBeGreaterThanOrEqual(now + 10 * 60_000);
+    expect(inserts).toHaveLength(0);
+  });
+  it("stops retrying after the third provider rejection", async () => {
+    const { db, updates, inserts } = makeAttemptDb({ ...JOB, attempts: 3 });
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue({ ok: false, reason: "rate_limited", message: "Try later" });
+    await attemptPublish("pj-1");
+    expect(updates.some(u => u.values.status === "pending")).toBe(false);
+    expect(inserts[0].kind).toBe("publishing_failed");
+  });
   it("does not replay a lost provider response", async () => {
     const { db, updates, inserts } = makeAttemptDb(JOB);
     mockedGetDb.mockReturnValue(db as never);
@@ -183,6 +226,42 @@ describe("attemptPublish — firstComment skipped note", () => {
     expect(inserts[0].kind).toBe("publishing_completed");
     expect(String(inserts[0].body)).toContain("First Comment: Skipped (unavailable on current Buffer plan)");
     expect(inserts[0].userId).toBe("user-1"); // workspace creator, not the ws UUID
+  });
+});
+
+describe("attemptPublish — published-post destinations", () => {
+  it("links the notification to the live platform permalink stored on the job row (never Content Studio)", async () => {
+    const { db, inserts } = makeAttemptDb(JOB);
+    // The sibling/permalink select for THIS run: table-aware fake rows.
+    const originalFrom = db.select;
+    db.select = () => ({
+      from: (table: unknown) => {
+        if (table === publishingJobs) {
+          // flipToPublished already persisted the real Meta permalink.
+          const rows: Row[] = [{ platform: "facebook", result: { permalink: "https://www.facebook.com/123/posts/456" } }];
+          const whereResult = Object.assign(Promise.resolve(rows), {
+            limit: async () => rows.slice(0, 1),
+            orderBy: () => ({ limit: async () => [] as Row[] }),
+          });
+          return { where: () => whereResult };
+        }
+        return originalFrom().from(table);
+      },
+    });
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue(okResult("meta"));
+
+    await attemptPublish("pj-1");
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].kind).toBe("publishing_completed");
+    // The resolver-facing contract: destinations carry the REAL permalink and
+    // the stored link is null — the UI renders "View on Facebook", not a
+    // Content Studio redirect.
+    expect(inserts[0].link).toBeNull();
+    const meta = inserts[0].meta as { destinations?: Array<{ platform: string; permalink: string }> };
+    expect(meta.destinations).toEqual([{ platform: "facebook", permalink: "https://www.facebook.com/123/posts/456" }]);
   });
 });
 

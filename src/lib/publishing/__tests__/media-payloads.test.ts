@@ -97,6 +97,19 @@ afterEach(() => vi.unstubAllGlobals());
 const base = { pageToken: "token", pageId: "page-1", igUserId: "ig-1", message: "hello" };
 
 describe("Facebook payloads", () => {
+  it("treats a successful HTTP response with no post ID as an uncertain delivery", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    expect(await publishPost({ ...base, platform: "facebook", imageUrl: null })).toMatchObject({ ok: false, reason: "unknown_outcome" });
+  });
+  it.each([
+    [{ code: 4, message: "Throttled" }, "rate_limited"],
+    [{ code: 2, is_transient: true, message: "Try later" }, "transient_provider"],
+    [{ code: 100, message: "Invalid parameter" }, "graph_error"],
+  ])("classifies explicit main-post rejections without changing successful payloads", async (error, reason) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error }), { status: 400 })));
+    const result = await publishPost({ ...base, platform: "facebook", imageUrl: null });
+    expect(result).toMatchObject({ ok: false, reason });
+  });
   it("single image -> /photos with url + caption", async () => {
     const { calls } = stubGraph();
     const res = await publishPost({ ...base, platform: "facebook", imageUrl: "https://cdn/1.png" });

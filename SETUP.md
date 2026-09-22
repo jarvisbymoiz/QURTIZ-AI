@@ -131,7 +131,27 @@ permanently with a reconnection prompt.
    sanitized `detail` params in the Connections toast. Refresh tokens stay
    single-use and are already rotated + persisted by the publishing worker.
 
-## 8. Deploying to Vercel (https://qurtiz-ai.vercel.app)
+## 8. Brave Search (built-in platform research service)
+
+Live web research (the agent's `web_search` tool, Research Lab grounding,
+trend suggestions) is powered by **one shared project-level Brave Search
+API key** — not by per-user or per-workspace credentials.
+
+1. Create a key at https://brave.com/search/api/ (the free tier works).
+2. Add it to the project environment only: `BRAVE_SEARCH_API_KEY=...`
+   (server-only; never `NEXT_PUBLIC_`, never in any Supabase table or
+   workspace settings field).
+3. Apply the usage-tracking migration on a network with DB access:
+   `node scripts/brave-research-db.mjs --apply`.
+4. Restart the app. All workspaces immediately share the integration,
+   with per-workspace rate limits, plan allowances, anonymous public-result
+   caching and per-workspace usage attribution (`GET /api/research/usage`).
+
+Missing or invalid key = research tools degrade gracefully to an honest
+"live research unavailable" result; AI Chat keeps working. Full
+architecture and security rules: `docs/RESEARCH_BRAVE.md`.
+
+## 9. Deploying to Vercel (https://qurtiz-ai.vercel.app)
 
 When deploying to Vercel with your custom or assigned URL (e.g. `https://qurtiz-ai.vercel.app`):
 
@@ -162,6 +182,7 @@ In your Vercel Project Settings → **Environment Variables**, configure:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Your Supabase `anon` public key |
 | `DATABASE_URL` | Your Supabase Postgres Session Pooler URI (port 5432) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Your Supabase `service_role` secret key |
+| `CRON_SECRET` | Random server-only bearer secret for the two scheduled-job endpoints |
 | `GEMINI_API_KEY` | Your Google Gemini API Key |
 | `ENCRYPTION_KEY` | 32-byte hex / base64 string for AES-256 token encryption |
 | `QURTIZ_AI_MODEL` | `gemini-3.6-flash` (or your chosen model) |
@@ -174,13 +195,27 @@ If you connect Meta or Buffer on production:
 ### 8d. Applying Database Schema to Supabase (CRITICAL — Fixes "Something went wrong")
 When deploying to Vercel, Vercel builds the frontend and serverless functions, but **does not automatically execute database migrations on your remote Supabase database**. If tables are missing, the app crashes with *"Something went wrong"*.
 
-To initialize all tables, types, enums, indexes, and Row-Level Security policies in 10 seconds:
-1. Go to your **[Supabase Dashboard](https://supabase.com/dashboard)**.
-2. Select your project → click **SQL Editor** in the left sidebar.
-3. Click **New query**.
-4. Copy the entire contents of the **`supabase-schema.sql`** file (located at the root of this repository) and paste it into the editor.
-5. Click **Run** (or `Ctrl+Enter`).
-6. All 18 tables (`workspaces`, `workspace_members`, `content_items`, `brands`, `platform_connections`, `notifications`, `agent_runs`, etc.) and RLS policies will be created immediately.
+Use the versioned Drizzle migrations, which now load `.env.local` automatically:
+
+```sh
+npm run db:audit
+npm run db:migrate
+npm run db:validate
+```
+
+Do not replay `supabase-schema.sql` on an existing database: it is an outdated
+bootstrap and does not maintain migration history. For the legacy database
+whose manually applied changes bypassed history, see
+[database reconciliation and scheduler deployment](docs/DATABASE_SCHEDULER_REPAIR.md).
+Back up production before future migrations and verify the target project.
+
+Scheduled publishing on Vercel needs the committed `vercel.json`, a Production
+`CRON_SECRET`, minute-frequency cron support and an 800-second function budget.
+`/api/cron/publish` runs each minute; `/api/cron/maintenance` runs every five
+minutes. Deploying the source is required to register these jobs. Vercel Hobby's
+daily cron is unsuitable; use a persistent worker or an appropriate deployment
+configuration. Closing a browser is harmless; stopping the only persistent
+worker prevents execution until it restarts, while pending jobs remain in Postgres.
 
 ### 8e. Verify Live Deployment Health
 You can visit:
@@ -197,13 +232,12 @@ This endpoint checks:
 
 | Symptom | Fix |
 |---|---|
-| "Something went wrong" repeatedly on Vercel | 1. Open `https://qurtiz-ai.vercel.app/api/health` to see the exact issue.<br>2. Run `supabase-schema.sql` in Supabase SQL Editor if tables are missing.<br>3. Verify `DATABASE_URL` in Vercel is the Session Pooler URI (port 5432) with your correct DB password. |
+| "Something went wrong" repeatedly on Vercel | Sign in and check `/api/health`, verify the private database target, then audit/apply the versioned migrations and run `npm run db:validate`. Do not reset the database or replay the legacy bootstrap. |
 | `EMAXCONNSESSION: max clients reached` | 1. Go to Supabase Dashboard → Project Settings → Database.<br>2. Under Connection string, choose **Session** pooler (URI mode).<br>3. Verify the host is `aws-0-[region].pooler.supabase.com` and port is `5432`.<br>4. Update `DATABASE_URL` in Vercel Environment Variables and redeploy. |
 | Login page says configuration required | Supabase env vars missing in Vercel / `.env.local`; set and redeploy |
 | `DATABASE_URL is not configured` | Add it to Vercel Environment Variables; redeploy |
 | Migrations fail with auth.uid() error | You are not on a Supabase database — RLS policies require Supabase Postgres |
 | Chat shows Configuration Required | Add `GEMINI_API_KEY` and restart / redeploy |
 | `relation already exists` | Schema already applied; skip migrating again |
-
 
 

@@ -23,6 +23,7 @@ export function choosePostingSlot(policy: TimingPolicy, times: string[], occupie
     for (const time of times) {
       let slot: Date;
       try { slot = parseZonedDateTime(iso, time, policy.timezone); } catch { continue; }
+      if (!Number.isFinite(slot.getTime())) continue;
       if (hmInTz(policy.timezone, slot) !== time || dateIsoInTz(policy.timezone, slot) !== iso) continue;
       if (slot.getTime() <= now.getTime() || occupied.some(d => Math.abs(d.getTime() - slot.getTime()) < policy.minGapMinutes * 60_000)) continue;
       return slot;

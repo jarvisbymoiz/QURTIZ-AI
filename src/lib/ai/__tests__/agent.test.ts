@@ -188,7 +188,28 @@ describe("agent sequential multi-tool conversation", () => {
 
 
 describe("short chat with real agent instructions and schemas", () => {
-  it.each(["Change the caption of my last post", "Remove hashtags from this post", "Update the visual prompt", "Replace the second carousel slide", "Change this Reel caption"])("keeps the actual editing payload within the unchanged 8000-token limit: %s", async request => {
+  it.each([
+    // Verb-based (the original happy path).
+    "Change the caption of my last post",
+    "Remove hashtags from this post",
+    "Update the visual prompt",
+    "Replace the second carousel slide",
+    "Change this Reel caption",
+    // Natural phrasings that previously failed because the regex was too
+    // narrow. The model decides to call `edit_content` directly (the system
+    // prompt tells it to), so the schema list MUST include `edit_content`
+    // on the very first step, otherwise the SDK rejects the call with
+    // "attempted to call tool 'edit_content' which was not in request.tools".
+    "Make this post more engaging",
+    "Make the caption friendlier",
+    "Add a CTA to my last post",
+    "Fix the typo in this post",
+    "Tighten the headline on my last post",
+    "Use my usual style on the saved post",
+    "Edit my last post",
+    "Reword the headline",
+    "Polish the caption on this reel",
+  ])("pre-loads edit_content for natural-language edit requests: %s", async request => {
     mockedGetDb.mockReturnValue(makeFakeDb([]) as never);
     const lazy = createLazyChatTools(buildAgentTools({ workspaceId: "ws-test", userId: "user-test", runId: "run-test" }), request);
     const calls: LanguageModelV2CallOptions[] = [];

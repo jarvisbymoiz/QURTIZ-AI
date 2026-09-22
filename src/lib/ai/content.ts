@@ -6,7 +6,7 @@ import { z } from "zod";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { agentRuns, aiInsights, brands, contentItems, contentVariants } from "@/db/schema";
-import { estimateCostFromUsage, withRateLimitRetry, type ResolvedTextModel } from "@/lib/ai/provider";
+import { estimateCostFromUsage, RateLimitExceededError, withRateLimitRetry, type ResolvedTextModel } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
@@ -44,6 +44,44 @@ function tolerantStringArray(defaultValue: string[]) {
 const CONTENT_FORMATS = ["single_image", "carousel", "reel", "story", "text_post"] as const;
 
 /**
+ * Copywriting craft rules for captions — shared by all generation paths so
+ * captions read like a strong platform-native copywriter wrote them:
+ * audience-first, specific to the Brand Brain, and free of filler clichés.
+ */
+const CAPTION_CRAFT_RULES = `
+## Caption craft (write like the brand's best copywriter, not a content bot)
+1. Lead with the audience: open on a pain, desire, objection or outcome the target market actually feels (use the audience data in Brand Brain). Never open with the brand talking about itself.
+2. Be specific: use the brand's real offers, products, services, pricing, locations and results when relevant — specifics convert, vagueness does not.
+3. Structure every caption: scroll-stopping hook (≤12 words, earns the "more") → short value body (story/benefit/proof in tight lines, generous line breaks) → one clear CTA that matches the objective.
+4. CTA intent: match the objective exactly — sales/leads push to the offer, WhatsApp, website or contact from Brand Brain; engagement asks a real question people can answer in one line.
+5. Human rhythm: contractions, short sentences, active verbs, one idea per line. No corporate filler, no exclamation-stacking, no emoji walls (0-3 emojis max, purposeful).
+6. NEVER use generic openers or clichés: "Exciting news", "Check this out", "We are thrilled", "Don't miss out", "Level up", "Game changer", "Unlock", "Introducing".
+7. Platform fit: Instagram = strong first line above the fold, scannable structure, save/share-worthy framing, 3-8 focused hashtags; Facebook = warmer conversational tone, can run longer, 0-3 hashtags, URL/phone in first comment when promotion-heavy.
+8. Hashtags are specific to the niche + locality + offer (never #instagood-style filler).
+9. The firstComment adds something real: the link, the phone/WhatsApp, extra hashtags, or a reply-hook — never repeats the caption.`;
+
+/**
+ * Creative-direction bar for visual prompts — turns the old one-liner
+ * "description of the visual" into a designer-executable brief.
+ */
+const VISUAL_DIRECTION_BAR = `
+## Visual direction bar (visualConcept + slide prompts)
+Write the visualConcept as a professional creative-direction brief a designer could execute without asking questions. Cover, where applicable:
+- overall creative concept and visual storytelling (ONE clear idea, readable in under 2 seconds at feed size)
+- platform + format awareness: aspect ratio and, for carousels, slide count and narrative arc
+- layout & composition, and the text hierarchy (what the eye sees first → second → third)
+- the EXACT headline/copy and CTA text that must appear in the design (never the full caption)
+- typography direction (e.g. oversized serif headline + small sans support)
+- brand colors, background style, design theme and mood
+- icon/graphic style (one consistent visual language)
+- CTA placement, and product/offer/pricing presentation where relevant
+- trust highlights (guarantees, ratings, delivery) when the offer needs reassurance
+- WhatsApp/contact/website details from Brand Brain when the objective is promotional
+- a reserved clean space for the logo (the real logo is composited later — never draw one)
+- what to avoid (no garbled text, no logos, no watermarks, no clutter)
+Length: 4-8 dense, specific sentences. Never emit a shapeless one-liner like "A 5-slide carousel about X".`;
+
+/**
  * Format is mapped AFTER parse: models drift on format naming ("video",
  * "post", …) and one unknown value must not fail the whole response —
  * unknown values fall back to "single_image" here, so post-parse the field
@@ -57,13 +95,13 @@ function tolerantFormat() {
 }
 
 export const generatedContentSchema = z.object({
-  hook: z.string().min(1).describe("Scroll-stopping opening line"),
-  mainCopy: z.string().min(1).describe("Core message body shared across platforms"),
-  cta: tolerantString("").describe("Call to action, consistent with brand rules"),
-  firstComment: tolerantString("").describe("A first comment the brand should post under its own content: adds hashtags/extra context/CTA link. Keep it natural, 1-2 sentences."),
-  hashtags: z.array(z.string()).min(1).max(15).describe("Hashtags without the # symbol"),
+  hook: z.string().min(1).describe("Scroll-stopping opening line (≤12 words, specific, human — no clichés)"),
+  mainCopy: z.string().min(1).describe("Core message body shared across platforms: audience-first, specific, structured"),
+  cta: tolerantString("").describe("Call to action matching the objective, using brand contact/WhatsApp/website where relevant"),
+  firstComment: tolerantString("").describe("A first comment the brand should post under its own content: adds the link, phone/WhatsApp, extra hashtags or a reply-hook. Keep it natural, 1-2 sentences."),
+  hashtags: z.array(z.string()).min(1).max(15).describe("Niche/locality/offer-specific hashtags without the # symbol (no filler tags)"),
   keywords: tolerantStringArray([]).describe("SEO/keyword terms covered"),
-  visualConcept: tolerantString("").describe("Description of the visual to create"),
+  visualConcept: tolerantString("").describe("Full creative-direction brief for the visual: overall concept + visual storytelling, platform/format + aspect ratio, layout & composition, text hierarchy, EXACT headline and CTA text to render, typography direction, brand colors/background/mood, icon/graphic style, CTA placement, product/offer/pricing presentation, WhatsApp/contact details when promotional, reserved logo space, and what to avoid. 4-8 specific sentences — never a one-liner."),
   // Scores are intentionally unbounded in the schema and clamped in code
   // (clampAiScore): strict min/max only gives weak models another way to
   // fail validation.
@@ -73,7 +111,7 @@ export const generatedContentSchema = z.object({
     z.object({
       platform: z.enum(["facebook", "instagram"]),
       format: tolerantFormat(),
-      caption: z.string().min(1).describe("Platform-adapted caption. Reels get shorter, punchier captions."),
+      caption: z.string().min(1).describe("Complete, platform-native caption: hook line + line-broken value body + matching CTA. Instagram is scannable and save-worthy; Facebook is warmer/conversational. Reels get shorter, punchier captions. Never generic filler."),
       hashtags: tolerantStringArray([]),
       cta: tolerantString(""),
       script: z
@@ -82,7 +120,7 @@ export const generatedContentSchema = z.object({
           scenes: z
             .array(z.object({
               text: z.string().optional().describe("Voiceover/dialogue for the scene"),
-              visualDirection: z.string().optional().describe("What is shown on screen"),
+              visualDirection: z.string().optional().describe("Detailed on-screen visual direction: setting, subject action, camera move, and text treatment kept in ONE visual system across scenes"),
               onScreenText: z.string().optional(),
               transition: z.string().optional().describe("Transition into the next scene"),
               durationSeconds: z.number().optional(),
@@ -98,13 +136,13 @@ export const generatedContentSchema = z.object({
         .array(
           z.object({
             index: z.number().int().min(1),
-            headline: z.string().max(120),
-            visualPrompt: z.string().max(400),
+            headline: z.string().max(120).describe("Exact headline text rendered on this slide"),
+            visualPrompt: z.string().max(1200).describe("Detailed art direction for THIS slide: exact slide text, composition/layout, shared design system (same palette/typography/motif/margins as the set), icon/graphic treatment, mood. 2-4 specific sentences, distinct from other slides; the final slide centers the CTA."),
           }),
         )
         .max(10)
         .optional()
-        .describe("For carousel format: per-slide visual prompts. Omit otherwise."),
+        .describe("For carousel format: per-slide visual prompts in ONE consistent design system with a clear narrative arc (hook cover → distinct value slides → CTA closer). Omit otherwise."),
     }),
   ).min(1),
 });
@@ -281,6 +319,13 @@ async function generateContentObjectWithFallbacks(args: {
     // else (rate limit, timeout, HTTP error) keeps its own meaning.
     if (!NoObjectGeneratedError.isInstance(primaryError)) throw primaryError;
 
+    // Daily quota / hard-quota errors must NOT trigger another model call —
+    // each retry burns the same scarce quota and the user is blocked until
+    // reset regardless. Surface the actionable message immediately.
+    if (primaryError instanceof RateLimitExceededError) {
+      throw primaryError;
+    }
+
     let lastRaw = primaryError.text ?? "";
     let lastIssues = "the model returned no usable structured response";
 
@@ -351,8 +396,13 @@ ${args.memoryLines.length > 0 ? args.memoryLines : "(none)"}
 5. Never invent statistics, testimonials, or product claims that are not in the Brand Brain.
 6. Hashtags: no # symbol in the strings.
 7. Always produce a firstComment (useful addition, not a duplicate of the caption).
-8. Carousel variants: provide slides (3-8) each with a distinct visualPrompt describing that slide's image.
-9. Reel variants: produce a complete timed script - hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.`;
+8. Carousel variants: provide slides (3-8), each with a distinct visualPrompt in ONE consistent design system (identical palette/typography/motif/margins on every slide) and a clear narrative arc: slide 1 is the hook-cover, middle slides each advance ONE distinct idea (never repetitive), the final slide lands the strongest CTA.
+9. Reel variants: produce a complete timed script - hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.
+10. Brand-aware specifics: where Brand Brain provides the brand name, colors, contact number, WhatsApp, website, pricing or offer details, weave them into the caption CTA and the visual direction automatically — never ask the user for details already in Brand Brain.
+
+${CAPTION_CRAFT_RULES}
+
+${VISUAL_DIRECTION_BAR}`;
 }
 
 /**

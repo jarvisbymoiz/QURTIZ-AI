@@ -47,9 +47,14 @@ export function zonedToUtc(
 
 /** Parse "YYYY-MM-DD" + "HH:mm" in tz → UTC Date. */
 export function parseZonedDateTime(dateIso: string, timeStr: string, tz: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeStr) || !isValidTimezone(tz)) return new Date(NaN);
   const [y, m, d] = dateIso.split("-").map(Number);
   const [h, min] = timeStr.split(":").map(Number);
-  return zonedToUtc(y, m, d, h, min, tz);
+  const instant = zonedToUtc(y, m, d, h, min, tz);
+  // Invalid calendar dates and nonexistent DST wall times must not silently
+  // move to a different date/hour. Ambiguous fall-back times use the
+  // deterministic offset selected by zonedToUtc.
+  return dateIsoInTz(tz, instant) === dateIso && hmInTz(tz, instant) === timeStr ? instant : new Date(NaN);
 }
 
 /**

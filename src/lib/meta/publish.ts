@@ -19,6 +19,14 @@ export type PublishResult =
   | { ok: true; postId: string; permalink: string | null }
   | { ok: false; reason: string; message: string };
 
+// Only an explicit provider rejection is retryable. A timeout/missing ID
+// remains an uncertain delivery and must never be automatically replayed.
+function mainPostErrorReason(error: MetaGraphErrorPayload): string {
+  if ([4, 17, 32, 613].includes(error.code ?? 0)) return "rate_limited";
+  if (error.is_transient === true) return "transient_provider";
+  return "graph_error";
+}
+
 async function graphPost(
   path: string,
   token: string,
@@ -40,7 +48,7 @@ async function publishFacebookReel(input: PublishInput): Promise<PublishResult> 
     upload_url?: string;
     error?: MetaGraphErrorPayload;
   };
-  if (start.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(start.error) };
+  if (start.error) return { ok: false, reason: mainPostErrorReason(start.error), message: formatMetaGraphError(start.error) };
   if (!start.video_id || !start.upload_url || !start.upload_url.startsWith("https://rupload.facebook.com/")) {
     return { ok: false, reason: "graph_error", message: "Facebook did not return a valid Reel upload session." };
   }
@@ -61,7 +69,7 @@ async function publishFacebookReel(input: PublishInput): Promise<PublishResult> 
     video_state: "PUBLISHED",
     description: input.message,
   }) as { success?: boolean; error?: MetaGraphErrorPayload };
-  if (finish.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(finish.error) };
+  if (finish.error) return { ok: false, reason: mainPostErrorReason(finish.error), message: formatMetaGraphError(finish.error) };
   if (finish.success !== true) return { ok: false, reason: "graph_error", message: "Facebook did not accept the Reel for publishing." };
   return { ok: true, postId: start.video_id, permalink: null };
 }
@@ -137,7 +145,7 @@ export async function publishPost(input: PublishInput): Promise<PublishResult> {
           file_url: input.videoUrl,
           description: input.message,
         });
-        if (r.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(r.error) };
+        if (r.error) return { ok: false, reason: mainPostErrorReason(r.error), message: formatMetaGraphError(r.error) };
         postId = r.id;
       } else if (imageUrls.length > 1) {
         // Multi-photo post: upload each photo unpublished, then attach them all
@@ -164,25 +172,25 @@ export async function publishPost(input: PublishInput): Promise<PublishResult> {
           message: input.message,
           attached_media: JSON.stringify(mediaIds.map((id) => ({ media_fbid: id }))),
         });
-        if (feed.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(feed.error) };
+        if (feed.error) return { ok: false, reason: mainPostErrorReason(feed.error), message: formatMetaGraphError(feed.error) };
         postId = feed.id;
       } else if (imageUrls.length === 1) {
         const r = await graphPost(`${input.pageId}/photos`, input.pageToken, {
           url: imageUrls[0],
           caption: input.message,
         });
-        if (r.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(r.error) };
+        if (r.error) return { ok: false, reason: mainPostErrorReason(r.error), message: formatMetaGraphError(r.error) };
         postId = r.id;
       } else {
         const r = await graphPost(`${input.pageId}/feed`, input.pageToken, {
           message: input.message,
         });
-        if (r.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(r.error) };
+        if (r.error) return { ok: false, reason: mainPostErrorReason(r.error), message: formatMetaGraphError(r.error) };
         postId = r.id;
       }
 
       if (!postId) {
-        return { ok: false, reason: "graph_error", message: "Facebook returned no post ID." };
+        return { ok: false, reason: "unknown_outcome", message: "Facebook returned no post ID; verify delivery before retrying." };
       }
 
       const postDetails = await graphGet(
@@ -224,7 +232,7 @@ export async function publishPost(input: PublishInput): Promise<PublishResult> {
         video_url: input.videoUrl,
         caption: input.message,
       });
-      if (container.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(container.error) };
+      if (container.error) return { ok: false, reason: mainPostErrorReason(container.error), message: formatMetaGraphError(container.error) };
       containerId = container.id;
     } else if (imageUrls.length > 1) {
       const childIds: string[] = [];
@@ -250,14 +258,14 @@ export async function publishPost(input: PublishInput): Promise<PublishResult> {
         children: childIds.join(","),
         caption: input.message,
       });
-      if (parent.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(parent.error) };
+      if (parent.error) return { ok: false, reason: mainPostErrorReason(parent.error), message: formatMetaGraphError(parent.error) };
       containerId = parent.id;
     } else {
       const container = await graphPost(`${input.igUserId}/media`, input.pageToken, {
         image_url: imageUrls[0],
         caption: input.message,
       });
-      if (container.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(container.error) };
+      if (container.error) return { ok: false, reason: mainPostErrorReason(container.error), message: formatMetaGraphError(container.error) };
       containerId = container.id;
     }
 
@@ -275,9 +283,9 @@ export async function publishPost(input: PublishInput): Promise<PublishResult> {
     const published = await graphPost(`${input.igUserId}/media_publish`, input.pageToken, {
       creation_id: containerId,
     });
-    if (published.error) return { ok: false, reason: "graph_error", message: formatMetaGraphError(published.error) };
+    if (published.error) return { ok: false, reason: mainPostErrorReason(published.error), message: formatMetaGraphError(published.error) };
     if (!published.id) {
-      return { ok: false, reason: "graph_error", message: "Instagram publish returned no published media ID." };
+      return { ok: false, reason: "unknown_outcome", message: "Instagram publish returned no published media ID; verify delivery before retrying." };
     }
 
     const mediaDetails = await graphGet(

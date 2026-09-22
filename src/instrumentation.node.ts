@@ -27,6 +27,12 @@ export async function registerNode() {
       await boss.schedule(QUEUES.autopilotLoop, "* * * * *");
       // Chat run sweep: every minute, recover stuck chat-kind runs
       await boss.schedule(QUEUES.chatRunSweep, "* * * * *");
+      // Media cleanup: hourly. Soft-deletes + abandoned uploads + workspace
+      // deletes purge Storage + DB rows on this cadence (or every minute
+      // during dev). Lower than every-minute to avoid wasted ticks on
+      // empty queues; grace windows are 1h+ for everything except abandoned
+      // uploads (which are still acceptable at 1h lag).
+      await boss.schedule(QUEUES.mediaCleanup, "0 * * * *");
       g.__qurtizSchedulerReady = true;
       console.log("[qurtiz] background scheduler started");
     } catch (e) {
@@ -34,6 +40,9 @@ export async function registerNode() {
       console.error("[qurtiz] scheduler init skipped:", e instanceof Error ? e.message : e);
     }
   } else {
+    if (!process.env.CRON_SECRET) {
+      console.error("[qurtiz] Scheduled publishing is unavailable: configure CRON_SECRET and deploy vercel.json cron jobs, or run a persistent worker.");
+    }
     g.__qurtizSchedulerReady = true;
   }
 

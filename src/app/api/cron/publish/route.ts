@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { publishDueScan, autopilotLoop } from "@/lib/jobs/workflows";
+import { publishDueScan } from "@/lib/jobs/workflows";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // 60s for Vercel Pro/Hobby
+export const runtime = "nodejs";
+// Multi-image uploads and Reel processing exceed 60 seconds. Requires a
+// Vercel plan/runtime supporting this duration; persistent workers also work.
+export const maxDuration = 800;
 
 export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
@@ -16,9 +19,12 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    await publishDueScan();
-    await autopilotLoop();
-    return NextResponse.json({ ok: true, timestamp: new Date().toISOString() });
+    // A bounded parallel batch lets sibling platform jobs start together,
+    // without adding several full media-processing budgets sequentially.
+    // Overlapping cron invocations safely lose already-taken row claims.
+    const scan = await publishDueScan({ limit: 5, parallel: true, reconcile: false });
+    console.info("[cron/publish]", scan);
+    return NextResponse.json({ ok: scan.interrupted === 0, ...scan, timestamp: new Date().toISOString() }, { status: scan.interrupted ? 500 : 200 });
   } catch (error) {
     console.error("[cron/publish error]", error);
     return NextResponse.json(

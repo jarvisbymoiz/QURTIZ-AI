@@ -399,7 +399,9 @@ const DEFAULT_SPEC: FormatSpec = {
   note: "Default social feed format.",
 };
 
-function formatSpecFor(platform: string, contentType: string): FormatSpec {
+export type { FormatSpec };
+
+export function formatSpecFor(platform: string, contentType: string): FormatSpec {
   if (contentType === "text_post") return FORMAT_SPECS["text_post"];
   return FORMAT_SPECS[`${platform}:${contentType}`] ?? DEFAULT_SPEC;
 }

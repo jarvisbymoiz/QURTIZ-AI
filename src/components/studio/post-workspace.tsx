@@ -279,8 +279,10 @@ export function PostWorkspace({
 
   async function openMasterPrompt() {
     const r = await buildMasterPromptAction(item.id, variant?.id);
-    if (r.ok) setMasterPrompt(r.prompt);
-    else toast.error(r.error);
+    if (r.ok) {
+      setMasterPrompt(r.prompt);
+      if (r.source === "template") toast.info("AI generator unavailable — showing the built-in premium template prompt.");
+    } else toast.error(r.error);
   }
 
   function uploadFiles(files: FileList | null, slideIndex?: number) {
