@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { notFound } from "next/navigation";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { UIMessage } from "ai";
@@ -17,7 +18,7 @@ import {
 
 export const metadata = { title: "AI Chat" };
 
-export default async function ThreadPage({
+async function ThreadPage({
   params,
   searchParams,
 }: {
@@ -87,3 +88,5 @@ export default async function ThreadPage({
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/chat/[threadId]/page.tsx", ThreadPage);

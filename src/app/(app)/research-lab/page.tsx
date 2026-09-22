@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiInsights, researchItems } from "@/db/schema";
@@ -9,7 +10,7 @@ import { ResearchClient } from "@/components/research/research-client";
 
 export const metadata = { title: "Research Lab" };
 
-export default async function ResearchLabPage() {
+async function ResearchLabPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -42,3 +43,5 @@ export default async function ResearchLabPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/research-lab/page.tsx", ResearchLabPage);

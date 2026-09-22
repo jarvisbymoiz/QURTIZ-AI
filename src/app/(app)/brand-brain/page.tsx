@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { and, desc, eq, isNull } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brandMemory, brands } from "@/db/schema";
@@ -11,7 +12,7 @@ import { Lock } from "lucide-react";
 
 export const metadata = { title: "Brand Brain" };
 
-export default async function BrandBrainPage() {
+async function BrandBrainPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -54,3 +55,5 @@ export default async function BrandBrainPage() {
 }
 
 
+
+export default withSchemaGuard("(app)/brand-brain/page.tsx", BrandBrainPage);

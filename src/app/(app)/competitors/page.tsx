@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { competitorSnapshots, competitors, platformConnections } from "@/db/schema";
@@ -9,7 +10,7 @@ import { CompetitorsClient } from "@/components/competitors/competitors-client";
 
 export const metadata = { title: "Competitors" };
 
-export default async function CompetitorsPage() {
+async function CompetitorsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -53,3 +54,5 @@ export default async function CompetitorsPage() {
     </div>
   );
 }
+
+export default withSchemaGuard("(app)/competitors/page.tsx", CompetitorsPage);

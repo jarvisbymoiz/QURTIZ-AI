@@ -1,3 +1,4 @@
+import { withSchemaGuard } from "@/components/system/schema-guard";
 import { Suspense } from "react";
 import { and, eq } from "drizzle-orm";
 import { Plug } from "lucide-react";
@@ -28,7 +29,7 @@ const BUFFER_REQUIREMENTS = [
   "Buffer owns channel auth — after authorizing here, link pages/channels inside Buffer and reconnect so they appear below",
 ];
 
-export default async function ConnectionsPage() {
+async function ConnectionsPage() {
   const ctx = await requireWorkspace();
   const db = getDb();
 
@@ -153,3 +154,5 @@ export default async function ConnectionsPage() {
   );
 }
 
+
+export default withSchemaGuard("(app)/connections/page.tsx", ConnectionsPage);
