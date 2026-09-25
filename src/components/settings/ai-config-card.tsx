@@ -7,6 +7,7 @@ import {
   clearWorkspaceAIConfigAction,
   getWorkspaceAIConfigAction,
   saveWorkspaceAIConfigAction,
+  testCloudflareModelAction,
   type AIConfigView,
 } from "@/server/actions/ai-config";
 import {
@@ -184,6 +185,7 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
 
   const [saving, startSaving] = useTransition();
   const [removing, startRemoving] = useTransition();
+  const [testing, startTesting] = useTransition();
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
 
   async function load() {
@@ -291,6 +293,14 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
     });
   }
 
+  function testModel(side: "text" | "image") {
+    startTesting(async () => {
+      const result = await testCloudflareModelAction(side);
+      if (result.ok) toast.success(`Cloudflare ${side} model and credentials are valid`);
+      else toast.error(result.error);
+    });
+  }
+
   const notConfigured = config === null && loadError === null;
 
   return (
@@ -384,7 +394,9 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                     placeholder={modelPlaceholder(textProvider, "text")}
                     required
                     disabled={!editable}
+                    list={textProvider === "cloudflare" ? "cloudflare-text-model-suggestions" : undefined}
                   />
+                  {textProvider === "cloudflare" ? <datalist id="cloudflare-text-model-suggestions"><option value="@cf/meta/llama-3.1-8b-instruct" /></datalist> : null}
                 </div>
               </div>
               <BaseUrlField
@@ -400,6 +412,8 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                   <Input id="text-account-id" value={textAccountId} onChange={e => setTextAccountId(e.target.value)}
                     placeholder="32-character Account ID" required disabled={!editable} autoComplete="off" />
                   <p className="text-xs text-muted-foreground">The server constructs the account’s /ai/v1 chat endpoint.</p>
+                  {config?.textProvider === "cloudflare" ? <Button type="button" size="sm" variant="outline" disabled={testing || textModel !== config.textModel || textAccountId !== cloudflareAccountIdFromBaseUrl(config.textBaseUrl ?? "", "text")}
+                    onClick={() => testModel("text")}>{testing ? "Testing…" : "Test saved text model"}</Button> : null}
                 </div>
               ) : null}
               <div className="space-y-2">
@@ -448,7 +462,9 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                     placeholder={modelPlaceholder(imageProvider, "image")}
                     required
                     disabled={!editable}
+                    list={imageProvider === "cloudflare" ? "cloudflare-image-model-suggestions" : undefined}
                   />
+                  {imageProvider === "cloudflare" ? <datalist id="cloudflare-image-model-suggestions"><option value="@cf/black-forest-labs/flux-1-schnell" /><option value="@cf/stabilityai/stable-diffusion-xl-base-1.0" /><option value="@cf/leonardo/lucid-origin" /><option value="@cf/leonardo/phoenix-1.0" /><option value="@cf/black-forest-labs/flux-2-dev" /></datalist> : null}
                 </div>
               </div>
               <BaseUrlField
@@ -463,7 +479,9 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                   <Label htmlFor="image-account-id">Cloudflare Account ID</Label>
                   <Input id="image-account-id" value={imageAccountId} onChange={e => setImageAccountId(e.target.value)}
                     placeholder="32-character Account ID" required disabled={!editable} autoComplete="off" />
-                  <p className="text-xs text-muted-foreground">Supports @cf/black-forest-labs/flux-1-schnell and @cf/stabilityai/stable-diffusion-xl-base-1.0. The server constructs the native /ai/run endpoint.</p>
+                  <p className="text-xs text-muted-foreground">Enter any Workers AI image model ID in @cf/author/model format. Suggestions are optional. The server constructs the native /ai/run endpoint.</p>
+                  {config?.imageProvider === "cloudflare" ? <Button type="button" size="sm" variant="outline" disabled={testing || imageModel !== config.imageModel || imageAccountId !== cloudflareAccountIdFromBaseUrl(config.imageBaseUrl ?? "", "image")}
+                    onClick={() => testModel("image")}>{testing ? "Testing…" : "Test saved image model"}</Button> : null}
                 </div>
               ) : null}
               <div className="space-y-2">

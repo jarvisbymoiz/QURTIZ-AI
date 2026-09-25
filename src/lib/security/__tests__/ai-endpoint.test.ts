@@ -32,5 +32,8 @@ describe("AI endpoint boundary", () => {
     vi.stubEnv("AI_ALLOWED_BASE_URLS", "https://private-gateway.example/v1");
     expect(() => assertAllowedAiEndpoint("https://private-gateway.example/v1/")).not.toThrow();
     expect(() => assertAllowedAiEndpoint("https://private-gateway.example/admin")).toThrow();
+    vi.stubEnv("AI_ALLOWED_BASE_URLS", "http://example.com/v1,https://127.0.0.1/v1");
+    expect(() => assertAllowedAiEndpoint("http://example.com/v1")).toThrow(/HTTPS/);
+    expect(() => assertAllowedAiEndpoint("https://127.0.0.1/v1")).toThrow(/private-network/);
   });
 });

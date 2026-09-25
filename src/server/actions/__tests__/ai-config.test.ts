@@ -12,7 +12,7 @@ vi.mock("@/db", () => ({ getDb: () => ({
 vi.mock("@/lib/workspace", () => ({ getActiveContext: vi.fn(async () => ({ workspaceId: "ws-test" })) }));
 vi.mock("@/lib/security/rate-limit", () => ({ rateLimit: vi.fn(() => ({ allowed: true })) }));
 
-import { saveWorkspaceAIConfigAction } from "@/server/actions/ai-config";
+import { saveWorkspaceAIConfigAction, testCloudflareModelAction } from "@/server/actions/ai-config";
 
 const accountId = "0123456789abcdef0123456789abcdef";
 const input = {
@@ -39,6 +39,26 @@ describe("Cloudflare settings save action", () => {
     });
     expect(result).toEqual({ ok: true });
     expect(state.saved).toMatchObject({ textBaseUrl: `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`, imageBaseUrl: null });
+  });
+  it("accepts a newer Cloudflare image model and tests its saved ID with the provider", async () => {
+    const model = "@cf/leonardo/lucid-origin";
+    expect(await saveWorkspaceAIConfigAction({ ...input, imageModel: model })).toEqual({ ok: true });
+    state.existing = state.saved;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true, result: { input: {}, output: {} } }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await testCloudflareModelAction("image")).toEqual({ ok: true });
+    const [url, init] = (fetchMock.mock.calls as unknown as [string, RequestInit][])[0];
+    expect(url).toContain(`/models/schema?model=${encodeURIComponent(model)}`);
+    expect(init.headers).toMatchObject({ Authorization: "Bearer cloudflare-token" });
+    expect(init.redirect).toBe("error");
+    vi.unstubAllGlobals();
+  });
+  it("shows Cloudflare's model error from the test action", async () => {
+    expect(await saveWorkspaceAIConfigAction({ ...input, imageModel: "@cf/vendor/new-model" })).toEqual({ ok: true });
+    state.existing = state.saved;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [{ message: "Model is unavailable for this account" }] }), { status: 404, headers: { "Content-Type": "application/json" } })));
+    expect(await testCloudflareModelAction("image")).toMatchObject({ ok: false, error: expect.stringContaining("Model is unavailable for this account") });
+    vi.unstubAllGlobals();
   });
   it("rejects an invalid account ID before any database write", async () => {
     const result = await saveWorkspaceAIConfigAction({ ...input, imageAccountId: "bad" });

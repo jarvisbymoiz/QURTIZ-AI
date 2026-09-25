@@ -126,11 +126,12 @@ describe("prepareConfigRow (encryption + validation)", () => {
     expect(resolveImageTarget(config({ imageProvider: "cloudflare", imageModel: model,
       imageBaseUrl: row.imageBaseUrl!, imageApiKey: "cloudflare-token" })).provider).toBe("cloudflare");
   });
-  it("rejects invalid Cloudflare account IDs, unsupported image models and arbitrary URLs", () => {
+  it("rejects invalid Cloudflare account IDs, malformed model IDs and arbitrary URLs", () => {
     const input = { textProvider: "openai", textModel: "gpt-4o-mini", textApiKey: "text-key",
       imageProvider: "cloudflare", imageModel: "@cf/black-forest-labs/flux-1-schnell", imageApiKey: "image-key" };
     expect(saveAIConfigInputSchema.safeParse({ ...input, imageAccountId: "bad" }).success).toBe(false);
     expect(saveAIConfigInputSchema.safeParse({ ...input, imageAccountId: "a".repeat(32), imageModel: "gpt-image-1" }).success).toBe(false);
+    expect(saveAIConfigInputSchema.safeParse({ ...input, imageAccountId: "a".repeat(32), imageModel: "@cf/leonardo/lucid-origin" }).success).toBe(true);
     expectAIConfigError(() => prepareConfigRow({ workspaceId: "ws", ...input,
       imageBaseUrl: "https://evil.test/client/v4/accounts/" + "a".repeat(32) + "/ai" }), /Cloudflare image/);
   });

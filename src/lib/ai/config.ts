@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { workspaceAiConfig } from "@/db/schema";
 import { providerRequiresBaseUrl } from "@/lib/ai/provider-catalog";
-import { cloudflareAccountIdFromBaseUrl, isCloudflareModel, isSupportedCloudflareImageModel } from "@/lib/ai/cloudflare";
+import { cloudflareAccountIdFromBaseUrl, isCloudflareModel } from "@/lib/ai/cloudflare";
 import { decryptToken, encryptToken } from "@/lib/crypto/tokens";
 import {
   AIConfigError,
@@ -200,7 +200,7 @@ export function prepareConfigRow(
   if (input.textProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(input.textBaseUrl ?? "", "text") || !isCloudflareModel(input.textModel))) {
     throw new AIConfigError("INVALID_CONFIG", "Cloudflare text requires an account-scoped /ai/v1 URL and an @cf/... model.");
   }
-  if (input.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(input.imageBaseUrl ?? "", "image") || !isSupportedCloudflareImageModel(input.imageModel))) {
+  if (input.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(input.imageBaseUrl ?? "", "image") || !isCloudflareModel(input.imageModel))) {
     throw new AIConfigError("INVALID_CONFIG", "Cloudflare image requires an account-scoped /ai URL and a supported image model.");
   }
   // Base URL rules follow the catalog: presets ship a default (empty stored

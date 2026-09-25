@@ -61,13 +61,13 @@ describe("Cloudflare Workers AI native image adapter", () => {
     }
   });
 
-  it("rejects malformed output, unsupported models and unsafe endpoints before storage", async () => {
+  it("rejects malformed output and unsafe endpoints before storage", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true, result: { image: "not an image!" } }),
       { headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const request = { provider: "cloudflare" as const, modelId: flux, baseUrl, apiKey: token, prompt: "A leaf" };
     expect(await generateImage(request)).toMatchObject({ ok: false, message: expect.stringContaining("no valid image") });
-    expect(await generateImage({ ...request, modelId: "@cf/unknown/not-an-image" })).toMatchObject({ ok: false, message: expect.stringContaining("Unsupported Cloudflare image model") });
+    expect(await generateImage({ ...request, modelId: "not-a-workers-ai-model" })).toMatchObject({ ok: false, message: expect.stringContaining("Invalid Workers AI model ID") });
     expect(await generateImage({ ...request, baseUrl: "https://evil.test/ai" })).toMatchObject({ ok: false, message: expect.stringContaining("Invalid Cloudflare") });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -78,7 +78,28 @@ describe("Cloudflare Workers AI native image adapter", () => {
     expect(await generateImage(request)).toMatchObject({ ok: false, message: expect.stringContaining("lacks Workers AI permission") });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ errors: [{ message: "Model not found" }] }),
       { status: 404, headers: { "Content-Type": "application/json" } })));
-    expect(await generateImage(request)).toMatchObject({ ok: false, message: expect.stringContaining("image model was not found") });
+    expect(await generateImage(request)).toMatchObject({ ok: false, message: expect.stringContaining("Model not found") });
+  });
+
+  it.each(["@cf/leonardo/lucid-origin", "@cf/leonardo/phoenix-1.0", "@cf/another-provider/new-image-model"])("passes configurable model %s to Cloudflare", async (modelId) => {
+    const source = await jpeg();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true, result: { image: source.toString("base64") } }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await generateImage({ provider: "cloudflare", modelId, baseUrl, apiKey: token, prompt: "A new image" });
+    expect(result.ok).toBe(true);
+    expect((fetchMock.mock.calls as unknown as [string, RequestInit][])[0][0]).toBe(`${baseUrl}/run/${modelId}`);
+  });
+
+  it("sends FLUX.2 models as multipart form data", async () => {
+    const source = await jpeg();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ result: { image: source.toString("base64") } }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await generateImage({ provider: "cloudflare", modelId: "@cf/black-forest-labs/flux-2-dev", baseUrl, apiKey: token, prompt: "A mountain" });
+    expect(result.ok).toBe(true);
+    const init = (fetchMock.mock.calls as unknown as [string, RequestInit][])[0][1];
+    expect(init.body).toBeInstanceOf(FormData);
+    expect((init.body as FormData).get("prompt")).toBe("A mountain");
+    expect(init.headers).not.toHaveProperty("Content-Type");
   });
 
   it("does not silently discard Brand Brain references unsupported by FLUX", async () => {

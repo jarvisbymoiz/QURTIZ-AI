@@ -1,7 +1,7 @@
 import "server-only";
 
 import sharp from "sharp";
-import { cloudflareAccountIdFromBaseUrl, isSupportedCloudflareImageModel } from "@/lib/ai/cloudflare";
+import { cloudflareAccountIdFromBaseUrl, isCloudflareModel } from "@/lib/ai/cloudflare";
 import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 import type { ImageGenResult, ImageReference } from "@/lib/ai/image";
 
@@ -24,7 +24,7 @@ function providerError(status: number, detail: string, apiKey: string): ImageGen
   }
   if (status === 401) return { ok: false, reason: "api_error", message: "Cloudflare API token is invalid or revoked. Re-enter it in AI Settings." };
   if (status === 403) return { ok: false, reason: "api_error", message: "Cloudflare token lacks Workers AI permission for this account. Check its account scope and Workers AI Read/Edit permissions." };
-  if (status === 404 && /model/i.test(safeDetail)) return { ok: false, reason: "api_error", message: "Cloudflare image model was not found or is unavailable for this account." };
+  if (status === 404 && /model/i.test(safeDetail)) return { ok: false, reason: "api_error", message: `Cloudflare rejected the image model: ${safeDetail}` };
   if (status === 404) return { ok: false, reason: "api_error", message: "Cloudflare account or image model was not found. Check the Account ID and model name." };
   if (status === 429 || status === 402 || /quota|credit|billing|rate limit/i.test(detail)) {
     return { ok: false, reason: "quota_or_billing", message: "Cloudflare Workers AI rate limit or quota reached. Check usage and billing, then retry." };
@@ -63,28 +63,39 @@ export async function generateCloudflareImage(args: {
 }): Promise<ImageGenResult> {
   const accountId = cloudflareAccountIdFromBaseUrl(args.baseUrl, "image");
   if (!accountId) return { ok: false, reason: "api_error", message: "Invalid Cloudflare Account ID or image endpoint. Re-save AI Settings." };
-  if (!isSupportedCloudflareImageModel(args.modelId)) {
-    return { ok: false, reason: "api_error", message: "Unsupported Cloudflare image model. Choose FLUX.1 schnell or Stable Diffusion XL in AI Settings." };
+  if (!isCloudflareModel(args.modelId)) {
+    return { ok: false, reason: "api_error", message: "Invalid Workers AI model ID. Enter @cf/author/model in AI Settings." };
   }
   if (args.prompt.length > 2048 && args.modelId === FLUX) {
     return { ok: false, reason: "api_error", message: "FLUX.1 schnell accepts image prompts up to 2,048 characters." };
   }
   const references = args.references ?? [];
-  if (references.length > 0 && (args.modelId === FLUX || references.length > 1)) {
-    return { ok: false, reason: "api_error", message: args.modelId === FLUX
-      ? "FLUX.1 schnell does not accept reference images. Use Stable Diffusion XL or remove the Brand Brain image reference."
-      : "Stable Diffusion XL accepts one reference image. Keep one avatar or reference image in Brand Brain." };
+  if (references.length > 0 && args.modelId === FLUX) {
+    return { ok: false, reason: "api_error", message: "FLUX.1 schnell does not accept reference images. Choose a model with image input or remove the reference." };
+  }
+  if (references.length > 1 && args.modelId === SDXL) {
+    return { ok: false, reason: "api_error", message: "Stable Diffusion XL accepts one reference image." };
   }
   assertAllowedAiEndpoint(args.baseUrl);
+  // FLUX.2 REST models require multipart form data. Other Workers AI models
+  // accept JSON prompts; Cloudflare validates model-specific optional fields.
+  const multipart = /^@cf\/black-forest-labs\/flux-2-/i.test(args.modelId);
   const body: Record<string, string> = { prompt: args.prompt };
-  if (args.modelId === SDXL && references[0]) body.image_b64 = references[0].base64;
+  if (!multipart && references[0]) body.image_b64 = references[0].base64;
+  const form = new FormData();
+  if (multipart) {
+    form.set("prompt", args.prompt);
+    references.slice(0, 4).forEach((reference, index) => {
+      form.set(`input_image_${index}`, new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), `reference-${index}`);
+    });
+  }
   const endpoint = `${args.baseUrl.replace(/\/+$/, "")}/run/${args.modelId}`;
   try {
     const res = await fetch(endpoint, {
       method: "POST",
       redirect: "error",
-      headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json", Accept: "image/*, application/json" },
-      body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${args.apiKey}`, ...(!multipart ? { "Content-Type": "application/json" } : {}), Accept: "image/*, application/json" },
+      body: multipart ? form : JSON.stringify(body),
       signal: AbortSignal.timeout(120_000),
     });
     const contentLength = Number(res.headers.get("content-length"));

@@ -2,7 +2,7 @@ import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { APICallError } from "@ai-sdk/provider";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAICompatibleModel } from "@/lib/ai/openai-compatible";
-import { cloudflareAccountIdFromBaseUrl, isCloudflareModel, isSupportedCloudflareImageModel } from "@/lib/ai/cloudflare";
+import { cloudflareAccountIdFromBaseUrl, isCloudflareModel } from "@/lib/ai/cloudflare";
 import {
   AI_PROVIDER_CATALOG,
   CATALOG_PROVIDER_IDS,
@@ -156,8 +156,8 @@ export function validateAIConfigShape(cfg: {
   if (cfg.textProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(cfg.textBaseUrl ?? "", "text") || !isCloudflareModel(cfg.textModel))) {
     return "Cloudflare text requires a valid Account ID and an @cf/... text model.";
   }
-  if (cfg.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(cfg.imageBaseUrl ?? "", "image") || !isSupportedCloudflareImageModel(cfg.imageModel))) {
-    return "Cloudflare image requires a valid Account ID and a supported Workers AI image model.";
+  if (cfg.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(cfg.imageBaseUrl ?? "", "image") || !isCloudflareModel(cfg.imageModel))) {
+    return "Cloudflare image requires a valid Account ID and a Workers AI model ID (@cf/author/model).";
   }
   if (providerRequiresBaseUrl(cfg.textProvider) && !cfg.textBaseUrl?.trim()) {
     return baseUrlRequiredMessage(cfg.textProvider, "text");
@@ -517,7 +517,7 @@ export function resolveTextModel(config: WorkspaceAIConfig, task?: AiTask): Reso
 
 /** Resolve the IMAGE target for a workspace config. */
 export function resolveImageTarget(config: WorkspaceAIConfig): ImageTarget {
-  if (config.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(config.imageBaseUrl ?? "", "image") || !isSupportedCloudflareImageModel(config.imageModel))) {
+  if (config.imageProvider === "cloudflare" && (!cloudflareAccountIdFromBaseUrl(config.imageBaseUrl ?? "", "image") || !isCloudflareModel(config.imageModel))) {
     throw new AIConfigError("INVALID_CONFIG", "Cloudflare image configuration needs a valid account endpoint and supported model.");
   }
   return {

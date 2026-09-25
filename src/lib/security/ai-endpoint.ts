@@ -8,7 +8,16 @@ export function assertAllowedAiEndpoint(raw: string): void {
   let url: URL;
   try { url = new URL(raw); } catch { throw new Error("Invalid AI endpoint URL."); }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error("AI endpoints must be HTTP(S) URLs without credentials, query strings or fragments.");
+    throw new Error("AI endpoints must be valid URLs without credentials, query strings or fragments.");
+  }
+  // The two local development presets remain available outside production;
+  // custom endpoints and every production endpoint must use HTTPS.
+  const localPreset = process.env.NODE_ENV !== "production" && Object.values(AI_PROVIDER_CATALOG).some(
+    (entry) => entry.group === "local" && entry.defaultBaseUrl && entry.defaultBaseUrl.replace(/\/+$/, "") === raw.replace(/\/+$/, ""),
+  );
+  if (url.protocol !== "https:" && !localPreset) throw new Error("AI endpoints must use HTTPS.");
+  if (!localPreset && (/^(localhost|.*\.localhost)$/i.test(url.hostname) || /^127\./.test(url.hostname) || /^10\./.test(url.hostname) || /^192\.168\./.test(url.hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname) || /^169\.254\./.test(url.hostname) || url.hostname === "[::1]")) {
+    throw new Error("AI endpoints cannot use localhost or private-network addresses.");
   }
   // Trust only Cloudflare's exact account-scoped AI bases. Never allow an
   // arbitrary hostname, path, port, redirect target, or account-ID fragment.

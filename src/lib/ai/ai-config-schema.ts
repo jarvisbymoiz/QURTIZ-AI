@@ -2,7 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import { AI_TASKS } from "@/lib/ai/provider";
-import { isCloudflareAccountId, isCloudflareModel, isSupportedCloudflareImageModel } from "@/lib/ai/cloudflare";
+import { isCloudflareAccountId, isCloudflareModel } from "@/lib/ai/cloudflare";
 import {
   CATALOG_PROVIDER_IDS,
   catalogEntry,
@@ -75,7 +75,7 @@ export const saveAIConfigInputSchema = z
     }
     if (v.imageProvider === "cloudflare") {
       if (!isCloudflareAccountId(v.imageAccountId ?? "")) ctx.addIssue({ code: "custom", path: ["imageAccountId"], message: "Cloudflare image Account ID must be 32 hexadecimal characters." });
-      if (!isSupportedCloudflareImageModel(v.imageModel)) ctx.addIssue({ code: "custom", path: ["imageModel"], message: "Choose a supported Workers AI image model (FLUX.1 schnell or Stable Diffusion XL)." });
+      if (!isCloudflareModel(v.imageModel)) ctx.addIssue({ code: "custom", path: ["imageModel"], message: "Enter a Workers AI model ID such as @cf/author/model." });
     }
   });
 

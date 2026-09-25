@@ -11,7 +11,7 @@ import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 import { resolvedBaseUrl } from "@/lib/ai/provider-catalog";
-import { cloudflareBaseUrl } from "@/lib/ai/cloudflare";
+import { cloudflareAccountIdFromBaseUrl, cloudflareBaseUrl, isCloudflareModel } from "@/lib/ai/cloudflare";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -189,4 +189,45 @@ export async function clearWorkspaceAIConfigAction(): Promise<ActionResult> {
   const db = getDb();
   await db.delete(workspaceAiConfig).where(eq(workspaceAiConfig.workspaceId, ctx.workspaceId));
   return { ok: true };
+}
+
+/** Check the saved model and credentials without running a billable inference. */
+export async function testCloudflareModelAction(side: "text" | "image"): Promise<ActionResult> {
+  const ctx = await getActiveContext("workspace:manage");
+  if ("error" in ctx) return { ok: false, error: ctx.error };
+  if (side !== "text" && side !== "image") return { ok: false, error: "Invalid model type." };
+  if (!rateLimit(`cloudflare-test:${ctx.workspaceId}`, 10, 10 * 60_000).allowed) {
+    return { ok: false, error: "Model test limit reached. Try again in a few minutes." };
+  }
+  const [row] = await getDb().select().from(workspaceAiConfig).where(eq(workspaceAiConfig.workspaceId, ctx.workspaceId));
+  if (!row) return { ok: false, error: "Save the AI configuration first." };
+  const provider = side === "text" ? row.textProvider : row.imageProvider;
+  const model = side === "text" ? row.textModel : row.imageModel;
+  const base = side === "text" ? row.textBaseUrl : row.imageBaseUrl;
+  const token = decryptToken(side === "text" ? row.textApiKeyEnc : row.imageApiKeyEnc);
+  if (provider !== "cloudflare" || !base || !token || !isCloudflareModel(model)) {
+    return { ok: false, error: "Save a valid Cloudflare Workers AI model and token first." };
+  }
+  const accountId = cloudflareAccountIdFromBaseUrl(base, side);
+  if (!accountId) return { ok: false, error: "Invalid Cloudflare account endpoint. Re-save AI Settings." };
+  const canonicalBase = cloudflareBaseUrl(accountId, "image");
+  assertAllowedAiEndpoint(canonicalBase);
+  try {
+    const response = await fetch(`${canonicalBase}/models/schema?model=${encodeURIComponent(model)}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const raw = (await response.text()).slice(0, 16_384);
+    let result: { success?: boolean; result?: unknown; errors?: { message?: string }[] } | null = null;
+    try { result = JSON.parse(raw); } catch { /* The status still supplies a useful failure. */ }
+    if (!response.ok || result?.success === false) {
+      const detail = result?.errors?.[0]?.message?.replaceAll(token, "[redacted]").slice(0, 240);
+      return { ok: false, error: `Cloudflare rejected the saved model (HTTP ${response.status}): ${detail || "Check the account, token permissions and model ID."}` };
+    }
+    if (!result || !result.result) return { ok: false, error: "Cloudflare returned an invalid model-schema response." };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: `Cloudflare model check failed: ${error instanceof Error ? error.message.replaceAll(token, "[redacted]") : "Network error."}` };
+  }
 }
