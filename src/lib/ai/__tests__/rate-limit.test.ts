@@ -22,6 +22,11 @@ describe("parseRateLimitError", () => {
     expect(info.retryAfterSeconds).toBe(527); // 8m47.904s floored (8*60+47)
   });
 
+  it("preserves explicit provider TPD numbers even when the response also mentions quota", () => {
+    const info = parseRateLimitError("Provider quota reached on tokens per day (TPD): Limit 200000, Used 199147, Requested 2075. Try again in 8m.");
+    expect(info).toMatchObject({ kind: "tpd", limit: 200000, used: 199147, requested: 2075, retryAfterSeconds: 480 });
+  });
+
   it("recognizes plain TPM errors", () => {
     const info = parseRateLimitError("Rate limit hit: TPM limit 8000 Used 7990 Requested 1000");
     expect(info.kind).toBe("tpm");
@@ -80,9 +85,9 @@ describe("rateLimitHint", () => {
       used: 199147,
       requested: 2075,
     });
-    expect(hint).toMatch(/Daily TPD limit/);
+    expect(hint).toMatch(/AI provider daily TPD limit/);
     expect(hint).toMatch(/quota resets in ~9 min/);
-    expect(hint).toMatch(/Switch to a different model or upgrade/);
+    expect(hint).toMatch(/another configured model or check provider limits/);
   });
 
   it("gives a TPD hint without a reset time when retry-after is unknown", () => {
@@ -93,14 +98,14 @@ describe("rateLimitHint", () => {
       used: null,
       requested: null,
     });
-    expect(hint).toMatch(/Daily TPD limit/);
-    expect(hint).toMatch(/Switch to a different model/);
+    expect(hint).toMatch(/AI provider daily TPD limit/);
+    expect(hint).toMatch(/another configured model/);
   });
 
   it("tells the user quota is exhausted (never worth retrying)", () => {
     const hint = rateLimitHint({ kind: "quota", retryAfterSeconds: null, limit: null, used: null, requested: null });
     expect(hint).toMatch(/quota exhausted/);
-    expect(hint).toMatch(/Upgrade/);
+    expect(hint).toMatch(/AI provider/);
   });
 
   it("gives short wait hint for TPM", () => {
@@ -119,7 +124,7 @@ describe("RateLimitExceededError", () => {
     );
     expect(err.name).toBe("RateLimitExceededError");
     expect(err.info.kind).toBe("tpd");
-    expect(err.message).toMatch(/Daily TPD limit/);
+    expect(err.message).toMatch(/AI provider daily TPD limit/);
     expect((err as { cause?: unknown }).cause).toBe(cause);
   });
 });

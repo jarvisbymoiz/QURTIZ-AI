@@ -17,6 +17,8 @@ export { summarizeBrandBrain };
 import { appendRateLimitHint, capMessage, normalizeToolOutput, scrubCredentials } from "@/lib/ai/stream-errors";
 import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
 import { AIConfigError, RateLimitExceededError, rateLimitHint } from "@/lib/ai/provider";
+import { getWorkspaceTextModel } from "@/lib/ai/config";
+import { ContentQuotaExceededError } from "@/lib/content/entitlement";
 import { getWorkspacePublishProvider } from "@/lib/publish/provider";
 import { scheduleItem } from "@/lib/scheduling/engine";
 import { isValidTimezone } from "@/lib/scheduling/time";
@@ -208,6 +210,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
             toneOverride: input.toneOverride ?? null,
           },
         });
+        await refreshContent();
         await logStep("create_content", input, { itemId, qaScore: qa.score });
         return {
           created: true,
@@ -224,6 +227,28 @@ export function buildAgentTools(ctx: AgentToolContext) {
           error instanceof AIContentParseError
             ? formatContentParseError(error)
             : formatAgentToolError(error);
+        if (error instanceof ContentQuotaExceededError) {
+          const result = { created: false, error: message, errorCode: "CONTENT_QUOTA_EXHAUSTED", quota: error.quota };
+          await logStep("create_content", input, result);
+          return result;
+        }
+        if (error instanceof RateLimitExceededError) {
+          const configured = await getWorkspaceTextModel(ctx.workspaceId, "content").catch(() => null);
+          const info = error.info;
+          const quota = {
+            source: "ai_provider" as const,
+            type: info.kind,
+            provider: configured?.provider ?? null,
+            model: configured?.modelId ?? null,
+            limit: info.limit,
+            used: info.used,
+            remaining: info.limit !== null && info.used !== null ? Math.max(0, info.limit - info.used) : null,
+            resetAt: info.retryAfterSeconds !== null ? new Date(Date.now() + info.retryAfterSeconds * 1000).toISOString() : null,
+          };
+          const result = { created: false, error: message, errorCode: "AI_PROVIDER_RATE_LIMIT", quota };
+          await logStep("create_content", input, result);
+          return result;
+        }
         await logStep("create_content", input, { created: false, error: message });
         return { created: false, error: message };
       }
@@ -657,4 +682,3 @@ export function buildAgentTools(ctx: AgentToolContext) {
   }
   return tools;
 }
-

@@ -270,18 +270,6 @@ export function parseRateLimitError(error: unknown): RateLimitInfo {
 
   const lower = message.toLowerCase();
 
-  // Hard quota exhaustion — never worth retrying.
-  if (
-    /\bquota\b/.test(lower) ||
-    /\bresource_exhausted\b/.test(lower) ||
-    /\binsufficient[_ ]quota\b/.test(lower) ||
-    /\bcredit(?:s)?\s+(?:exhausted|balance)\b/.test(lower) ||
-    /\bbilling\b/.test(lower) ||
-    /\bexceeded\s+your\s+current\s+quota\b/.test(lower)
-  ) {
-    return { ...empty, kind: "quota", retryAfterSeconds: parseRetryAfter(message, headers) };
-  }
-
   // Per-window kind detection (TPD wins over TPM when both are mentioned).
   const kind: RateLimitKind =
     /\btokens?\s+per\s+day\b|\bTPD\b/i.test(lower) ? "tpd" :
@@ -290,6 +278,14 @@ export function parseRateLimitError(error: unknown): RateLimitInfo {
     /\brequests?\s+per\s+(?:minute|min)\b|\bRPM\b/i.test(lower) ? "rpm" :
     /\brate\s+limit\b|\btoo\s+many\s+requests\b|\b429\b/i.test(lower) ? "other" :
     "other";
+
+  if (kind === "other" && (
+    /\bquota\b/.test(lower) || /\bresource_exhausted\b/.test(lower) ||
+    /\binsufficient[_ ]quota\b/.test(lower) || /\bcredit(?:s)?\s+(?:exhausted|balance)\b/.test(lower) ||
+    /\bbilling\b/.test(lower)
+  )) {
+    return { ...empty, kind: "quota", retryAfterSeconds: parseRetryAfter(message, headers) };
+  }
 
   return {
     kind,
@@ -370,10 +366,10 @@ export function rateLimitHint(info: RateLimitInfo): string {
     case "tpd":
     case "rpd":
       return minutes != null
-        ? `Daily ${info.kind.toUpperCase()} limit reached — quota resets in ~${minutes} min. Switch to a different model or upgrade your plan to continue now.`
-        : `Daily ${info.kind.toUpperCase()} limit reached — Switch to a different model or upgrade your plan to continue now.`;
+        ? `Configured AI provider daily ${info.kind.toUpperCase()} limit reached — quota resets in ~${minutes} min. Switch to another configured model or check provider limits.`
+        : `Configured AI provider daily ${info.kind.toUpperCase()} limit reached — switch to another configured model or check provider limits.`;
     case "quota":
-      return `Account quota exhausted. Upgrade the plan or top up credits to continue.`;
+      return `Configured AI provider quota exhausted. Check its usage or billing, or choose another configured model.`;
     case "tpm":
     case "rpm":
       if (info.retryAfterSeconds == null) {

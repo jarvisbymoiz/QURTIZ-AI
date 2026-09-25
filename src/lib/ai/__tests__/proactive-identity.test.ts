@@ -4,9 +4,12 @@ import { CORE_AGENT_IDENTITY, CORE_IDENTITY_VERSION } from "../identity";
 import { buildSystemPrompt } from "../agent";
 import { buildAgentTools } from "../tools";
 import { generateAndPersistContent } from "../content";
+import { RateLimitExceededError } from "../provider";
+import { ContentQuotaExceededError } from "@/lib/content/entitlement";
 import { readFileSync } from "node:fs";
 
 vi.mock("@/lib/ai/content", async importOriginal => ({ ...await importOriginal<typeof import("../content")>(), generateAndPersistContent: vi.fn() }));
+vi.mock("@/lib/ai/config", () => ({ getWorkspaceTextModel: async () => ({ provider: "custom", modelId: "example/model" }) }));
 vi.mock("@/lib/workspace", () => ({ getMembership: async () => ({ role: "editor" }) }));
 vi.mock("@/db", () => ({ getDb: () => ({
   select: () => ({ from: (table: unknown) => ({ where: async () => table === agentRuns ? [{ status: "running" }] : [] }) }),
@@ -46,5 +49,29 @@ describe("proactive protected identity", () => {
     const tools = buildAgentTools({ workspaceId: "a", userId: "u", runId: "r" });
     const result = await tools.create_content.execute!({ topic: "Offer", platforms: ["facebook"] }, { toolCallId: "failure", messages: [] });
     expect(result).toMatchObject({ created: false });
+  });
+  it("identifies a provider token quota without calling it a workspace content limit", async () => {
+    vi.mocked(generateAndPersistContent).mockRejectedValueOnce(new RateLimitExceededError({
+      kind: "tpd", limit: 200000, used: 199147, requested: 2075, retryAfterSeconds: 527,
+    }, new Error("provider rejected request")));
+    const tools = buildAgentTools({ workspaceId: "a", userId: "u", runId: "r" });
+    const result = await tools.create_content.execute!({ topic: "Offer", platforms: ["facebook"] }, { toolCallId: "quota", messages: [] });
+    expect(result).toMatchObject({
+      created: false, errorCode: "AI_PROVIDER_RATE_LIMIT",
+      quota: { source: "ai_provider", provider: "custom", model: "example/model", type: "tpd", limit: 200000, used: 199147, remaining: 853 },
+    });
+    expect(result.error).not.toMatch(/workspace.content.creation quota/i);
+  });
+  it("returns structured workspace allowance details only for a real configured limit", async () => {
+    vi.mocked(generateAndPersistContent).mockRejectedValueOnce(new ContentQuotaExceededError({
+      type: "content_creation", limit: 2, used: 2, remaining: 0, resetAt: "2026-10-01T00:00:00.000Z",
+      period: "month", source: "workspace_settings", plan: "free",
+    }));
+    const tools = buildAgentTools({ workspaceId: "a", userId: "u", runId: "r" });
+    const result = await tools.create_content.execute!({ topic: "Offer", platforms: ["facebook"] }, { toolCallId: "content-quota", messages: [] });
+    expect(result).toMatchObject({
+      created: false, errorCode: "CONTENT_QUOTA_EXHAUSTED",
+      quota: { source: "workspace_settings", limit: 2, used: 2, remaining: 0, resetAt: "2026-10-01T00:00:00.000Z" },
+    });
   });
 });

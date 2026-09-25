@@ -12,6 +12,7 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
 import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import type { ContentRulesInput } from "@/lib/validation";
+import { assertContentCreationAllowed } from "@/lib/content/entitlement";
 
 /**
  * Hard ceiling for one structured AI generation call. OpenRouter free-tier
@@ -427,6 +428,7 @@ export async function generateAndPersistContent(ctx: {
     const [saved] = await getDb().select().from(contentItems).where(and(eq(contentItems.id, ctx.contentItemId), eq(contentItems.workspaceId, ctx.workspaceId)));
     if (saved) return { itemId: saved.id, qa: saved.qa as QaResult };
   }
+  await assertContentCreationAllowed(ctx.workspaceId);
   // Workspace-isolated resolution: the model comes from THIS workspace's
   // AI config (throws AIConfigError "CONFIGURATION_REQUIRED" when unset).
   const resolved = await getWorkspaceTextModel(ctx.workspaceId, "content");
@@ -509,6 +511,8 @@ Produce one variant per target platform.`;
       return { itemId: saved.id, qa: saved.qa as QaResult };
     }
   }
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ctx.workspaceId + ":content-creation"}))`);
+  await assertContentCreationAllowed(ctx.workspaceId, query => tx.execute(query) as Promise<{ rows: Record<string, unknown>[] }>);
   const [item] = await tx
     .insert(contentItems)
     .values({
