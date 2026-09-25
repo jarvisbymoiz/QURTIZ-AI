@@ -5,6 +5,7 @@ import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { buildMasterPrompt, formatSpecFor, type MasterPromptInput } from "@/lib/ai/master-prompt";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
+import { buildVisualGenerationBrief } from "@/lib/ai/visual-brief";
 
 /**
  * Dynamic Master AI Prompt generation ("Copy Master AI Prompt").
@@ -67,6 +68,7 @@ export function buildMasterPromptInstruction(args: {
   memoryLines?: string | null;
 }): string {
   const { input } = args;
+  const sharedBrief = buildVisualGenerationBrief(input);
   const b = input.brand;
   const spec = formatSpecFor(input.platform, input.contentType);
   const identity = (b?.visualIdentity ?? {}) as Record<string, string | undefined>;
@@ -84,6 +86,7 @@ export function buildMasterPromptInstruction(args: {
   lines.push("Write the MASTER AI PROMPT for the post below. Follow the REQUIRED STRUCTURE exactly (use ## headings), and make every line specific to THIS post and THIS brand.");
   lines.push("");
   lines.push("=== POST DATA (use all of it; carry exact strings where instructed) ===");
+  lines.push("Shared visual brief (same factual direction used by Generate AI Visual):\n" + sharedBrief.prompt);
   lines.push("Title / topic: " + input.title);
   lines.push("Platform: " + input.platform + " · Content type: " + input.contentType.replaceAll("_", " "));
   lines.push("Objective: " + (input.objective?.trim() || "Engagement + awareness"));

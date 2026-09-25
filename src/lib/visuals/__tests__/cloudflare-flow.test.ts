@@ -40,6 +40,7 @@ describe("Cloudflare image to Qurtiz media pipeline", () => {
     } }) } };
     const common = { workspaceId: "ws", userId: "user", contentItemId: "item", mode: "ai" as const, storage: storage as never };
     const single = await generateVisual(common);
+    expect(single.ok, JSON.stringify(single)).toBe(true);
     expect(single).toMatchObject({ ok: true, visualId: "visual-1" });
     state.format = "carousel";
     const slide = await generateVisual({ ...common, slideIndex: 1, variantId: "variant" });
@@ -50,6 +51,7 @@ describe("Cloudflare image to Qurtiz media pipeline", () => {
       expect(upload.options.contentType).toBe("image/png");
       expect((await sharp(upload.bytes).metadata()).format).toBe("png");
     }
-    expect(JSON.parse(String((fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body)).prompt).toContain("Second visual");
+    const runCalls = (fetchMock.mock.calls as unknown as [string, RequestInit][]).filter(([url]) => url.includes("/run/"));
+    expect(JSON.parse(String(runCalls[1][1].body)).prompt).toContain("Second visual");
   });
 });

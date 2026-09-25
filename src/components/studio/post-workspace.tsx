@@ -435,12 +435,14 @@ export function PostWorkspace({
 
           {/* Media options */}
           <div className="flex flex-wrap items-center gap-1.5 px-0.5">
-            <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
-              {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
-            </Button>
-            <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={() => generate("ai")}>
-              <Sparkles className="size-3.5" aria-hidden /> Generate AI visual
-            </Button>
+            {!isReel ? <>
+              <Button size="sm" variant="outline" disabled={pending || !editable} onClick={() => generate("template")}>
+                {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />} Template
+              </Button>
+              <Button size="sm" variant="outline" disabled={pending || !editable || !aiConfigured} onClick={() => generate("ai", isCarousel ? slides[0]?.index : undefined)}>
+                <Sparkles className="size-3.5" aria-hidden /> Generate AI visual
+              </Button>
+            </> : null}
             {editable && !isCarousel && !isReel ? (
               <>
                 <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden"

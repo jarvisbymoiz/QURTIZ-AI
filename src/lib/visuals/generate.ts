@@ -7,7 +7,7 @@ import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAs
 import { generateImage } from "@/lib/ai/image";
 import { getWorkspaceImageTarget } from "@/lib/ai/config";
 import { renderTemplateVisual } from "@/lib/visuals/template";
-import { formatSpecFor } from "@/lib/ai/master-prompt";
+import { buildVisualGenerationBrief } from "@/lib/ai/visual-brief";
 import { createClient } from "@/lib/supabase/server";
 
 export type VisualMode = "template" | "ai";
@@ -22,7 +22,7 @@ async function fetchAsset(
   supabase: SupabaseClient,
   workspaceId: string,
   kind: "logo" | "avatar" | "reference",
-): Promise<{ data: Buffer; mimeType: string } | null> {
+): Promise<{ data: Buffer; mimeType: string; label: string | null } | null> {
   const db = getDb();
   const [asset] = await db
     .select()
@@ -34,7 +34,25 @@ async function fetchAsset(
 
   const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
   if (error || !data) return null;
-  return { data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType };
+  return { data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType, label: asset.label };
+}
+
+async function fetchGenerationReferences(supabase: SupabaseClient, workspaceId: string): Promise<
+  { data: Buffer; mimeType: string; label: string | null; kind: string }[]
+> {
+  const db = getDb();
+  const avatar = await fetchAsset(supabase, workspaceId, "avatar");
+  const rows = await db.select().from(brandAssets)
+    .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, "reference")))
+    .orderBy(desc(brandAssets.createdAt)).limit(3);
+  const downloads = await Promise.all(rows.map(async asset => {
+    const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
+    return error || !data ? null : { data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType, label: asset.label, kind: asset.kind };
+  }));
+  return [
+    ...(avatar ? [{ ...avatar, kind: "avatar" }] : []),
+    ...downloads.filter((value): value is NonNullable<typeof value> => value !== null),
+  ];
 }
 
 async function uploadVisual(
@@ -113,26 +131,33 @@ export async function generateVisual(args: {
       const target = await getWorkspaceImageTarget(args.workspaceId);
 
       const refs: { mimeType: string; base64: string }[] = [];
-      const avatar = await fetchAsset(supabase, args.workspaceId, "avatar");
-      if (avatar) refs.push({ mimeType: avatar.mimeType, base64: avatar.data.toString("base64") });
-      const reference = await fetchAsset(supabase, args.workspaceId, "reference");
-      if (reference) refs.push({ mimeType: reference.mimeType, base64: reference.data.toString("base64") });
-
-      const styleNote = [
-        identity.imageStyle ? `Style: ${identity.imageStyle}.` : "",
-        identity.primaryColor ? `Brand accent color: ${identity.primaryColor}.` : "",
-        refs.length > 0
-          ? "When a person appears, keep the EXACT same face and body as the provided reference photo. Do not alter their identity."
-          : "",
-        "Leave clean space in the lower-left corner; a logo is composited there afterwards. Do not draw a logo yourself.",
-      ]
-        .filter(Boolean)
-        .join(" ");
-
-      const spec = formatSpecFor(variant?.platform ?? "instagram", variant?.format ?? item.format ?? "single_image");
+      const referenceLabels: string[] = [];
+      const generationRefs = await fetchGenerationReferences(supabase, args.workspaceId);
+      for (const reference of generationRefs) {
+        refs.push({ mimeType: reference.mimeType, base64: reference.data.toString("base64") });
+        referenceLabels.push(reference.label || (reference.kind === "avatar" ? "Brand avatar" : "Brand visual reference"));
+      }
+      let memoryPreferences: string[] = [];
+      try {
+        const { retrieveAgentMemory } = await import("@/lib/ai/persistent-memory");
+        const learned = await retrieveAgentMemory({ workspaceId: args.workspaceId, userId: args.userId }, `visual design for ${item.topic} on ${variant?.platform ?? "instagram"}`);
+        memoryPreferences = [...learned.workspace, ...learned.personal]
+          .filter(entry => /visual|design|image|photo|palette|colour|color|typography|layout|style/i.test(`${entry.key} ${entry.content}`))
+          .slice(0, 3).map(entry => entry.content);
+      } catch { /* Missing memory cannot block image generation. */ }
+      const brief = buildVisualGenerationBrief({
+        brand: brand ?? null, platform: variant?.platform ?? "instagram", contentType: variant?.format ?? item.format ?? "single_image",
+        title: item.topic, objective: item.objective, hook: item.hook, mainCopy: item.mainCopy,
+        caption: variant?.caption || item.caption, cta: variant?.cta || item.cta,
+        firstComment: variant?.firstComment || item.firstComment, hashtags: variant?.hashtags ?? item.hashtags,
+        visualConcept: item.visualConcept, slides: (variant?.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
+        slideIndex: args.slideIndex, memoryPreferences, referenceLabels,
+      });
       const result = await generateImage({
-        prompt: `Create a premium, scroll-stopping social media visual for this post — creative-director quality, not a stock template.\nTopic: ${item.topic}\nCreative direction: ${slide?.visualPrompt ?? item.visualConcept ?? item.hook ?? item.topic}\nPlatform format: ${spec.ratio} (${spec.dims}) — ${spec.note} Safe areas: ${spec.safe}\n${styleNote}\nPhotorealistic where appropriate to the stated concept.`,
+        prompt: brief.prompt,
         references: refs,
+        options: { width: brief.width, height: brief.height, aspectRatio: brief.aspectRatio, negativePrompt: brief.negativePrompt },
+        debug: { sources: brief.sources, workspaceId: args.workspaceId, contentItemId: args.contentItemId },
         provider: target.provider,
         apiKey: target.apiKey,
         modelId: target.modelId,

@@ -29,12 +29,11 @@ describe("Post Review visual prompt and media coexistence", () => {
     expect(html).toContain("Existing brand visual prompt");
     expect(html).toContain('aria-label="Copy Visual prompt"');
     expect(html).toContain('aria-label="Edit visual prompt"');
-    expect(html).toContain("Generate AI visual");
     expect(html).toContain("Copy Master AI Prompt");
-    expect(html.indexOf("Existing brand visual prompt")).toBeLessThan(html.indexOf("Generate AI visual"));
-    if (format === "reel") { expect(html).toContain("Upload video"); expect(html).toContain("<video"); }
-    else if (format === "carousel") { expect(html).toContain("Add images"); expect(html).toContain("<img"); }
-    else { expect(html).toContain("Upload image"); expect(html).toContain("Visual preview"); }
+    if (format === "reel") { expect(html).not.toContain("Generate AI visual"); expect(html).toContain("Upload video"); expect(html).toContain("<video"); }
+    else { expect(html).toContain("Generate AI visual"); expect(html.indexOf("Existing brand visual prompt")).toBeLessThan(html.indexOf("Generate AI visual")); }
+    if (format === "carousel") { expect(html).toContain("Add images"); expect(html).toContain("<img"); }
+    if (format === "single_image") { expect(html).toContain("Upload image"); expect(html).toContain("Visual preview"); }
   });
   it("keeps per-slide prompts and AI generation alongside the post-level prompt", () => {
     const html = review("carousel", true);

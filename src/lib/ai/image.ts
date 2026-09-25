@@ -1,9 +1,11 @@
 ﻿import "server-only";
 
+import sharp from "sharp";
 import type { ImageProviderId } from "@/lib/ai/provider";
 import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
 import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 import { generateCloudflareImage } from "@/lib/ai/cloudflare-image";
+import { inspectImageRequest, type ImageDebugContext } from "@/lib/ai/image-debug";
 
 /**
  * Image generation via REST, driven by the workspace's own AI config
@@ -20,19 +22,40 @@ import { generateCloudflareImage } from "@/lib/ai/cloudflare-image";
  *   (stored ?? catalog default); a `custom` provider without an endpoint
  *   fails honestly instead of silently targeting a default host.
  */
-export const IMAGE_MODEL_CHAIN = [
-  "gemini-3.1-flash-image",
-  "gemini-2.5-flash-image",
-];
-
 export type ImageReference = {
   mimeType: string;
   base64: string;
 };
 
+export type ImageGenerationOptions = {
+  width?: number;
+  height?: number;
+  aspectRatio?: string;
+  negativePrompt?: string;
+  steps?: number;
+  guidance?: number;
+  seed?: number;
+  quality?: string;
+  style?: string;
+};
+
 export type ImageGenResult =
   | { ok: true; png: Buffer; model: string }
   | { ok: false; reason: "quota_or_billing" | "api_error"; message: string };
+
+async function imageResult(base64: string, model: string): Promise<ImageGenResult> {
+  const bytes = Buffer.from(base64, "base64");
+  if (!bytes.length || bytes.length > 16 * 1024 * 1024) {
+    return { ok: false, reason: "api_error", message: `${model}: image response is empty or too large.` };
+  }
+  try {
+    const png = await sharp(bytes, { limitInputPixels: 16 * 1024 * 1024 }).png().toBuffer();
+    if (png.length > 16 * 1024 * 1024) throw new Error("too large");
+    return { ok: true, png, model };
+  } catch {
+    return { ok: false, reason: "api_error", message: `${model}: provider returned malformed or oversized image data.` };
+  }
+}
 
 /**
  * Legacy env-based gate for UI display. Real capability is per-workspace
@@ -47,6 +70,8 @@ async function geminiGenerate(args: {
   references?: ImageReference[];
   apiKey: string;
   modelId: string;
+  options?: ImageGenerationOptions;
+  debug?: ImageDebugContext;
 }): Promise<ImageGenResult> {
   const parts: Record<string, unknown>[] = [];
   for (const ref of args.references ?? []) {
@@ -54,31 +79,36 @@ async function geminiGenerate(args: {
   }
   parts.push({ text: args.prompt });
 
-  // Configured model first, then the known chain (quota can differ per
-  // model); dedupe so the configured model is not called twice.
-  const chain = [args.modelId, ...IMAGE_MODEL_CHAIN].filter((m, i, all) => all.indexOf(m) === i);
+  // The configured model is authoritative. Do not silently switch models.
+  const chain = [args.modelId];
 
   let lastError = "";
   let sawQuota = false;
 
   for (const model of chain) {
     try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
+      const generationConfig = { responseModalities: ["IMAGE"],
+        ...(args.options?.aspectRatio ? { imageConfig: { aspectRatio: args.options.aspectRatio } } : {}) };
+      const request = async (config: Record<string, unknown>) => {
+        inspectImageRequest({ provider: "gemini", model, prompt: args.prompt, referenceCount: args.references?.length ?? 0,
+          parameters: config, context: args.debug });
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
           headers: { "x-goog-api-key": args.apiKey, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: { responseModalities: ["IMAGE"] },
-          }),
+          body: JSON.stringify({ contents: [{ parts }], generationConfig: config }),
           signal: AbortSignal.timeout(120_000),
-        },
-      );
-      const json = (await res.json().catch(() => null)) as
+        });
+        const json = (await res.json().catch(() => null)) as
         | { candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[] }
         | { error?: { message?: string; status?: string } }
         | null;
+        return { res, json };
+      };
+      let { res, json } = await request(generationConfig);
+      const initialError = (json as { error?: { message?: string } } | null)?.error?.message ?? "";
+      if (!res.ok && res.status === 400 && args.options?.aspectRatio && /imageConfig|aspectRatio|unknown field|unsupported parameter/i.test(initialError)) {
+        ({ res, json } = await request({ responseModalities: ["IMAGE"] }));
+      }
 
       if (!res.ok) {
         const message = (json as { error?: { message?: string } } | null)?.error?.message ?? `HTTP ${res.status}`;
@@ -87,7 +117,7 @@ async function geminiGenerate(args: {
           lastError = message;
           continue;
         }
-        return { ok: false, reason: "api_error", message: `${model}: ${message}` };
+        return { ok: false, reason: "api_error", message: `${model}: ${message.replaceAll(args.apiKey, "[redacted]")}` };
       }
 
       const imgPart = (json as { candidates?: { content?: { parts?: { inlineData?: { data?: string } }[] } }[] })
@@ -96,9 +126,9 @@ async function geminiGenerate(args: {
         lastError = `${model}: response contained no image`;
         continue;
       }
-      return { ok: true, png: Buffer.from(imgPart.inlineData.data, "base64"), model };
+      return imageResult(imgPart.inlineData.data, model);
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      lastError = (error instanceof Error ? error.message : String(error)).replaceAll(args.apiKey, "[redacted]");
     }
   }
 
@@ -115,27 +145,53 @@ async function geminiGenerate(args: {
 
 async function openaiCompatibleGenerate(args: {
   prompt: string;
+  references?: ImageReference[];
   apiKey: string;
   modelId: string;
   baseUrl: string;
+  options?: ImageGenerationOptions;
+  debug?: ImageDebugContext;
+  provider: string;
 }): Promise<ImageGenResult> {
   const baseUrl = args.baseUrl.replace(/\/+$/, "");
   assertAllowedAiEndpoint(baseUrl);
   const model = args.modelId;
+  const size = args.options?.height && args.options?.width && args.options.height > args.options.width
+    ? "1024x1536" : args.options?.height && args.options?.width && args.options.width > args.options.height ? "1536x1024" : "1024x1024";
   try {
-    const res = await fetch(`${baseUrl}/images/generations`, {
-      redirect: "error",
-      method: "POST",
-      headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        prompt: args.prompt,
-        n: 1,
-        size: "1024x1024",
-        response_format: "b64_json",
-      }),
-      signal: AbortSignal.timeout(120_000),
-    });
+    let res: Response | undefined;
+    if (args.references?.length) {
+      const reference = args.references[0];
+      const edit = new FormData();
+      edit.set("model", model);
+      edit.set("prompt", args.prompt);
+      edit.set("size", size);
+      edit.set("image", new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), "reference-image");
+      inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: 1,
+        parameters: { operation: "images/edits", size }, context: args.debug });
+      const editResponse = await fetch(`${baseUrl}/images/edits`, {
+        redirect: "error", method: "POST", headers: { Authorization: `Bearer ${args.apiKey}` },
+        body: edit, signal: AbortSignal.timeout(120_000),
+      });
+      if (editResponse.ok) res = editResponse;
+      else if (![404, 405, 501].includes(editResponse.status)) {
+        const error = await editResponse.json().catch(() => null) as { error?: { message?: string } } | null;
+        if (!/image edits? (?:is |are )?(?:not )?supported|unsupported (?:image )?edits?|model.*(?:not support|only support).*edit/i.test(error?.error?.message ?? "")) {
+          const message = error?.error?.message ?? `HTTP ${editResponse.status}`;
+          return { ok: false, reason: editResponse.status === 429 ? "quota_or_billing" : "api_error", message: `${model}: ${message.replaceAll(args.apiKey, "[redacted]")}` };
+        }
+      }
+    }
+    if (!res) {
+      inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: 0,
+        parameters: { operation: "images/generations", n: 1, size, response_format: "b64_json" }, context: args.debug });
+      res = await fetch(`${baseUrl}/images/generations`, {
+        redirect: "error", method: "POST",
+        headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt: args.prompt, n: 1, size, response_format: "b64_json" }),
+        signal: AbortSignal.timeout(120_000),
+      });
+    }
     const json = (await res.json().catch(() => null)) as
       | { data?: { b64_json?: string }[]; error?: { message?: string } }
       | null;
@@ -145,10 +201,10 @@ async function openaiCompatibleGenerate(args: {
         return {
           ok: false,
           reason: "quota_or_billing",
-          message: `Image generation blocked by the provider: ${message}`,
+          message: `Image generation blocked by the provider: ${message.replaceAll(args.apiKey, "[redacted]")}`,
         };
       }
-      return { ok: false, reason: "api_error", message: `${model}: ${message}` };
+      return { ok: false, reason: "api_error", message: `${model}: ${message.replaceAll(args.apiKey, "[redacted]")}` };
     }
     const b64 = json?.data?.[0]?.b64_json;
     if (!b64) {
@@ -158,9 +214,9 @@ async function openaiCompatibleGenerate(args: {
         message: `${model}: response contained no image (provider returned no b64_json data)`,
       };
     }
-    return { ok: true, png: Buffer.from(b64, "base64"), model };
+    return imageResult(b64, model);
   } catch (error) {
-    return { ok: false, reason: "api_error", message: error instanceof Error ? error.message : String(error) };
+    return { ok: false, reason: "api_error", message: (error instanceof Error ? error.message : String(error)).replaceAll(args.apiKey, "[redacted]") };
   }
 }
 
@@ -180,6 +236,8 @@ export async function generateImage(args: {
   apiKey: string;
   modelId: string;
   baseUrl: string | null;
+  options?: ImageGenerationOptions;
+  debug?: ImageDebugContext;
 }): Promise<ImageGenResult> {
   if (!args.apiKey) {
     return { ok: false, reason: "api_error", message: "No API key is configured for this workspace's image provider." };
@@ -189,11 +247,11 @@ export async function generateImage(args: {
     return { ok: false, reason: "api_error", message: `Unknown image provider "${args.provider}".` };
   }
   if (entry.kind === "gemini") {
-    return geminiGenerate({ prompt: args.prompt, references: args.references, apiKey: args.apiKey, modelId: args.modelId });
+    return geminiGenerate({ prompt: args.prompt, references: args.references, apiKey: args.apiKey, modelId: args.modelId, options: args.options, debug: args.debug });
   }
   if (entry.id === "cloudflare") {
     return generateCloudflareImage({ prompt: args.prompt, references: args.references, apiKey: args.apiKey,
-      modelId: args.modelId, baseUrl: args.baseUrl ?? "" });
+      modelId: args.modelId, baseUrl: args.baseUrl ?? "", options: args.options, debug: args.debug });
   }
   // OpenAI-compatible kind. Resolution already filled the catalog default
   // for presets; a `custom` provider with no endpoint fails honestly here
@@ -201,7 +259,8 @@ export async function generateImage(args: {
   try {
     const baseUrl = resolvedBaseUrl(args.provider, args.baseUrl);
     if (!baseUrl) throw new Error(`Provider "${args.provider}" requires a Base URL.`);
-    return openaiCompatibleGenerate({ prompt: args.prompt, apiKey: args.apiKey, modelId: args.modelId, baseUrl });
+    return openaiCompatibleGenerate({ prompt: args.prompt, references: args.references, apiKey: args.apiKey, modelId: args.modelId, baseUrl,
+      options: args.options, debug: args.debug, provider: args.provider });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Image generation failed";
     return { ok: false, reason: "api_error", message };

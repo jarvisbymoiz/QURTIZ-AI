@@ -223,22 +223,13 @@ export async function buildMasterPromptAction(itemId: string, variantId?: string
 
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
 
-  // Reference images the prompt describes: brand reference assets (style
-  // references) and visuals the user uploaded for this post. The images
-  // themselves travel with the user to the external tool; the prompt tells
-  // the tool how to use them.
+  // Brand reference assets are generation references. Final uploaded post
+  // media is a publishing asset, not an implicit image-generation input.
   const brandRefs = await db
     .select({ label: brandAssets.label })
     .from(brandAssets)
     .where(and(eq(brandAssets.workspaceId, ctx.workspaceId), eq(brandAssets.kind, "reference")));
-  const postUploads = await db
-    .select({ kind: visualAssets.kind })
-    .from(visualAssets)
-    .where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.kind, "upload")));
-  const referenceImages = [
-    ...brandRefs.map((r) => ({ kind: "brand" as const, label: r.label })),
-    ...postUploads.map(() => ({ kind: "post" as const, label: null })),
-  ];
+  const referenceImages = brandRefs.map((r) => ({ kind: "brand" as const, label: r.label }));
 
   // Workspace/user memory preferences shape the AI-written prompt
   // (best-effort — memory must never break the button).

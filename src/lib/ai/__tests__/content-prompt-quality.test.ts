@@ -80,6 +80,8 @@ describe("generated content schema — higher quality bars", () => {
           cta: "Order",
           slides: [
             { index: 1, headline: "Slide One", visualPrompt: "y".repeat(500) }, // > old 400 cap
+            { index: 2, headline: "Slide Two", visualPrompt: "Show the product use clearly." },
+            { index: 3, headline: "Slide Three", visualPrompt: "Finish with the exact CTA." },
           ],
         },
       ],

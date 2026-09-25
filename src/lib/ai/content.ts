@@ -143,6 +143,10 @@ export const generatedContentSchema = z.object({
         .max(10)
         .optional()
         .describe("For carousel format: per-slide visual prompts in ONE consistent design system with a clear narrative arc (hook cover → distinct value slides → CTA closer). Omit otherwise."),
+    }).superRefine((variant, context) => {
+      if (variant.format === "carousel" && (!variant.slides || variant.slides.length < 3)) {
+        context.addIssue({ code: "custom", path: ["slides"], message: "Carousel variants require at least three persistent slide prompts." });
+      }
     }),
   ).min(1),
 });
