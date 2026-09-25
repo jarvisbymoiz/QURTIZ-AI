@@ -3,12 +3,27 @@
  * Isolating Node imports here ensures Webpack Edge runtime doesn't trace or bundle
  * native Node packages (sharp, resvg, pg, pg-boss) into edge/client bundles.
  */
-export async function registerNode() {
+type NodeBootGlobal = typeof globalThis & {
+  __qurtizNodeBootStarted?: boolean;
+  __qurtizSchedulerReady?: boolean;
+  __qurtizSchedulerStarting?: boolean;
+  __qurtizSchedulerRetry?: ReturnType<typeof setTimeout>;
+};
+
+export function registerNode(): void {
   // Explicit read-only/UI validation mode: no workers or startup migrations.
   if (process.env.DISABLE_BACKGROUND_WORKER === "true") return;
-  const g = globalThis as typeof globalThis & { __qurtizSchedulerReady?: boolean };
-  if (g.__qurtizSchedulerReady) return;
+  const g = globalThis as NodeBootGlobal;
+  if (g.__qurtizNodeBootStarted) return;
+  g.__qurtizNodeBootStarted = true;
+  // Instrumentation must return before opening the remote database. Next.js
+  // may await register() before serving a page, especially during dev/HMR.
+  void startSchedulerWithRetry(g, 0).finally(() => { void runBootMaintenance(); });
+}
 
+async function startSchedulerWithRetry(g: NodeBootGlobal, attempt: number): Promise<void> {
+  if (g.__qurtizSchedulerReady || g.__qurtizSchedulerStarting) return;
+  g.__qurtizSchedulerStarting = true;
   // In dedicated worker environments or local dev, initialize pg-boss and cron schedules.
   // In serverless platforms (Vercel), we do NOT initialize persistent polling daemons in request lambdas
   // to avoid exhausting Supabase session pooler connections across concurrent lambdas.
@@ -34,10 +49,23 @@ export async function registerNode() {
       // uploads (which are still acceptable at 1h lag).
       await boss.schedule(QUEUES.mediaCleanup, "0 * * * *");
       g.__qurtizSchedulerReady = true;
-      console.log("[qurtiz] background scheduler started");
+      console.log(`[qurtiz] background scheduler started (pid ${process.pid})`);
     } catch (e) {
-      // Do not crash the server if the queue is unavailable (e.g. no DATABASE_URL yet).
-      console.error("[qurtiz] scheduler init skipped:", e instanceof Error ? e.message : e);
+      // A failure after some handlers were registered must not cause the next
+      // attempt to attach duplicate handlers to that same PgBoss instance.
+      try {
+        const { resetBossAfterStartupFailure } = await import("@/lib/jobs/boss");
+        await resetBossAfterStartupFailure();
+      } catch { /* Preserve the original startup error below. */ }
+      const message = e instanceof Error ? e.message : String(e);
+      const code = typeof e === "object" && e !== null && "code" in e ? String(e.code) : "";
+      const delay = Math.min(60_000, 5_000 * 2 ** Math.min(attempt, 4));
+      console.error(`[qurtiz] scheduler init failed (pid ${process.pid}${code ? `, ${code}` : ""}): ${message}; retrying in ${delay}ms`);
+      g.__qurtizSchedulerRetry = setTimeout(() => {
+        g.__qurtizSchedulerRetry = undefined;
+        void startSchedulerWithRetry(g, attempt + 1);
+      }, delay);
+      g.__qurtizSchedulerRetry.unref?.();
     }
   } else {
     if (!process.env.CRON_SECRET) {
@@ -45,7 +73,10 @@ export async function registerNode() {
     }
     g.__qurtizSchedulerReady = true;
   }
+  g.__qurtizSchedulerStarting = false;
+}
 
+async function runBootMaintenance(): Promise<void> {
   // Boot sweep: recover interrupted runs
   try {
     const { failInterruptedChatRuns } = await import("@/lib/ai/chat-persistence");

@@ -1,5 +1,23 @@
 # Database and scheduled publishing repair — 22 September 2026
 
+## pg-boss connection recovery (25 September 2026)
+
+Node instrumentation now launches pg-boss without blocking Next.js startup.
+The Node process keeps one global worker across Turbopack reloads; Edge
+instrumentation does not load it. If initialization fails, the partial worker
+is stopped and startup retries with capped 5–60 second backoff. Vercel request
+lambdas still use the configured cron endpoints rather than a persistent
+worker.
+
+pg-boss reads `DATABASE_URL`, uses SSL for the remote Supabase pooler, and has
+a 30-second connection timeout. A direct `pg` query using the same URL and SSL
+connected in 9 seconds during diagnosis, while a direct pg-boss startup took
+16 seconds. Both exceed or approach pg-boss's previous 10-second default.
+If TCP succeeds but direct `pg` later times out too, inspect session-pooler
+availability and competing dev servers before changing the URL. Parallel
+`next dev` instances must use separate `NEXT_DIST_DIR` directories to avoid
+Turbopack build-file collisions.
+
 ## Existing project audit
 
 The connected database is Supabase project `lmbnkzldrmflyssuavau`, reached through
