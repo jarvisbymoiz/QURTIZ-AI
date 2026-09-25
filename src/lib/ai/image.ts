@@ -3,7 +3,7 @@
 import sharp from "sharp";
 import type { ImageProviderId } from "@/lib/ai/provider";
 import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
-import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
+import { assertAllowedAiEndpoint, fetchPublicAiEndpoint } from "@/lib/security/ai-endpoint";
 import { generateCloudflareImage } from "@/lib/ai/cloudflare-image";
 import { inspectImageRequest, type ImageDebugContext } from "@/lib/ai/image-debug";
 
@@ -169,7 +169,7 @@ async function openaiCompatibleGenerate(args: {
       edit.set("image", new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), "reference-image");
       inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: 1,
         parameters: { operation: "images/edits", size }, context: args.debug });
-      const editResponse = await fetch(`${baseUrl}/images/edits`, {
+      const editResponse = await fetchPublicAiEndpoint(`${baseUrl}/images/edits`, {
         redirect: "error", method: "POST", headers: { Authorization: `Bearer ${args.apiKey}` },
         body: edit, signal: AbortSignal.timeout(120_000),
       });
@@ -185,7 +185,7 @@ async function openaiCompatibleGenerate(args: {
     if (!res) {
       inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: 0,
         parameters: { operation: "images/generations", n: 1, size, response_format: "b64_json" }, context: args.debug });
-      res = await fetch(`${baseUrl}/images/generations`, {
+      res = await fetchPublicAiEndpoint(`${baseUrl}/images/generations`, {
         redirect: "error", method: "POST",
         headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model, prompt: args.prompt, n: 1, size, response_format: "b64_json" }),

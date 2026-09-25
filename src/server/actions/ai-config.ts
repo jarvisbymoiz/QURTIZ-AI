@@ -9,7 +9,7 @@ import { AIConfigError, maskApiKey, validateAIConfigShape, type AiTaskOverrides 
 import { decryptToken } from "@/lib/crypto/tokens";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
-import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
+import { assertAllowedAiEndpoint, assertPublicAiEndpoint } from "@/lib/security/ai-endpoint";
 import { resolvedBaseUrl } from "@/lib/ai/provider-catalog";
 import { cloudflareAccountIdFromBaseUrl, cloudflareBaseUrl, isCloudflareModel } from "@/lib/ai/cloudflare";
 
@@ -117,7 +117,7 @@ export async function saveWorkspaceAIConfigAction(input: {
   try {
     for (const [provider, base] of [[d.textProvider, textBaseUrl], [d.imageProvider, imageBaseUrl]]) {
       const endpoint = resolvedBaseUrl(provider!, base);
-      if (endpoint) assertAllowedAiEndpoint(endpoint);
+      if (endpoint) await assertPublicAiEndpoint(endpoint);
     }
   } catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Invalid AI endpoint." }; }
 

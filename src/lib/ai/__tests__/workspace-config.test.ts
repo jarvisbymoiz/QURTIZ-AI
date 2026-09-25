@@ -96,7 +96,6 @@ function expectAIConfigError(fn: () => unknown, detailRegex: RegExp): void {
 }
 
 beforeEach(() => {
-  vi.stubEnv("AI_ALLOWED_BASE_URLS", "https://a.example/v1,https://b.example/v1,https://gateway.example/v1,https://legacy-gateway.example/v1,https://legacy.example/v1,https://my-gateway.example/v1,https://proxy.example/v1,https://x.example/v1");
   // The dev-only env fallback must never interfere with these tests: a
   // workspace with no row must throw AIConfigError, not resolve via
   // GEMINI_API_KEY.
@@ -615,9 +614,8 @@ describe("AI provider catalog (Phase 3)", () => {
     omniroute: {
       label: "Omni Route (self-hosted gateway)",
       kind: "openai-compatible",
-      defaultBaseUrl: "http://localhost:20128/v1",
     },
-    ollama: { label: "Ollama (local)", kind: "openai-compatible", defaultBaseUrl: "http://localhost:11434/v1" },
+    ollama: { label: "Ollama (local)", kind: "openai-compatible" },
     custom: { label: "Custom OpenAI-compatible", kind: "openai-compatible" },
   };
 
@@ -631,7 +629,7 @@ describe("AI provider catalog (Phase 3)", () => {
       expect(entry.defaultBaseUrl).toBe(expected.defaultBaseUrl);
       expect(entry.modelHint).toBe(expected.modelHint);
     }
-    expect(AI_PROVIDER_CATALOG.omniroute.note).toMatch(/endpoint may differ/);
+    expect(AI_PROVIDER_CATALOG.omniroute.note).toMatch(/public HTTPS endpoint/);
   });
 
   it("keeps every entry well-formed and grouped for the picker", () => {
@@ -650,7 +648,7 @@ describe("AI provider catalog (Phase 3)", () => {
     const noDefault = CATALOG_PROVIDER_IDS.filter(
       (id) => AI_PROVIDER_CATALOG[id].kind === "openai-compatible" && !AI_PROVIDER_CATALOG[id].defaultBaseUrl,
     );
-    expect(noDefault).toEqual(["cloudflare", "custom"]);
+    expect(noDefault).toEqual(["cloudflare", "omniroute", "ollama", "custom"]);
   });
 
   it("resolves the legacy stored id 'openai-compatible' to the custom entry (read side)", () => {

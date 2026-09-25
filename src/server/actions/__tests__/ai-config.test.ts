@@ -11,6 +11,13 @@ vi.mock("@/db", () => ({ getDb: () => ({
 }) }));
 vi.mock("@/lib/workspace", () => ({ getActiveContext: vi.fn(async () => ({ workspaceId: "ws-test" })) }));
 vi.mock("@/lib/security/rate-limit", () => ({ rateLimit: vi.fn(() => ({ allowed: true })) }));
+vi.mock("@/lib/security/ai-endpoint", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/security/ai-endpoint")>(),
+  assertPublicAiEndpoint: vi.fn(async (url: string) => {
+    const { assertAllowedAiEndpoint } = await import("@/lib/security/ai-endpoint");
+    assertAllowedAiEndpoint(url);
+  }),
+}));
 
 import { saveWorkspaceAIConfigAction, testCloudflareModelAction } from "@/server/actions/ai-config";
 
@@ -24,6 +31,21 @@ const input = {
 beforeEach(() => { state.saved = null; state.existing = null; });
 
 describe("Cloudflare settings save action", () => {
+  it("saves an unlisted custom public HTTPS text provider without deployment configuration", async () => {
+    const result = await saveWorkspaceAIConfigAction({
+      ...input, textProvider: "custom", textModel: "future/model", textBaseUrl: "https://new-provider.org/v1", textApiKey: "server-only-key",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(state.saved).toMatchObject({ textProvider: "custom", textModel: "future/model", textBaseUrl: "https://new-provider.org/v1" });
+    expect(state.saved?.textApiKeyEnc).not.toContain("server-only-key");
+  });
+  it("refuses an internal custom provider before persisting credentials", async () => {
+    const result = await saveWorkspaceAIConfigAction({
+      ...input, textProvider: "custom", textModel: "any-model", textBaseUrl: "https://127.0.0.1/v1", textApiKey: "secret",
+    });
+    expect(result.ok).toBe(false);
+    expect(state.saved).toBeNull();
+  });
   it("constructs the official endpoint on the server and encrypts the image token", async () => {
     expect(await saveWorkspaceAIConfigAction({ ...input, imageBaseUrl: "https://evil.test/ai" })).toEqual({ ok: true });
     expect(state.saved).toMatchObject({ textProvider: "gemini", textBaseUrl: null,

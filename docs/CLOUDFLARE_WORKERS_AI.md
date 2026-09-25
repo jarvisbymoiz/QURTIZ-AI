@@ -37,16 +37,10 @@ generating an image; save edits before testing. An invalid/revoked token,
 insufficient permission, unsupported model, quota limit and malformed image
 response produce distinct errors when generation is attempted.
 
-`AI_ALLOWED_BASE_URLS` remains active for custom endpoints. Qurtiz trusts only
-the exact canonical Cloudflare `/ai` and `/ai/v1` account bases without an
-operator entry. If using an older deployment that still requires explicit
-allowlist entries, append these two URLs with the real Account ID, retaining
-existing entries:
-
-`AI_ALLOWED_BASE_URLS=https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai,https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1`
-
-The server rejects redirects and never forwards the token to arbitrary hosts.
-Do not use a Cloudflare token as a custom provider key to bypass the preset.
+Custom providers may use any public HTTPS API base URL without environment
+changes. The server rejects local/private destinations, unsafe DNS answers,
+embedded credentials and redirects. The Cloudflare preset still constructs
+its account-scoped endpoint from the Account ID.
 
 Provider references: [OpenAI-compatible text](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/),
 [native REST execution](https://developers.cloudflare.com/workers-ai/get-started/rest-api/),

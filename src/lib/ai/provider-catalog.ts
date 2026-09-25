@@ -197,15 +197,14 @@ export const AI_PROVIDER_CATALOG: Record<CatalogProviderId, ProviderCatalogEntry
     label: "Omni Route (self-hosted gateway)",
     kind: "openai-compatible",
     group: "local",
-    defaultBaseUrl: "http://localhost:20128/v1",
-    note: "Self-hosted OpenAI-compatible router — the endpoint may differ on your deployment.",
+    note: "Use a public HTTPS endpoint for your self-hosted router; localhost and private networks are blocked.",
   },
   ollama: {
     id: "ollama",
     label: "Ollama (local)",
     kind: "openai-compatible",
     group: "local",
-    defaultBaseUrl: "http://localhost:11434/v1",
+    note: "Use a public HTTPS endpoint for your Ollama gateway; localhost and private networks are blocked.",
   },
   custom: {
     id: "custom",

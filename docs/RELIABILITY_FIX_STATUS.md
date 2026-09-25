@@ -81,8 +81,9 @@ updated through Supabase to enable video uploads (see the media record below).
   Browser testing was blocked by browser request-header policy loading failure.
   No saved video objects exist, so live Reel upload/player validation remains open.
 
-- `AI_ALLOWED_BASE_URLS`: exact custom API base URLs separated by commas. Catalog
-  defaults are supported without an entry. Configure custom gateways before use.
+- Custom AI gateways need a public HTTPS Base URL. No deployment allowlist is
+  required; save-time DNS checks and connection-time address checks block
+  internal destinations and redirects.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`: server-only storage access for
   worker uploads and signed media URLs. Keep the service key out of client bundles.
 - `CRON_SECRET`: required bearer credential for the publishing cron route.

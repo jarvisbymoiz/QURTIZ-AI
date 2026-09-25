@@ -16,7 +16,7 @@ import {
 } from "@ai-sdk/provider";
 import { convertUint8ArrayToBase64, generateId } from "@ai-sdk/provider-utils";
 import { safeToolResultJson, unwrapWrappedJsonInput } from "./stream-errors";
-import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
+import { assertAllowedAiEndpoint, fetchPublicAiEndpoint } from "@/lib/security/ai-endpoint";
 
 /**
  * Minimal OpenAI Chat Completions-compatible LanguageModelV2.
@@ -322,7 +322,7 @@ export function createOpenAICompatibleModel(opts: {
     async doGenerate(callOptions: LanguageModelV2CallOptions) {
       const messages = toChatMessages(callOptions.prompt);
       const requestBody = buildRequestBody({ modelId: opts.modelId, messages, callOptions, stream: false });
-      const res = await fetch(url, {
+      const res = await fetchPublicAiEndpoint(url, {
         redirect: "error",
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json", ...callOptions.headers },
@@ -369,7 +369,7 @@ export function createOpenAICompatibleModel(opts: {
     async doStream(callOptions: LanguageModelV2CallOptions) {
       const messages = toChatMessages(callOptions.prompt);
       const requestBody = buildRequestBody({ modelId: opts.modelId, messages, callOptions, stream: true });
-      const res = await fetch(url, {
+      const res = await fetchPublicAiEndpoint(url, {
         redirect: "error",
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json", ...callOptions.headers },
