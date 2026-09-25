@@ -2,6 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import { AI_TASKS } from "@/lib/ai/provider";
+import { isCloudflareAccountId, isCloudflareModel, isSupportedCloudflareImageModel } from "@/lib/ai/cloudflare";
 import {
   CATALOG_PROVIDER_IDS,
   catalogEntry,
@@ -32,10 +33,12 @@ export const saveAIConfigInputSchema = z
     textProvider: z.string(),
     textModel: z.string().trim().min(1, "A text model is required."),
     textBaseUrl: z.string().trim().nullable().optional(),
+    textAccountId: z.string().trim().nullable().optional(),
     textApiKey: z.string().trim().optional().nullable(),
     imageProvider: z.string(),
     imageModel: z.string().trim().min(1, "An image model is required."),
     imageBaseUrl: z.string().trim().nullable().optional(),
+    imageAccountId: z.string().trim().nullable().optional(),
     imageApiKey: z.string().trim().optional().nullable(),
     taskOverrides: z.record(z.enum(AI_TASKS), z.string().trim().min(1)).nullable().optional(),
   })
@@ -53,6 +56,10 @@ export const saveAIConfigInputSchema = z
         message: baseUrlRequirementMessage(v.textProvider, "text"),
       });
     }
+    if (v.textProvider === "cloudflare") {
+      if (!isCloudflareAccountId(v.textAccountId ?? "")) ctx.addIssue({ code: "custom", path: ["textAccountId"], message: "Cloudflare text Account ID must be 32 hexadecimal characters." });
+      if (!isCloudflareModel(v.textModel)) ctx.addIssue({ code: "custom", path: ["textModel"], message: "Use a Workers AI text model such as @cf/meta/llama-3.1-8b-instruct." });
+    }
     if (!isCatalogProviderId(v.imageProvider)) {
       ctx.addIssue({
         code: "custom",
@@ -65,6 +72,10 @@ export const saveAIConfigInputSchema = z
         path: ["imageBaseUrl"],
         message: baseUrlRequirementMessage(v.imageProvider, "image"),
       });
+    }
+    if (v.imageProvider === "cloudflare") {
+      if (!isCloudflareAccountId(v.imageAccountId ?? "")) ctx.addIssue({ code: "custom", path: ["imageAccountId"], message: "Cloudflare image Account ID must be 32 hexadecimal characters." });
+      if (!isSupportedCloudflareImageModel(v.imageModel)) ctx.addIssue({ code: "custom", path: ["imageModel"], message: "Choose a supported Workers AI image model (FLUX.1 schnell or Stable Diffusion XL)." });
     }
   });
 

@@ -3,6 +3,7 @@
 import type { ImageProviderId } from "@/lib/ai/provider";
 import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
 import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
+import { generateCloudflareImage } from "@/lib/ai/cloudflare-image";
 
 /**
  * Image generation via REST, driven by the workspace's own AI config
@@ -12,7 +13,8 @@ import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
  * - gemini: Google's generateContent REST API (direct fetch for full
  *   control over reference images / img2img, which SDK image APIs do not
  *   expose). Models are tried in order; the first with quota wins.
- * - every other catalog provider is openai-compatible: POST
+ * - cloudflare: native Workers AI /ai/run/{model}, normalized to PNG.
+ * - other catalog providers are openai-compatible: POST
  *   {baseUrl}/images/generations (OpenAI Images API shape — also served by
  *   OpenRouter and compatible gateways). The base URL is the EFFECTIVE one
  *   (stored ?? catalog default); a `custom` provider without an endpoint
@@ -166,8 +168,8 @@ async function openaiCompatibleGenerate(args: {
  * Generate an image using the workspace's configured image provider/model.
  * `target` comes from getWorkspaceImageTarget(workspaceId) — the caller
  * resolves it so this module stays free of DB access. Dispatch follows the
- * catalog: kind "gemini" → Google REST; every other entry → the OpenAI
- * Images API shape against its (stored ?? catalog default) base URL. The
+ * catalog: Gemini → Google REST; Cloudflare → native Workers AI; other
+ * providers → the OpenAI Images API against the effective base URL. The
  * legacy stored id "openai-compatible" maps to `custom` via the catalog, so
  * old rows keep working here too.
  */
@@ -188,6 +190,10 @@ export async function generateImage(args: {
   }
   if (entry.kind === "gemini") {
     return geminiGenerate({ prompt: args.prompt, references: args.references, apiKey: args.apiKey, modelId: args.modelId });
+  }
+  if (entry.id === "cloudflare") {
+    return generateCloudflareImage({ prompt: args.prompt, references: args.references, apiKey: args.apiKey,
+      modelId: args.modelId, baseUrl: args.baseUrl ?? "" });
   }
   // OpenAI-compatible kind. Resolution already filled the catalog default
   // for presets; a `custom` provider with no endpoint fails honestly here

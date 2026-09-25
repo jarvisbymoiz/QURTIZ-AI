@@ -18,6 +18,7 @@ import {
   providerRequiresBaseUrl,
   type CatalogProviderId,
 } from "@/lib/ai/provider-catalog";
+import { cloudflareAccountIdFromBaseUrl } from "@/lib/ai/cloudflare";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -62,6 +63,7 @@ function providerLabel(id: string): string {
 /** Model input placeholder: catalog hint, else the section fallback. */
 function modelPlaceholder(providerId: string, section: "text" | "image"): string | undefined {
   const entry = catalogEntry(providerId);
+  if (providerId === "cloudflare") return section === "text" ? entry?.textModelHint : entry?.imageModelHint;
   if (entry?.modelHint) return entry.modelHint;
   if (entry?.kind === "gemini") return FALLBACK_MODEL_HINTS[section][providerId as CatalogProviderId];
   return undefined;
@@ -76,6 +78,7 @@ function modelPlaceholder(providerId: string, section: "text" | "image"): string
 function nextBaseUrl(providerId: string, prevProviderId: string, current: string): string {
   const entry = catalogEntry(providerId);
   if (!entry || entry.kind === "gemini") return "";
+  if (providerId === "cloudflare" || prevProviderId === "cloudflare") return entry.defaultBaseUrl ?? "";
   const trimmed = current.trim();
   if (trimmed === "") return entry.defaultBaseUrl ?? "";
   const prevDefault = catalogEntry(prevProviderId)?.defaultBaseUrl;
@@ -135,7 +138,7 @@ function BaseUrlField({
   disabled?: boolean;
 }) {
   const entry = catalogEntry(providerId);
-  if (!entry || entry.kind === "gemini") return null;
+  if (!entry || entry.kind === "gemini" || providerId === "cloudflare") return null;
   const required = providerRequiresBaseUrl(providerId);
   return (
     <div className="space-y-2">
@@ -171,10 +174,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
   const [textProvider, setTextProvider] = useState<string>("gemini");
   const [textModel, setTextModel] = useState("");
   const [textBaseUrl, setTextBaseUrl] = useState("");
+  const [textAccountId, setTextAccountId] = useState("");
   const [textApiKey, setTextApiKey] = useState("");
   const [imageProvider, setImageProvider] = useState<string>("gemini");
   const [imageModel, setImageModel] = useState("");
   const [imageBaseUrl, setImageBaseUrl] = useState("");
+  const [imageAccountId, setImageAccountId] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
 
   const [saving, startSaving] = useTransition();
@@ -196,9 +201,11 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
       setTextProvider(catalogEntry(r.config.textProvider)?.id ?? r.config.textProvider);
       setTextModel(r.config.textModel);
       setTextBaseUrl(r.config.textBaseUrl ?? "");
+      setTextAccountId(r.config.textProvider === "cloudflare" ? cloudflareAccountIdFromBaseUrl(r.config.textBaseUrl ?? "", "text") ?? "" : "");
       setImageProvider(catalogEntry(r.config.imageProvider)?.id ?? r.config.imageProvider);
       setImageModel(r.config.imageModel);
       setImageBaseUrl(r.config.imageBaseUrl ?? "");
+      setImageAccountId(r.config.imageProvider === "cloudflare" ? cloudflareAccountIdFromBaseUrl(r.config.imageBaseUrl ?? "", "image") ?? "" : "");
     }
     // Keys intentionally NOT prefilled — the masked hint below is the only
     // trace of a stored key. Blank on save preserves it server-side.
@@ -217,9 +224,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
     const prev = textProvider;
     setTextProvider(next);
     setTextBaseUrl(nextBaseUrl(next, prev, textBaseUrl));
+    if (next !== "cloudflare") setTextAccountId("");
     if (imageProvider === prev) {
       setImageProvider(next);
       setImageBaseUrl(nextBaseUrl(next, prev, imageBaseUrl));
+      if (next === "cloudflare") setImageAccountId(textAccountId);
+      else setImageAccountId("");
     }
   }
 
@@ -227,6 +237,8 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
     const prev = imageProvider;
     setImageProvider(next);
     setImageBaseUrl(nextBaseUrl(next, prev, imageBaseUrl));
+    if (next === "cloudflare" && !imageAccountId) setImageAccountId(textAccountId);
+    if (next !== "cloudflare") setImageAccountId("");
   }
 
   function save(e: React.FormEvent) {
@@ -239,10 +251,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
         textProvider,
         textModel,
         textBaseUrl: textIsOpenAiCompatible ? textBaseUrl : null,
+        textAccountId: textProvider === "cloudflare" ? textAccountId : null,
         textApiKey: textApiKey || null,
         imageProvider,
         imageModel,
         imageBaseUrl: imageIsOpenAiCompatible ? imageBaseUrl : null,
+        imageAccountId: imageProvider === "cloudflare" ? imageAccountId : null,
         imageApiKey: imageApiKey || null,
       });
       if (r.ok) {
@@ -264,10 +278,12 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
         setTextProvider("gemini");
         setTextModel("");
         setTextBaseUrl("");
+        setTextAccountId("");
         setTextApiKey("");
         setImageProvider("gemini");
         setImageModel("");
         setImageBaseUrl("");
+        setImageAccountId("");
         setImageApiKey("");
       } else {
         toast.error(r.error);
@@ -378,18 +394,27 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                 onChange={setTextBaseUrl}
                 disabled={!editable}
               />
+              {textProvider === "cloudflare" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="text-account-id">Cloudflare Account ID</Label>
+                  <Input id="text-account-id" value={textAccountId} onChange={e => setTextAccountId(e.target.value)}
+                    placeholder="32-character Account ID" required disabled={!editable} autoComplete="off" />
+                  <p className="text-xs text-muted-foreground">The server constructs the account’s /ai/v1 chat endpoint.</p>
+                </div>
+              ) : null}
               <div className="space-y-2">
-                <Label htmlFor="text-api-key">API key</Label>
+                <Label htmlFor="text-api-key">{textProvider === "cloudflare" ? "Workers AI API token" : "API key"}</Label>
                 <Input
                   id="text-api-key"
                   type="password"
                   autoComplete="new-password"
                   value={textApiKey}
                   onChange={(e) => setTextApiKey(e.target.value)}
-                  placeholder={config?.textApiKeyMasked ? "Enter a new key to replace" : "Paste your API key"}
+                  placeholder={config?.textProvider === textProvider && config.textApiKeyMasked ? "Enter a new key to replace" : "Paste this provider’s API key"}
+                  required={config?.textProvider !== textProvider || !config?.textApiKeyMasked}
                   disabled={!editable}
                 />
-                {config?.textApiKeyMasked ? (
+                {config?.textProvider === textProvider && config.textApiKeyMasked ? (
                   <p className="text-xs text-muted-foreground">
                     Key saved ({config.textApiKeyMasked}) — enter a new key to replace it. Leaving it blank
                     keeps the saved key.
@@ -433,18 +458,27 @@ export function AiConfigCard({ editable }: { editable: boolean }) {
                 onChange={setImageBaseUrl}
                 disabled={!editable}
               />
+              {imageProvider === "cloudflare" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="image-account-id">Cloudflare Account ID</Label>
+                  <Input id="image-account-id" value={imageAccountId} onChange={e => setImageAccountId(e.target.value)}
+                    placeholder="32-character Account ID" required disabled={!editable} autoComplete="off" />
+                  <p className="text-xs text-muted-foreground">Supports @cf/black-forest-labs/flux-1-schnell and @cf/stabilityai/stable-diffusion-xl-base-1.0. The server constructs the native /ai/run endpoint.</p>
+                </div>
+              ) : null}
               <div className="space-y-2">
-                <Label htmlFor="image-api-key">API key</Label>
+                <Label htmlFor="image-api-key">{imageProvider === "cloudflare" ? "Workers AI API token" : "API key"}</Label>
                 <Input
                   id="image-api-key"
                   type="password"
                   autoComplete="new-password"
                   value={imageApiKey}
                   onChange={(e) => setImageApiKey(e.target.value)}
-                  placeholder={config?.imageApiKeyMasked ? "Enter a new key to replace" : "Paste your API key"}
+                  placeholder={config?.imageProvider === imageProvider && config.imageApiKeyMasked ? "Enter a new key to replace" : "Paste this provider’s API key"}
+                  required={config?.imageProvider !== imageProvider || !config?.imageApiKeyMasked}
                   disabled={!editable}
                 />
-                {config?.imageApiKeyMasked ? (
+                {config?.imageProvider === imageProvider && config.imageApiKeyMasked ? (
                   <p className="text-xs text-muted-foreground">
                     Key saved ({config.imageApiKeyMasked}) — enter a new key to replace it. Leaving it blank
                     keeps the saved key.

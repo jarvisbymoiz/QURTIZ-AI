@@ -11,6 +11,7 @@ import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 import { assertAllowedAiEndpoint } from "@/lib/security/ai-endpoint";
 import { resolvedBaseUrl } from "@/lib/ai/provider-catalog";
+import { cloudflareBaseUrl } from "@/lib/ai/cloudflare";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -81,10 +82,12 @@ export async function saveWorkspaceAIConfigAction(input: {
   textProvider: string;
   textModel: string;
   textBaseUrl?: string | null;
+  textAccountId?: string | null;
   textApiKey?: string | null;
   imageProvider: string;
   imageModel: string;
   imageBaseUrl?: string | null;
+  imageAccountId?: string | null;
   imageApiKey?: string | null;
   taskOverrides?: AiTaskOverrides | null;
 }): Promise<ActionResult> {
@@ -97,18 +100,22 @@ export async function saveWorkspaceAIConfigAction(input: {
   const parsed = saveAIConfigInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   const d = parsed.data;
+  // Do not persist or trust a caller-supplied Cloudflare URL. The account ID
+  // is validated by the schema and the server constructs the only allowed URL.
+  const textBaseUrl = d.textProvider === "cloudflare" ? cloudflareBaseUrl(d.textAccountId!, "text") : d.textBaseUrl ?? null;
+  const imageBaseUrl = d.imageProvider === "cloudflare" ? cloudflareBaseUrl(d.imageAccountId!, "image") : d.imageBaseUrl ?? null;
 
   const shapeError = validateAIConfigShape({
     textProvider: d.textProvider,
     textModel: d.textModel,
-    textBaseUrl: d.textBaseUrl ?? null,
+    textBaseUrl,
     imageProvider: d.imageProvider,
     imageModel: d.imageModel,
-    imageBaseUrl: d.imageBaseUrl ?? null,
+    imageBaseUrl,
   });
   if (shapeError) return { ok: false, error: shapeError };
   try {
-    for (const [provider, base] of [[d.textProvider, d.textBaseUrl], [d.imageProvider, d.imageBaseUrl]]) {
+    for (const [provider, base] of [[d.textProvider, textBaseUrl], [d.imageProvider, imageBaseUrl]]) {
       const endpoint = resolvedBaseUrl(provider!, base);
       if (endpoint) assertAllowedAiEndpoint(endpoint);
     }
@@ -116,9 +123,17 @@ export async function saveWorkspaceAIConfigAction(input: {
 
   const db = getDb();
   const [existing] = await db
-    .select({ textApiKeyEnc: workspaceAiConfig.textApiKeyEnc, imageApiKeyEnc: workspaceAiConfig.imageApiKeyEnc })
+    .select({ textProvider: workspaceAiConfig.textProvider, imageProvider: workspaceAiConfig.imageProvider,
+      textApiKeyEnc: workspaceAiConfig.textApiKeyEnc, imageApiKeyEnc: workspaceAiConfig.imageApiKeyEnc })
     .from(workspaceAiConfig)
     .where(eq(workspaceAiConfig.workspaceId, ctx.workspaceId));
+
+  if (existing && d.textProvider !== existing.textProvider && !d.textApiKey?.trim()) {
+    return { ok: false, error: "Enter an API key for the new text provider." };
+  }
+  if (existing && d.imageProvider !== existing.imageProvider && !d.imageApiKey?.trim()) {
+    return { ok: false, error: "Enter an API key for the new image provider." };
+  }
 
   let row: typeof workspaceAiConfig.$inferInsert;
   try {
@@ -127,11 +142,11 @@ export async function saveWorkspaceAIConfigAction(input: {
         workspaceId: ctx.workspaceId,
         textProvider: d.textProvider,
         textModel: d.textModel,
-        textBaseUrl: d.textBaseUrl ?? null,
+        textBaseUrl,
         textApiKey: d.textApiKey ?? "",
         imageProvider: d.imageProvider,
         imageModel: d.imageModel,
-        imageBaseUrl: d.imageBaseUrl ?? null,
+        imageBaseUrl,
         imageApiKey: d.imageApiKey ?? "",
         taskOverrides: d.taskOverrides ?? null,
       },

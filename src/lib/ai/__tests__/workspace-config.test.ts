@@ -29,6 +29,7 @@ import {
   prepareConfigRow,
 } from "@/lib/ai/config";
 import { saveAIConfigInputSchema } from "@/lib/ai/ai-config-schema";
+import { cloudflareBaseUrl } from "@/lib/ai/cloudflare";
 
 /**
  * DB stub: getWorkspaceAIConfig reads a single row via getDb().select()...
@@ -108,6 +109,31 @@ afterEach(() => {
 });
 
 describe("prepareConfigRow (encryption + validation)", () => {
+  it("saves Cloudflare image credentials independently from a Gemini text provider", () => {
+    const accountId = "0123456789abcdef0123456789abcdef";
+    const model = "@cf/black-forest-labs/flux-1-schnell";
+    const parsed = saveAIConfigInputSchema.safeParse({ textProvider: "gemini", textModel: "gemini-3.6-flash",
+      textApiKey: "text-key", imageProvider: "cloudflare", imageModel: model,
+      imageAccountId: accountId, imageApiKey: "cloudflare-token" });
+    expect(parsed.success).toBe(true);
+    const row = prepareConfigRow({ workspaceId: "ws", textProvider: "gemini", textModel: "gemini-3.6-flash",
+      textApiKey: "text-key", imageProvider: "cloudflare", imageModel: model,
+      imageBaseUrl: cloudflareBaseUrl(accountId, "image"), imageApiKey: "cloudflare-token" });
+    expect(row.imageBaseUrl).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai`);
+    expect(row.textBaseUrl).toBeNull();
+    expect(row.imageApiKeyEnc).not.toContain("cloudflare-token");
+    expect(decryptToken(row.imageApiKeyEnc!)).toBe("cloudflare-token");
+    expect(resolveImageTarget(config({ imageProvider: "cloudflare", imageModel: model,
+      imageBaseUrl: row.imageBaseUrl!, imageApiKey: "cloudflare-token" })).provider).toBe("cloudflare");
+  });
+  it("rejects invalid Cloudflare account IDs, unsupported image models and arbitrary URLs", () => {
+    const input = { textProvider: "openai", textModel: "gpt-4o-mini", textApiKey: "text-key",
+      imageProvider: "cloudflare", imageModel: "@cf/black-forest-labs/flux-1-schnell", imageApiKey: "image-key" };
+    expect(saveAIConfigInputSchema.safeParse({ ...input, imageAccountId: "bad" }).success).toBe(false);
+    expect(saveAIConfigInputSchema.safeParse({ ...input, imageAccountId: "a".repeat(32), imageModel: "gpt-image-1" }).success).toBe(false);
+    expectAIConfigError(() => prepareConfigRow({ workspaceId: "ws", ...input,
+      imageBaseUrl: "https://evil.test/client/v4/accounts/" + "a".repeat(32) + "/ai" }), /Cloudflare image/);
+  });
   it("encrypts both keys at rest (v1 payload, no plaintext, decrypt round-trip)", () => {
     const row = prepareConfigRow({
       workspaceId: "ws",
@@ -539,6 +565,7 @@ describe("AI provider catalog (Phase 3)", () => {
   > = {
     gemini: { label: "Google Gemini", kind: "gemini" },
     openai: { label: "OpenAI", kind: "openai-compatible", defaultBaseUrl: "https://api.openai.com/v1" },
+    cloudflare: { label: "Cloudflare Workers AI", kind: "openai-compatible" },
     openrouter: {
       label: "OpenRouter",
       kind: "openai-compatible",
@@ -616,13 +643,13 @@ describe("AI provider catalog (Phase 3)", () => {
     }
   });
 
-  it("gemini has no base URL; every openai-compatible preset has one EXCEPT custom", () => {
+  it("Gemini has no base URL; Cloudflare needs an account ID and custom needs an operator URL", () => {
     expect(AI_PROVIDER_CATALOG.gemini.kind).toBe("gemini");
     expect(AI_PROVIDER_CATALOG.gemini.defaultBaseUrl).toBeUndefined();
     const noDefault = CATALOG_PROVIDER_IDS.filter(
       (id) => AI_PROVIDER_CATALOG[id].kind === "openai-compatible" && !AI_PROVIDER_CATALOG[id].defaultBaseUrl,
     );
-    expect(noDefault).toEqual(["custom"]);
+    expect(noDefault).toEqual(["cloudflare", "custom"]);
   });
 
   it("resolves the legacy stored id 'openai-compatible' to the custom entry (read side)", () => {

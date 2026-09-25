@@ -4,13 +4,9 @@
  *
  * KIND MODEL
  * ───────────
- * Every non-Gemini provider in the catalog speaks the OpenAI Chat
- * Completions API (text) and — where the gateway implements it — the
- * OpenAI Images API shape (`/images/generations`, b64_json). They are all
- * served by the single native openai-compatible client
- * (lib/ai/openai-compatible.ts / lib/ai/image.ts); no per-provider SDK
- * packages exist in this repo. `kind` therefore only distinguishes the
- * Gemini SDK path from the OpenAI-compatible REST path.
+ * Non-Gemini text providers use OpenAI Chat Completions. Most image gateways
+ * use the OpenAI Images shape; Cloudflare image models use a dedicated native
+ * Workers AI adapter under /ai/run/{model}.
  *
  * BASE URL RESOLUTION
  * ───────────────────
@@ -39,6 +35,7 @@
 export const CATALOG_PROVIDER_IDS = [
   "gemini",
   "openai",
+  "cloudflare",
   "openrouter",
   "nvidia",
   "groq",
@@ -79,6 +76,8 @@ export type ProviderCatalogEntry = {
   defaultBaseUrl?: string;
   /** Example model id shown as the model input placeholder. */
   modelHint?: string;
+  textModelHint?: string;
+  imageModelHint?: string;
   /** Short honest helper text rendered under the form. */
   note?: string;
 };
@@ -100,6 +99,15 @@ export const AI_PROVIDER_CATALOG: Record<CatalogProviderId, ProviderCatalogEntry
     kind: "openai-compatible",
     group: "gateway",
     defaultBaseUrl: "https://api.openai.com/v1",
+  },
+  cloudflare: {
+    id: "cloudflare",
+    label: "Cloudflare Workers AI",
+    kind: "openai-compatible",
+    group: "gateway",
+    textModelHint: "@cf/meta/llama-3.1-8b-instruct",
+    imageModelHint: "@cf/black-forest-labs/flux-1-schnell",
+    note: "Enter your Cloudflare Account ID and Workers AI API token. Image generation uses the native Workers AI API.",
   },
   openrouter: {
     id: "openrouter",
@@ -245,13 +253,14 @@ export function catalogEntry(id: string): ProviderCatalogEntry | undefined {
 
 /**
  * True when an openai-compatible provider has no catalog default and
- * therefore demands a user-supplied base URL. Today that is only `custom`
- * (and the legacy alias, which maps to it); the rule stays generic so a
+ * therefore demands a user-supplied base URL. Cloudflare is handled through
+ * its Account ID field and is excluded. `custom` and its legacy alias need a
+ * URL; the rule stays generic so a
  * future catalog entry without a default is handled automatically.
  */
 export function providerRequiresBaseUrl(providerId: string): boolean {
   const entry = catalogEntry(providerId);
-  return Boolean(entry && entry.kind === "openai-compatible" && !entry.defaultBaseUrl);
+  return Boolean(entry && entry.id !== "cloudflare" && entry.kind === "openai-compatible" && !entry.defaultBaseUrl);
 }
 
 /**
