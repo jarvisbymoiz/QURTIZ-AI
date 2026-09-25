@@ -6,7 +6,8 @@ vi.mock("@/lib/media/cleanup-worker", () => ({ mediaCleanupTick: vi.fn() }));
 vi.mock("@supabase/ssr", () => ({ createServerClient: vi.fn(() => { throw Error("Cron must not require a browser session"); }) }));
 import { GET as publish } from "@/app/api/cron/publish/route";
 import { GET as maintenance } from "@/app/api/cron/maintenance/route";
-import { publishDueScan } from "../workflows";
+import { publishDueScan, refreshPendingDeliveryNotifications } from "../workflows";
+import { reconcileBufferDeliveries } from "@/lib/publishing/service";
 import { updateSession } from "@/lib/supabase/middleware";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
@@ -28,5 +29,13 @@ describe("machine cron endpoints", () => {
     const response = await publish(new NextRequest("https://example.test/api/cron/publish", { headers: { authorization: "Bearer test-cron-secret" } }));
     expect(response.status).toBe(200);
     expect(publishDueScan).toHaveBeenCalledWith({ limit: 5, parallel: true, reconcile: false });
+  });
+  it("runs delivery and notification recovery from the authenticated background route", async () => {
+    vi.stubEnv("CRON_SECRET", "test-cron-secret");
+    const response = await maintenance(new NextRequest("https://example.test/api/cron/maintenance", { headers: { authorization: "Bearer test-cron-secret" } }));
+    expect(response.status).toBe(200);
+    expect(reconcileBufferDeliveries).toHaveBeenCalledOnce();
+    expect(refreshPendingDeliveryNotifications).toHaveBeenCalledOnce();
+    expect(publishDueScan).not.toHaveBeenCalled();
   });
 });

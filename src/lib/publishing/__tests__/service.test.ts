@@ -10,6 +10,7 @@ import {
   isFirstCommentPlanError,
   platformToBufferService,
   publishNow,
+  reconcileBufferDeliveries,
   retryFailedPublish,
   resolvePublishConnection,
   schedulePost,
@@ -45,6 +46,7 @@ vi.mock("@/lib/buffer/client", async (importOriginal) => {
     createPostForBuffer: vi.fn(),
     refreshAccessToken: vi.fn(),
     listChannels: vi.fn(),
+    getBufferPostStatus: vi.fn(),
   };
 });
 
@@ -232,6 +234,63 @@ function makeFakeDb(spec: {
 }
 
 /* ── Pure helpers ─────────────────────────────────────────────────────── */
+
+describe("Buffer delivery recovery without resending", () => {
+  const accepted = {
+    id: "accepted-job", workspaceId: WORKSPACE_ID, contentItemId: ITEM_ID,
+    contentVariantId: VARIANT_ID, platform: "facebook", provider: "buffer",
+    status: "processing", providerPostId: "accepted-post", result: {},
+  };
+  it("persists the polling budget across scans without calling a publisher", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[{ ...accepted, result: { deliveryPollAttempts: 4 } }]], platformConnections: [[makeConnRow()]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(bufferClient.getBufferPostStatus).mockResolvedValue({ ok: false, reason: "network", message: "Temporary outage" });
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "processing", result: { deliveryPollAttempts: 5, awaitingDelivery: true } });
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+  it("stops unconfirmed delivery after the persisted budget is exhausted", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[{ ...accepted, result: { deliveryPollAttempts: 47 } }]], platformConnections: [[makeConnRow()]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(bufferClient.getBufferPostStatus).mockResolvedValue({ ok: true, data: { id: "accepted-post", status: "pending" } });
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "failed", result: { reconciliationRequired: true, deliveryPollAttempts: 48 } });
+    expect(fake.updates[0].values.lastError).toMatch(/may already be live/);
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+  it("makes a missing connection actionable without dropping the accepted post ID", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[accepted]], platformConnections: [[]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "failed", result: { reconciliationRequired: true } });
+    expect(fake.updates[0].values).not.toHaveProperty("providerPostId");
+    expect(vi.mocked(bufferClient.getBufferPostStatus)).not.toHaveBeenCalled();
+  });
+  it("handles an interrupted status request with a persisted recovery attempt", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[accepted]], platformConnections: [[makeConnRow()]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(bufferClient.getBufferPostStatus).mockRejectedValue(new Error("Request interrupted"));
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "processing", result: { deliveryPollAttempts: 1 } });
+  });
+  it("keeps a temporary token refresh failure eligible for another status check", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[accepted]], platformConnections: [[makeConnRow()]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(bufferClient.getBufferPostStatus).mockResolvedValue({ ok: false, reason: "auth", message: "Expired access token" });
+    mockedRefreshAccessToken.mockResolvedValue({ ok: false, reason: "network", message: "Temporary refresh outage" });
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "processing", result: { deliveryPollAttempts: 1 } });
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+  it("records confirmed delivery even on the final polling attempt", async () => {
+    const fake = makeFakeDb({ publishingJobs: [[{ ...accepted, result: { deliveryPollAttempts: 47, awaitingDelivery: true } }]], platformConnections: [[makeConnRow()]], contentItems: [[ITEM_ROW]], contentVariants: [[{ ...VARIANT_ROW, status: "published" }]] });
+    mockedGetDb.mockReturnValue(fake.db as never);
+    vi.mocked(bufferClient.getBufferPostStatus).mockResolvedValue({ ok: true, data: { id: "accepted-post", status: "sent" } });
+    await reconcileBufferDeliveries();
+    expect(fake.updates[0].values).toMatchObject({ status: "published", providerPostId: "accepted-post", result: { awaitingDelivery: false, deliveryPollAttempts: 48 } });
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
+  });
+});
 
 describe("mixed-format post media selection", () => {
   it("selects ordered Carousel images and Reel video independently from shared uploaded media", async () => {

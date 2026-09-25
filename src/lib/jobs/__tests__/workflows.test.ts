@@ -15,7 +15,7 @@ import { campaigns, jobs, notifications, publishingJobs } from "@/db/schema";
 vi.mock("@/db", () => ({ getDb: vi.fn() }));
 vi.mock("@/lib/jobs/publish-claim", () => ({ claimScheduledPublishJob: vi.fn() }));
 
-vi.mock("@/lib/publishing/service", () => ({ publishNow: vi.fn() }));
+vi.mock("@/lib/publishing/service", () => ({ publishNow: vi.fn(), readCommentState: vi.fn(() => null) }));
 vi.mock("@/lib/publish/provider", () => ({ resolvePublishProviderForPlatform: vi.fn() }));
 
 // Heavy collaborators of the workflows module — stubbed so importing the
@@ -38,7 +38,7 @@ vi.mock("@/lib/visuals/generate", () => ({ generateVisual: vi.fn() }));
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
 const { claimScheduledPublishJob } = await import("@/lib/jobs/publish-claim");
-const { attemptPublish, recoverStuckGenerationJobs } = await import("@/lib/jobs/workflows");
+const { attemptPublish, recoverStuckGenerationJobs, refreshPendingDeliveryNotifications } = await import("@/lib/jobs/workflows");
 const { publishNow } = await import("@/lib/publishing/service");
 const { resolvePublishProviderForPlatform } = await import("@/lib/publish/provider");
 const mockedPublishNow = vi.mocked(publishNow);
@@ -238,7 +238,7 @@ describe("attemptPublish — published-post destinations", () => {
       from: (table: unknown) => {
         if (table === publishingJobs) {
           // flipToPublished already persisted the real Meta permalink.
-          const rows: Row[] = [{ platform: "facebook", result: { permalink: "https://www.facebook.com/123/posts/456" } }];
+          const rows: Row[] = [{ id: "pj-1", status: "published", platform: "facebook", result: { permalink: "https://www.facebook.com/123/posts/456" } }];
           const whereResult = Object.assign(Promise.resolve(rows), {
             limit: async () => rows.slice(0, 1),
             orderBy: () => ({ limit: async () => [] as Row[] }),
@@ -262,6 +262,56 @@ describe("attemptPublish — published-post destinations", () => {
     expect(inserts[0].link).toBeNull();
     const meta = inserts[0].meta as { destinations?: Array<{ platform: string; permalink: string }> };
     expect(meta.destinations).toEqual([{ platform: "facebook", permalink: "https://www.facebook.com/123/posts/456" }]);
+  });
+});
+
+describe("durable multi-platform notifications", () => {
+  it.each([
+    ["processing", "pending", "Accepted for delivery"],
+    ["published", "published", "Published successfully"],
+    ["failed", "partial", "Partially published"],
+  ])("preserves the other platform's %s delivery state", async (status, expectedStatus, title) => {
+    const { db, inserts } = makeAttemptDb(JOB);
+    const baseSelect = db.select;
+    db.select = () => ({ from: (table: unknown) => {
+      if (table !== publishingJobs) return baseSelect().from(table);
+      const rows = [
+        { id: "pj-1", status: "published", platform: "facebook", result: { permalink: "https://www.facebook.com/123/posts/456" } },
+        { id: "pj-2", status, platform: "instagram", result: {}, lastError: status === "failed" ? "Reconnect Buffer" : null },
+      ];
+      return { where: () => Object.assign(Promise.resolve(rows), { limit: async () => rows, orderBy: () => ({ limit: async () => rows }) }) };
+    } });
+    mockedGetDb.mockReturnValue(db as never);
+    mockedResolveProvider.mockResolvedValue("meta");
+    mockedPublishNow.mockResolvedValue(okResult("meta"));
+    await attemptPublish("pj-1");
+    expect(inserts[0].title).toBe(title);
+    expect(inserts[0].meta).toMatchObject({ publishStatus: expectedStatus,
+      deliveryJobs: [{ id: "pj-1", status: "published" }, { id: "pj-2", status }],
+      destinations: [{ platform: "facebook", permalink: "https://www.facebook.com/123/posts/456" }],
+    });
+    if (status === "failed") {
+      expect(inserts[0].body).toContain("Reconnect Buffer");
+      expect(inserts[0].body).not.toContain("live on Facebook + Instagram");
+    }
+  });
+
+  it("recovers a missing manual publication notification from the database without publishing again", async () => {
+    const persisted = { ...JOB, status: "published", providerPostId: "saved-post", result: {} };
+    const { db, inserts } = makeAttemptDb(JOB);
+    const baseSelect = db.select;
+    const recoveryDb = { ...db, select: () => ({ from: (table: unknown) => ({
+      ...baseSelect().from(table),
+      innerJoin: () => ({ where: () => ({
+        limit: async () => [],
+        orderBy: () => ({ limit: async () => [{ job: persisted, recipientId: "user-1" }] }),
+      }) }),
+    }) }) };
+    mockedGetDb.mockReturnValue(recoveryDb as never);
+    await refreshPendingDeliveryNotifications("ws-1");
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({ userId: "user-1", kind: "publishing_completed", title: "Published successfully" });
+    expect(mockedPublishNow).not.toHaveBeenCalled();
   });
 });
 

@@ -181,10 +181,14 @@ async function recordPublishedNotification(args: {
     // Every sibling platform job that already reached "published" contributes
     // its stored permalink (flipToPublished persisted it to the job result row
     // before publishNow returned — the current job is included here).
-    const publishedSiblings = await db
-      .select({ platform: publishingJobs.platform, result: publishingJobs.result })
+    const deliveryJobs = await db
+      .select({ id: publishingJobs.id, status: publishingJobs.status, platform: publishingJobs.platform, result: publishingJobs.result, lastError: publishingJobs.lastError })
       .from(publishingJobs)
-      .where(and(eq(publishingJobs.contentItemId, job.contentItemId), eq(publishingJobs.status, "published"), eq(publishingJobs.workspaceId, job.workspaceId)));
+      .where(and(eq(publishingJobs.contentItemId, job.contentItemId), eq(publishingJobs.workspaceId, job.workspaceId),
+        sql`(${publishingJobs.status} = 'published' or (${publishingJobs.provider} = 'buffer' and ${publishingJobs.providerPostId} is not null and ${publishingJobs.status} in ('processing', 'failed')))`));
+    const publishedSiblings = deliveryJobs.filter(row => row.status === "published");
+    const pendingSiblings = deliveryJobs.filter(row => row.status === "processing");
+    const failedSiblings = deliveryJobs.filter(row => row.status === "failed");
 
     const destinations: PublishedDestination[] = [];
     for (const row of publishedSiblings) {
@@ -195,7 +199,8 @@ async function recordPublishedNotification(args: {
       destinations.push({ platform: row.platform, permalink });
     }
 
-    const platforms = [...new Set([...publishedSiblings.map((s) => s.platform), job.platform])] as Array<"facebook" | "instagram">;
+    const deliveredPlatforms = [...publishedSiblings.map(s => s.platform), ...pendingSiblings.map(s => s.platform)];
+    const platforms = [...new Set(deliveredPlatforms.length ? deliveredPlatforms : [job.platform])] as Array<"facebook" | "instagram">;
 
     const commentNote = result.firstCommentSkipped
       ? "Skipped (unavailable on current Buffer plan)."
@@ -215,9 +220,21 @@ async function recordPublishedNotification(args: {
       format: item?.format,
       publishedPlatforms: platforms,
       destinations,
-      pendingDelivery: result.pendingDelivery === true,
+      pendingDelivery: pendingSiblings.length > 0 || result.pendingDelivery === true,
       commentNote,
     });
+    if (failedSiblings.length > 0) {
+      note.body += "\n" + failedSiblings.map(s => `${s.platform}: ${s.lastError ?? "Delivery failed."}`).join("\n");
+      if (pendingSiblings.length === 0 && result.pendingDelivery !== true) {
+        note.title = publishedSiblings.length > 0 ? "Partially published" : "Delivery could not be confirmed";
+        note.meta.publishStatus = publishedSiblings.length > 0 ? "partial" : "failed";
+        if (publishedSiblings.length === 0) note.body = note.body.slice(note.body.indexOf("\n") + 1);
+        note.meta.platforms = [...new Set(deliveryJobs.map(s => s.platform))];
+      }
+    }
+    // Track every observed delivery, not just the last platform to finish.
+    // This lets the next scan detect the other platform's terminal result.
+    note.meta.deliveryJobs = deliveryJobs.map(s => ({ id: s.id, status: s.status }));
 
     // One notification per content item — a second platform publishing updates
     // (and resurfaces) the existing row instead of spamming a duplicate.
@@ -260,30 +277,38 @@ async function recordPublishedNotification(args: {
   });
 }
 
-/** Buffer acceptance is not publication. Refresh the existing pending notice
- * from durable terminal job results, including after a process restart. */
+/** Project persisted publishing results into notifications. This also repairs
+ * a process exit after publication but before notification creation, and
+ * covers manual Publish Now without changing its provider pipeline. */
 export async function refreshPendingDeliveryNotifications(workspaceId?: string): Promise<void> {
   const db = getDb();
+  const missing = await db.select({ job: publishingJobs, recipientId: workspaces.createdBy }).from(publishingJobs)
+    .innerJoin(workspaces, eq(workspaces.id, publishingJobs.workspaceId))
+    .where(and(workspaceId ? eq(publishingJobs.workspaceId, workspaceId) : undefined,
+      sql`${publishingJobs.providerPostId} is not null`,
+      sql`(${publishingJobs.status} = 'published' or (${publishingJobs.provider} = 'buffer' and ${publishingJobs.status} = 'processing'))`,
+      sql`not exists (select 1 from notifications n where n.workspace_id = ${publishingJobs.workspaceId} and n.kind = 'publishing_completed' and n.meta->>'contentItemId' = ${publishingJobs.contentItemId}::text)`))
+    .orderBy(asc(publishingJobs.updatedAt), asc(publishingJobs.id)).limit(20);
+  for (const { job, recipientId } of missing) {
+    await recordPublishedNotification({ job, recipientId, result: {
+      pendingDelivery: job.status === "processing", comment: readCommentState(job.result) ?? undefined,
+      firstCommentSkipped: (job.result as Record<string, unknown>)?.firstCommentSkipped === true,
+    } });
+  }
   const rows = await db.select({ job: publishingJobs, notice: notifications }).from(notifications)
     .innerJoin(publishingJobs, and(eq(publishingJobs.workspaceId, notifications.workspaceId),
       sql`${notifications.meta}->>'contentItemId' = ${publishingJobs.contentItemId}::text`))
     .where(and(eq(notifications.kind, "publishing_completed"),
       workspaceId ? eq(notifications.workspaceId, workspaceId) : undefined,
-      sql`${notifications.meta}->>'publishStatus' = 'pending'`,
-      eq(publishingJobs.provider, "buffer"), sql`${publishingJobs.providerPostId} is not null`,
-      sql`(${notifications.meta}->>'jobId' is null or ${notifications.meta}->>'jobId' = ${publishingJobs.id}::text)`,
+      sql`${publishingJobs.providerPostId} is not null`,
+      sql`(${publishingJobs.status} = 'published' or ${publishingJobs.provider} = 'buffer')`,
+      sql`not (coalesce(${notifications.meta}->'deliveryJobs', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('id', ${publishingJobs.id}::text, 'status', ${publishingJobs.status}::text)))`,
       inArray(publishingJobs.status, ["published", "failed"])))
     .limit(20);
   for (const { job, notice } of rows) {
-    if (job.status === "published") {
-      await recordPublishedNotification({ job, recipientId: notice.userId,
-        result: { comment: readCommentState(job.result) ?? undefined,
-          firstCommentSkipped: (job.result as Record<string, unknown>)?.firstCommentSkipped === true } });
-    } else {
-      const note = buildPublishFailedNotification({ contentItemId: job.contentItemId,
-        platform: job.platform, error: job.lastError ?? "Provider delivery failed. Review this post in the connected account." });
-      await db.update(notifications).set({ ...note, read: false }).where(eq(notifications.id, notice.id));
-    }
+    await recordPublishedNotification({ job, recipientId: notice.userId,
+      result: { comment: readCommentState(job.result) ?? undefined,
+        firstCommentSkipped: (job.result as Record<string, unknown>)?.firstCommentSkipped === true } });
   }
 }
 

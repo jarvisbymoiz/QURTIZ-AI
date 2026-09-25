@@ -172,3 +172,60 @@ References: [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pri
   unexecuted. Connection-reset tests prove database persistence, not live
   provider delivery. Authenticated page/UI smoke tests remain pending; database
   query compatibility for their persisted data has been verified.
+
+## September 23 follow-up: non-publishing verification
+
+The user requested verification without a live publishing run. No provider
+publication, production job trigger, deployment, or live test-fixture mutation
+was performed in this follow-up.
+
+Read-only validation of the configured database still passes: 32 tables,
+360 columns, 69 indexes, 81 constraints and 13 enums, with no reported schema
+or security problems. All 31 migration timestamps remain recorded. The legacy
+0000–0013 hash-format discrepancy described above remains historical; no ledger
+history was rewritten to conceal it.
+
+Production HTTP checks at 2026-09-23 14:22 UTC confirmed an operational blocker:
+
+- `/api/cron/publish`: HTTP 503, `Cron is not configured`.
+- `/api/cron/maintenance`: HTTP 307 to the browser login page.
+
+The production publishing endpoint lacks its cron secret, and maintenance is
+not using this checkout's machine-auth middleware behavior. Configuring the
+secret and deploying the current cron routes remains required. A successful
+database query or unit test does not establish that Vercel cron is running.
+Private production `DATABASE_URL` and registered cron executions remain
+unverified without authenticated deployment access.
+
+Additional code fixes:
+
+- Buffer delivery status polls now use oldest-check-first ordering in batches
+  of five to bound the cron HTTP budget, persist
+  their attempt count, refresh authentication once using the existing token
+  mechanism, and stop after 48 unsuccessful/nonterminal polls. A missing
+  connection or exhausted budget produces an actionable unconfirmed-delivery
+  state. The accepted provider ID remains intact; polling never resends a post.
+- A stale nonterminal poll cannot overwrite an already terminal job with
+  `processing`. Confirmed delivery clears `awaitingDelivery`.
+- Notification recovery creates missing success/acceptance notices from
+  persisted publishing results, including manual Publish Now and an interrupted
+  worker. Existing content-item locking serializes consolidation.
+- Consolidated notifications retain every observed platform job state. One
+  platform completing no longer hides another pending delivery; a mixed
+  success/failure is shown as partial and retains the real successful permalink.
+  Existing records use the existing JSON metadata column; no migration is needed.
+- These changes do not alter main-post payloads or First Comment execution.
+
+Validation: full hermetic suite passed with 783 tests and one opt-in test
+skipped; typecheck, lint, schema validation and migration snapshot validation
+passed. An additional maintenance-route test verifies authenticated delivery
+and notification recovery without browser cookies or real provider calls.
+The 103 targeted publishing/worker/cron tests also pass after the final batch
+limit and temporary token-refresh recovery changes. Production build validation uses `DISABLE_BACKGROUND_WORKER=true`.
+The build passes with the existing AI SDK dynamic-dependency warnings.
+These follow-up changes are local and have not been deployed.
+
+Activation can produce recovered notifications for existing persisted posts.
+This is a projection of real stored results, not evidence of a new publication.
+Real Facebook/Instagram, Carousel/Reel, First Comment, browser-closed and actual
+server-restart delivery remain outside this non-live verification scope.

@@ -49,6 +49,9 @@ function KindIcon({ kind, publishStatus }: { kind: string; publishStatus?: strin
   const cls = "size-4 shrink-0";
   switch (kind) {
     case "publishing_completed":
+      if (publishStatus === "failed" || publishStatus === "partial") {
+        return <AlertTriangle className={cn(cls, "text-amber-500")} aria-hidden />;
+      }
       return publishStatus === "pending"
         ? <CalendarClock className={cn(cls, "text-amber-500")} aria-hidden />
         : <CheckCircle2 className={cn(cls, "text-emerald-500")} aria-hidden />;

@@ -39,7 +39,7 @@ import "server-only";
  *     Meta routing).
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, platformConnections, publishingJobs } from "@/db/schema";
 import { choosePostingSlot, type TimingPolicy } from "@/lib/autopilot/timing";
@@ -1008,31 +1008,71 @@ async function flipToPublished(args: {
 }
 
 async function recordBufferDelivery(args: Parameters<typeof flipToPublished>[0]) {
-  if (args.result.status === "sent") return flipToPublished(args);
+  if (args.result.status === "sent") return flipToPublished({ ...args, result: { ...args.result, awaitingDelivery: false } });
   if (!args.jobId) throw new Error("Buffer delivery must have a persisted job.");
   const failed = args.result.status === "error";
   await getDb().update(publishingJobs).set({ status: failed ? "failed" : "processing", providerPostId: args.providerPostId,
     result: { ...args.result, awaitingDelivery: !failed }, lastError: failed ? "Buffer reported a delivery error. Check this post in Buffer." : null,
-    updatedAt: new Date() }).where(eq(publishingJobs.id, args.jobId));
+    updatedAt: new Date() }).where(and(eq(publishingJobs.id, args.jobId), eq(publishingJobs.status, "processing")));
 }
 
 /** Poll accepted Buffer posts; a poll can never create or resend a post. */
 export async function reconcileBufferDeliveries(): Promise<void> {
   const db = getDb();
-  const pending = await db.select().from(publishingJobs).where(and(eq(publishingJobs.provider, "buffer"), eq(publishingJobs.status, "processing"), sql`${publishingJobs.providerPostId} is not null`)).limit(20);
+  const maxPolls = 48;
+  // Each job can need status + token refresh + one more status request.
+  // Five jobs keep their worst-case HTTP budget below the 800s cron limit.
+  const pending = await db.select().from(publishingJobs).where(and(eq(publishingJobs.provider, "buffer"), eq(publishingJobs.status, "processing"), sql`${publishingJobs.providerPostId} is not null`))
+    .orderBy(asc(publishingJobs.updatedAt), asc(publishingJobs.id)).limit(5);
   for (const job of pending) {
+    // These are read-only status polls, never publication attempts. Persist a
+    // bounded budget so restarts cannot leave accepted jobs polling forever.
+    const prior = (job.result ?? {}) as Record<string, unknown>;
+    const polls = (typeof prior.deliveryPollAttempts === "number" ? prior.deliveryPollAttempts : 0) + 1;
+    const result = { ...prior, deliveryPollAttempts: polls };
+    const unavailable = async (detail: string, permanent = false) => {
+      const exhausted = permanent || polls >= maxPolls;
+      await db.update(publishingJobs).set({
+        status: exhausted ? "failed" : "processing",
+        result: { ...result, awaitingDelivery: !exhausted, ...(exhausted ? { reconciliationRequired: true } : {}) },
+        lastError: exhausted
+          ? `Delivery could not be confirmed. ${detail} Check the post in Buffer before retrying; it may already be live.`
+          : `Delivery status unavailable: ${detail}`,
+        updatedAt: new Date(),
+      }).where(and(eq(publishingJobs.id, job.id), eq(publishingJobs.status, "processing")));
+    };
     try {
       const [connection] = await db.select().from(platformConnections).where(and(eq(platformConnections.workspaceId, job.workspaceId), eq(platformConnections.platform, job.platform), eq(platformConnections.provider, "buffer")));
       const envelope = connection?.encryptedToken ? decodeBufferTokenEnvelope(decryptToken(connection.encryptedToken) ?? "") : null;
-      if (!envelope) continue;
-      const response = await getBufferPostStatus(envelope.accessToken, job.providerPostId!);
+      if (!envelope) {
+        await unavailable("Reconnect the Buffer account to verify delivery.", true);
+        continue;
+      }
+      let response = await getBufferPostStatus(envelope.accessToken, job.providerPostId!);
+      if (!response.ok && response.reason === "auth") {
+        const rotated = await rotateBufferToken({ connectionId: connection.id,
+          startedFromAccessToken: envelope.accessToken, currentEnvelope: envelope });
+        if (!rotated.ok) {
+          // The existing refresh helper returns a message, not a typed cause;
+          // a temporary refresh outage must not be treated as revoked access.
+          await unavailable(rotated.message, !envelope.refreshToken);
+          continue;
+        }
+        response = await getBufferPostStatus(rotated.envelope.accessToken, job.providerPostId!);
+      }
       if (!response.ok) {
-        await db.update(publishingJobs).set({ lastError: `Delivery status unavailable: ${response.message}`, updatedAt: new Date() }).where(eq(publishingJobs.id, job.id));
+        await unavailable(response.message, response.reason === "auth");
+        continue;
+      }
+      if (!["sent", "error"].includes(response.data.status) && polls >= maxPolls) {
+        await unavailable(`Buffer still reports ${response.data.status}.`);
         continue;
       }
       await recordBufferDelivery({ workspaceId: job.workspaceId, itemId: job.contentItemId, variantId: job.contentVariantId,
-        providerPostId: job.providerPostId!, jobId: job.id, result: { ...job.result as Record<string, unknown>, status: response.data.status } });
-    } catch (error) { console.error("[buffer] Delivery reconciliation failed", { jobId: job.id, error }); }
+        providerPostId: job.providerPostId!, jobId: job.id, result: { ...result, status: response.data.status } });
+    } catch {
+      await unavailable("The provider status check was interrupted.");
+    }
   }
 }
 

@@ -33,6 +33,8 @@ export type NotificationMeta = {
   type?: string;
   contentItemId?: string;
   jobId?: string;
+  /** Durable delivery states already reflected in this notification. */
+  deliveryJobs?: Array<{ id: string; status: string }>;
   autoRunId?: string;
   runId?: string;
   topic?: string;
