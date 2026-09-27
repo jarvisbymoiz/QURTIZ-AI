@@ -4,6 +4,7 @@ import { generateText } from "ai";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
 import { buildMasterPrompt, formatSpecFor, type MasterPromptInput } from "@/lib/ai/master-prompt";
+import { AGENT_CORE_INSTRUCTION } from "@/lib/ai/agent-core";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { buildVisualGenerationBrief } from "@/lib/ai/visual-brief";
 
@@ -54,10 +55,6 @@ const BANNED_FILLER = [
   "Make it pop",
   "High-quality image of",
 ];
-
-const MASTER_PROMPT_PERSONA = `You are a world-class Creative Director + Senior Social Media Designer + expert AI-image prompt engineer.
-You write MASTER AI PROMPTS: complete, self-contained creative briefs that an external AI image/video tool (Gemini, ChatGPT image tools, Midjourney, Flux) can execute flawlessly.
-Your prompts are bespoke works of art direction — every line is specific to the post and brand at hand. You never write generic design boilerplate, and you never summarize; you DIRECT.`;
 
 /**
  * Build the generation instruction (input data + required structure) for
@@ -197,7 +194,7 @@ export async function generateMasterPrompt(args: {
     const instruction = buildMasterPromptInstruction({ input: args.input, memoryLines: args.memoryLines });
     const result = await generateText({
       model: resolved.model,
-      system: MASTER_PROMPT_PERSONA,
+      system: AGENT_CORE_INSTRUCTION,
       prompt: instruction,
       maxOutputTokens: 4096,
       abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),

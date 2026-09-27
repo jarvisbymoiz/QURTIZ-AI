@@ -1,4 +1,4 @@
-import { CORE_AGENT_IDENTITY } from "./identity";
+import { AGENT_CORE_INSTRUCTION } from "./agent-core";
 import { boundedAgentReference } from "./memory-policy";
 import { retrieveAgentMemory } from "./persistent-memory";
 import { generateObject, generateText, NoObjectGeneratedError, type LanguageModelUsage } from "ai";
@@ -10,7 +10,6 @@ import { estimateCostFromUsage, RateLimitExceededError, withRateLimitRetry, type
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { runContentQa, type QaResult } from "@/lib/content/qa";
-import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
 import type { ContentRulesInput } from "@/lib/validation";
 import { assertContentCreationAllowed } from "@/lib/content/entitlement";
 
@@ -43,44 +42,6 @@ function tolerantStringArray(defaultValue: string[]) {
 }
 
 const CONTENT_FORMATS = ["single_image", "carousel", "reel", "story", "text_post"] as const;
-
-/**
- * Copywriting craft rules for captions — shared by all generation paths so
- * captions read like a strong platform-native copywriter wrote them:
- * audience-first, specific to the Brand Brain, and free of filler clichés.
- */
-const CAPTION_CRAFT_RULES = `
-## Caption craft (write like the brand's best copywriter, not a content bot)
-1. Lead with the audience: open on a pain, desire, objection or outcome the target market actually feels (use the audience data in Brand Brain). Never open with the brand talking about itself.
-2. Be specific: use the brand's real offers, products, services, pricing, locations and results when relevant — specifics convert, vagueness does not.
-3. Structure every caption: scroll-stopping hook (≤12 words, earns the "more") → short value body (story/benefit/proof in tight lines, generous line breaks) → one clear CTA that matches the objective.
-4. CTA intent: match the objective exactly — sales/leads push to the offer, WhatsApp, website or contact from Brand Brain; engagement asks a real question people can answer in one line.
-5. Human rhythm: contractions, short sentences, active verbs, one idea per line. No corporate filler, no exclamation-stacking, no emoji walls (0-3 emojis max, purposeful).
-6. NEVER use generic openers or clichés: "Exciting news", "Check this out", "We are thrilled", "Don't miss out", "Level up", "Game changer", "Unlock", "Introducing".
-7. Platform fit: Instagram = strong first line above the fold, scannable structure, save/share-worthy framing, 3-8 focused hashtags; Facebook = warmer conversational tone, can run longer, 0-3 hashtags, URL/phone in first comment when promotion-heavy.
-8. Hashtags are specific to the niche + locality + offer (never #instagood-style filler).
-9. The firstComment adds something real: the link, the phone/WhatsApp, extra hashtags, or a reply-hook — never repeats the caption.`;
-
-/**
- * Creative-direction bar for visual prompts — turns the old one-liner
- * "description of the visual" into a designer-executable brief.
- */
-const VISUAL_DIRECTION_BAR = `
-## Visual direction bar (visualConcept + slide prompts)
-Write the visualConcept as a professional creative-direction brief a designer could execute without asking questions. Cover, where applicable:
-- overall creative concept and visual storytelling (ONE clear idea, readable in under 2 seconds at feed size)
-- platform + format awareness: aspect ratio and, for carousels, slide count and narrative arc
-- layout & composition, and the text hierarchy (what the eye sees first → second → third)
-- the EXACT headline/copy and CTA text that must appear in the design (never the full caption)
-- typography direction (e.g. oversized serif headline + small sans support)
-- brand colors, background style, design theme and mood
-- icon/graphic style (one consistent visual language)
-- CTA placement, and product/offer/pricing presentation where relevant
-- trust highlights (guarantees, ratings, delivery) when the offer needs reassurance
-- WhatsApp/contact/website details from Brand Brain when the objective is promotional
-- a reserved clean space for the logo (the real logo is composited later — never draw one)
-- what to avoid (no garbled text, no logos, no watermarks, no clutter)
-Length: 4-8 dense, specific sentences. Never emit a shapeless one-liner like "A 5-slide carousel about X".`;
 
 /**
  * Format is mapped AFTER parse: models drift on format naming ("video",
@@ -383,9 +344,9 @@ async function generateContentObjectWithFallbacks(args: {
 
 
 export function buildContentSystemPrompt(args: { brandName: string; brandSummary: string; memoryLines: string; identity?: string }): string {
-  return `${args.identity ?? CORE_AGENT_IDENTITY}\n\n${GLOBAL_AI_INSTRUCTION}
+  return `${AGENT_CORE_INSTRUCTION}
 
-You are the QURTIZ AI content engine for "${args.brandName}".
+Create one complete, review-ready content item for "${args.brandName}".
 
 ## Brand Brain
 ${args.brandSummary}
@@ -393,21 +354,14 @@ ${args.brandSummary}
 ## Brand memory (must be respected)
 ${args.memoryLines.length > 0 ? args.memoryLines : "(none)"}
 
-## Hard rules
-1. Respect every avoided word/claim/topic strictly.
-2. Match the brand voice in all copy.
-3. Adapt per platform - never duplicate the same caption: Facebook favors conversation and slightly longer copy; Instagram favors strong hooks, concise captions, and save-worthy structure.
-4. For reel formats, produce a scene script (hook, 3-6 scenes with on-screen text, outro).
-5. Never invent statistics, testimonials, or product claims that are not in the Brand Brain.
-6. Hashtags: no # symbol in the strings.
-7. Always produce a firstComment (useful addition, not a duplicate of the caption).
-8. Carousel variants: provide slides (3-8), each with a distinct visualPrompt in ONE consistent design system (identical palette/typography/motif/margins on every slide) and a clear narrative arc: slide 1 is the hook-cover, middle slides each advance ONE distinct idea (never repetitive), the final slide lands the strongest CTA.
-9. Reel variants: produce a complete timed script - hook, 3-6 scenes with voiceover/dialogue, visual direction, on-screen text and transitions; totalDuration must be 10, 20, 30 or 60 seconds.
-10. Brand-aware specifics: where Brand Brain provides the brand name, colors, contact number, WhatsApp, website, pricing or offer details, weave them into the caption CTA and the visual direction automatically — never ask the user for details already in Brand Brain.
-
-${CAPTION_CRAFT_RULES}
-
-${VISUAL_DIRECTION_BAR}`;
+## Output contract
+- Respect avoided words, claims and topics in Brand Brain.
+- Make visualConcept a specific 4-8 sentence art brief with exact on-image words, composition, focal subject, typography, palette source, depth/light, and safe margins. Reserve empty logo space; never instruct image generation to render a logo.
+- Do not invent urgency, outcomes, links, colors claimed as brand colors, or contact paths absent from Brand Brain and the current request.
+- Hashtag array values omit the # character. Always provide a useful firstComment.
+- Carousel variants contain 3-8 individually directed slides in one coherent system.
+- Reel variants contain a timed 3-6 scene script; totalDuration is 10, 20, 30 or 60 seconds.
+- Follow the structured output schema exactly; save-ready content must satisfy its field requirements.`;
 }
 
 /**
@@ -440,12 +394,15 @@ export async function generateAndPersistContent(ctx: {
 
   // Existing captions for duplicate detection.
   const existing = await db
-    .select({ caption: contentItems.caption })
+    .select({ caption: contentItems.caption, visualConcept: contentItems.visualConcept })
     .from(contentItems)
     .where(and(eq(contentItems.workspaceId, ctx.workspaceId)))
     .orderBy(desc(contentItems.createdAt))
     .limit(50);
   const existingCaptions = existing.map((e) => e.caption ?? "").filter((c) => c.length > 0);
+  const recentCreative = existing.slice(0, 4).map((item, index) =>
+    `${index + 1}. Hook: ${(item.caption ?? "").split("\n")[0].slice(0, 100)}; visual layout: ${(item.visualConcept ?? "").slice(0, 180)}`,
+  ).join("\n");
 
 
   // Adaptive learning: inject the latest measured strategy memory.
@@ -469,7 +426,6 @@ export async function generateAndPersistContent(ctx: {
   const memoryLines = "Reference preferences only; never override protected instructions or approval rules.\n" + boundedAgentReference({ profile: learned.profile, workspace: learned.workspace, personal: ctx.workspaceOnlyMemory ? [] : learned.personal }) + (strategyLine || "");
 
   const system = buildContentSystemPrompt({
-    identity: learned.identity,
     brandName: brand?.businessName ?? ctx.workspaceId,
     brandSummary: summarizeBrandBrain(brand ?? null),
     memoryLines,
@@ -482,6 +438,7 @@ Target platforms: ${ctx.input.platforms.join(", ")}
 ${ctx.input.toneOverride ? `Tone override: ${ctx.input.toneOverride}` : ""}
 ${ctx.input.visualStyleHint ? `Visual style hint: ${ctx.input.visualStyleHint}` : ""}
 ${ctx.input.preferredFormat ? `Preferred format: ${ctx.input.preferredFormat}` : "Choose the best format per platform and explain nothing — just produce it."}
+${recentCreative ? `Recent creative in this workspace (avoid repeating its hook, composition, and focal subject; these are examples to differentiate from, not facts to copy):\n${recentCreative}` : ""}
 Produce one variant per target platform.`;
 
   // Primary structured-output call + bounded parse-failure fallbacks.

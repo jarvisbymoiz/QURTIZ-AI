@@ -55,8 +55,9 @@ export function AssetUploader({
   }
 
   function remove(asset: Asset) {
+    if (kind === "logo" && !window.confirm("Remove this brand logo? It will no longer appear in future visuals.")) return;
     start(async () => {
-      const r = await deleteBrandAssetAction(asset.id);
+      const r = await deleteBrandAssetAction(asset.id, kind === "logo" ? { removeLogo: true } : undefined);
       if (r.ok) {
         toast.success("Removed");
         router.refresh();
@@ -91,7 +92,7 @@ export function AssetUploader({
                     className="absolute -right-2 -top-2 size-6 rounded-full bg-background shadow"
                     onClick={() => remove(a)}
                     disabled={pending}
-                    aria-label="Remove asset"
+                    aria-label={kind === "logo" ? "Remove Logo" : "Remove asset"}
                   >
                     <Trash2 className="size-3.5 text-destructive" aria-hidden />
                   </Button>
@@ -116,7 +117,7 @@ export function AssetUploader({
           />
           <Button variant="outline" size="sm" onClick={() => inputRef.current?.click()} disabled={pending}>
             {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ImagePlus className="size-4" aria-hidden />}
-            {assets.length > 0 ? "Add another" : "Upload"}
+            {assets.length > 0 ? kind === "logo" ? "Replace logo" : "Add another" : "Upload"}
           </Button>
         </>
       ) : null}

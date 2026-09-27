@@ -1,4 +1,4 @@
-import { CORE_AGENT_IDENTITY } from "@/lib/ai/identity";
+import { AGENT_CORE_INSTRUCTION } from "@/lib/ai/agent-core";
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -94,7 +94,7 @@ export async function executeAutoRun(jobId: string): Promise<void> {
       const planRunId = randomUUID();
       await db.insert(agentRuns).values({ id: planRunId, workspaceId: job.workspaceId, userId: job.userId, kind: "autopilot_strategy", model: modelId });
       try {
-      const response = await generateText({ model, system: state.context.identity ?? CORE_AGENT_IDENTITY, maxRetries: 1, abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      const response = await generateText({ model, system: AGENT_CORE_INSTRUCTION, maxRetries: 1, abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
         prompt: `Plan exactly ${cfg.maxPostsPerRun} distinct post topics as a JSON array of strings, no other text. Use brand, measured performance and research intelligently. Do not claim unsourced ideas are current trends. Brand: ${summarizeBrandBrain(brand ?? null)}. Focus: ${cfg.nicheFocus || "brand content"}. Platforms: ${cfg.platforms.join(", ")}. Formats: ${cfg.formats.join(", ")}. Context: ${state.context.text}. Research: ${JSON.stringify(candidates.map(c => ({ topic: c.topic, summary: c.summary, source: c.sourceUrl }))).slice(0, 4000)}.` });
       const start = response.text.indexOf("["); const end = response.text.lastIndexOf("]");
       const topics = z.array(z.string().min(4).max(200)).length(cfg.maxPostsPerRun).parse(JSON.parse(response.text.slice(start, end + 1)));

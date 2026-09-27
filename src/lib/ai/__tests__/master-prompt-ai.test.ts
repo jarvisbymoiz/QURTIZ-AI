@@ -180,7 +180,7 @@ describe("generateMasterPrompt (dynamic AI call with honest fallback)", () => {
     const call = generateTextMock.mock.calls[0][0];
     expect(call.prompt).toContain("Weekend chai offer");
     expect(call.prompt).toContain("WhatsApp 0300-1234567");
-    expect(call.system).toContain("Creative Director");
+    expect(call.system).toContain("visual creative director");
   });
 
   it("rejects stub/garbled AI output and serves the deterministic template honestly (source template)", async () => {

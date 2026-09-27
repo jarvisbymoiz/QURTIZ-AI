@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/jobs/workflows", () => ({ publishDueScan: vi.fn(async () => ({ checked: 0, interrupted: 0 })), autopilotLoop: vi.fn(), refreshPendingDeliveryNotifications: vi.fn() }));
 vi.mock("@/lib/publishing/service", () => ({ reconcileBufferDeliveries: vi.fn(async () => undefined) }));
 vi.mock("@/lib/media/cleanup-worker", () => ({ mediaCleanupTick: vi.fn() }));
+vi.mock("@/db", () => ({ getDb: () => ({ update: () => ({ set: () => ({ where: async () => [] }) }) }) }));
 vi.mock("@supabase/ssr", () => ({ createServerClient: vi.fn(() => { throw Error("Cron must not require a browser session"); }) }));
 import { GET as publish } from "@/app/api/cron/publish/route";
 import { GET as maintenance } from "@/app/api/cron/maintenance/route";

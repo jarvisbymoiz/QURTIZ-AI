@@ -2,9 +2,10 @@
 
 import { reorderVisualUploads } from "@/lib/visuals/media-order";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, gt } from "drizzle-orm";
 import { getDb } from "@/db";
-import { brandAssets, brands, contentItems, contentVariants, publishingJobs, visualAssets } from "@/db/schema";
+import { brandAssets, brands, contentItems, contentVariants, imageModePreferences, mediaCleanupQueue, publishingJobs, visualAssets, workspaces } from "@/db/schema";
 import { rateLimit } from "@/lib/security/rate-limit";
 import type { VisualMode } from "@/lib/visuals/generate";
 import { getActiveContext } from "@/lib/workspace";
@@ -41,7 +42,7 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
   const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
-  const storagePath = `${ctx.workspaceId}/${kind}/${Date.now()}.${ext}`;
+  const storagePath = `${ctx.workspaceId}/${kind}/${randomUUID()}.${ext}`;
   const { error: uploadError } = await supabase.storage
     .from("brand-assets")
     .upload(storagePath, file, { contentType: file.type, upsert: false });
@@ -49,24 +50,52 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
     return { ok: false, error: `Upload failed: ${uploadError.message}` };
   }
 
-  const db = getDb();
-  await db.insert(brandAssets).values({
-    workspaceId: ctx.workspaceId,
-    kind: kind as "logo" | "avatar" | "reference",
-    label: (formData.get("label") as string) || null,
-    storagePath,
-    mimeType: file.type,
-    sizeBytes: file.size,
-    createdBy: ctx.userId,
-  });
+  try {
+    const db = getDb();
+    await db.transaction(async tx => {
+      // Serialize logo changes within this workspace. The old logo stays live
+      // unless both the new Storage upload and the DB replacement succeed.
+      if (kind === "logo") await tx.select({ id: workspaces.id }).from(workspaces)
+        .where(eq(workspaces.id, ctx.workspaceId)).for("update");
+      const oldLogos = kind === "logo" ? await tx.select({ id: brandAssets.id,
+        storagePath: brandAssets.storagePath, sizeBytes: brandAssets.sizeBytes })
+        .from(brandAssets).where(and(eq(brandAssets.workspaceId, ctx.workspaceId),
+          eq(brandAssets.kind, "logo"), eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0))) : [];
+      await tx.insert(brandAssets).values({ workspaceId: ctx.workspaceId,
+        kind: kind as "logo" | "avatar" | "reference",
+        label: (formData.get("label") as string) || null, storagePath,
+        mimeType: file.type, sizeBytes: file.size, createdBy: ctx.userId });
+      for (const old of oldLogos) {
+        const graceUntil = new Date(Date.now() + DEFAULT_SOFT_DELETE_GRACE_HOURS * 3_600_000);
+        await tx.update(brandAssets).set({ cleanupStatus: "soft_deleted", cleanupEligibleAt: graceUntil,
+          refCount: 0, updatedAt: new Date() }).where(and(eq(brandAssets.id, old.id), eq(brandAssets.workspaceId, ctx.workspaceId)));
+        await tx.insert(mediaCleanupQueue).values({ workspaceId: ctx.workspaceId,
+          storagePath: old.storagePath, sourceTable: "brand_assets", sourceRowId: old.id,
+          sourceKind: "asset_removed", bytes: old.sizeBytes ?? 0, reason: "asset_removed",
+          graceUntil, createdBy: ctx.userId });
+      }
+    });
+  } catch {
+    // The new object has no DB reference if the transaction failed. Keep the
+    // old logo intact, and remove only the just-uploaded object.
+    try { await supabase.storage.from("brand-assets").remove([storagePath]); } catch { /* Best effort; old logo remains live. */ }
+    return { ok: false, error: "Could not save the new asset. The existing logo was preserved." };
+  }
 
   revalidatePath("/brand-brain");
   return { ok: true };
 }
 
-export async function deleteBrandAssetAction(assetId: string): Promise<ActionResult> {
+export async function deleteBrandAssetAction(assetId: string, options?: { removeLogo?: boolean }): Promise<ActionResult> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  const [asset] = await getDb().select({ kind: brandAssets.kind }).from(brandAssets)
+    .where(and(eq(brandAssets.id, assetId), eq(brandAssets.workspaceId, ctx.workspaceId)));
+  if (!asset) return { ok: false, error: "Asset not found." };
+  if (asset.kind === "logo" && options?.removeLogo !== true) {
+    return { ok: false, error: "Remove Logo must be explicitly confirmed." };
+  }
 
   const queued = await markBrandAssetForCleanup({
     workspaceId: ctx.workspaceId,
@@ -74,6 +103,7 @@ export async function deleteBrandAssetAction(assetId: string): Promise<ActionRes
     reason: "asset_removed",
     graceHours: DEFAULT_SOFT_DELETE_GRACE_HOURS,
     createdBy: ctx.userId,
+    explicitLogoRemoval: asset.kind === "logo" && options?.removeLogo === true,
   });
   if (!queued) return { ok: false, error: "Asset not found." };
 
@@ -89,6 +119,14 @@ export async function generateVisualAction(
 ): Promise<ActionResult & { visualId?: string; model?: string }> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
+
+  if (mode === "ai") {
+    const [preference] = await getDb().select({ mode: imageModePreferences.mode }).from(imageModePreferences)
+      .where(and(eq(imageModePreferences.workspaceId, ctx.workspaceId), eq(imageModePreferences.userId, ctx.userId))).limit(1);
+    if (preference?.mode === "local_companion") {
+      return { ok: false, error: "Experimental Local Companion is selected. Generate from Content Studio with your local companion running." };
+    }
+  }
 
   const rl = rateLimit("visual-gen:" + ctx.workspaceId, 6, 10 * 60_000);
   if (!rl.allowed) return { ok: false, error: "Visual generation limit reached. Try again in a few minutes." };

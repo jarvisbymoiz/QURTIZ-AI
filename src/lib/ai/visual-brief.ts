@@ -36,9 +36,23 @@ export function buildVisualGenerationBrief(input: VisualBriefInput): VisualBrief
   const source = clean(slide?.visualPrompt) ? "slidePrompt" : clean(input.visualConcept) ? "visualPrompt" : clean(input.hook) ? "hook" : "topic";
   const spec = formatSpecFor(input.platform, input.contentType);
   const dimensions = /(\d+)\s*×\s*(\d+)/.exec(spec.dims);
-  const width = dimensions ? Number(dimensions[1]) : undefined;
-  const height = dimensions ? Number(dimensions[2]) : undefined;
-  const aspectRatio = spec.ratio === "—" ? undefined : spec.ratio;
+  let width = dimensions ? Number(dimensions[1]) : undefined;
+  let height = dimensions ? Number(dimensions[2]) : undefined;
+  let aspectRatio = spec.ratio === "—" ? undefined : spec.ratio;
+  // A saved Visual Prompt can deliberately specify a different canvas. Keep
+  // that authored direction authoritative instead of appending a contradiction.
+  const authoredSize = /\b(\d{3,4})\s*(?:×|x|by)\s*(\d{3,4})\s*(?:px|pixels)?\b/i.exec(direction);
+  if (authoredSize) {
+    const authoredWidth = Number(authoredSize[1]);
+    const authoredHeight = Number(authoredSize[2]);
+    if (authoredWidth >= 512 && authoredWidth <= 4096 && authoredHeight >= 512 && authoredHeight <= 4096) {
+      width = authoredWidth;
+      height = authoredHeight;
+      const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+      const divisor = gcd(width, height);
+      aspectRatio = `${width / divisor}:${height / divisor}`;
+    }
+  }
   const sources = [source, "platformFormat"];
   const lines = [
     `Create one finished ${input.platform} ${input.contentType.replaceAll("_", " ")} visual.`,
@@ -109,9 +123,10 @@ export function buildVisualGenerationBrief(input: VisualBriefInput): VisualBrief
   const memories = (input.memoryPreferences ?? []).map(value => concise(value, 160)).filter(Boolean).slice(0, 3);
   if (memories.length) { lines.push(`Saved visual preferences: ${memories.join("; ")}`); sources.push("memory"); }
 
-  lines.push("Hierarchy: the specified subject is the focal point; if text belongs on-image, show one short headline, then a verified offer/price and a distinct CTA. Keep type high-contrast and readable.");
-  lines.push("Composition: honor the described scene, separate subject from background, and use supporting graphics only when they clarify the message. Keep text inside safe margins.");
-  lines.push(`Composition and output: ${spec.ratio} (${spec.dims}). ${spec.note} ${spec.safe}`);
+  lines.push("Creative execution: make the saved concept a finished campaign graphic, with a deliberate visual metaphor or scene, one unmistakable focal subject, purposeful negative space and a distinctive brand-relevant graphic motif. Avoid default stock-photo, device-on-desk and generic gradient layouts unless the primary direction explicitly asks for one.");
+  lines.push("Typography and hierarchy: preserve exact wording specified in the primary direction. If on-image text is appropriate, use a short readable headline, a clearly subordinate proof/offer line only when verified, and a distinct CTA. Set type with intentional scale, alignment and contrast; do not render the full caption.");
+  lines.push("Composition: honor the described scene and palette, use believable lighting, depth and material detail where appropriate, and keep all text inside safe margins. Supporting graphics must clarify the message rather than fill empty space.");
+  lines.push(`Composition and output: ${aspectRatio ?? spec.ratio} (${width ?? "auto"} × ${height ?? "auto"} px). ${spec.note} ${spec.safe}`);
   if (input.contentType === "carousel") {
     const ordered = (input.slides ?? []).slice().sort((a, b) => a.index - b.index);
     lines.push(`Carousel design system: keep one grid, typography, palette, motif and margin system across ${ordered.length || "all"} slides; give this slide a distinct idea and composition.`);

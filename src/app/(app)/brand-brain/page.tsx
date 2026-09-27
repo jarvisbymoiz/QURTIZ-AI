@@ -1,5 +1,5 @@
 import { withSchemaGuard } from "@/components/system/schema-guard";
-﻿import { and, desc, eq, isNull } from "drizzle-orm";
+﻿import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import { getDb } from "@/db";
 import { brandAssets, brandMemory, brands } from "@/db/schema";
 import { listAssetSignedUrls } from "@/server/actions/visuals";
@@ -26,7 +26,8 @@ async function BrandBrainPage() {
   const assets = await db
     .select()
     .from(brandAssets)
-    .where(eq(brandAssets.workspaceId, ctx.workspace.id))
+    .where(and(eq(brandAssets.workspaceId, ctx.workspace.id),
+      eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0)))
     .orderBy(desc(brandAssets.createdAt));
   const signedUrls = assets.length
     ? await listAssetSignedUrls(assets.map((a) => a.storagePath))

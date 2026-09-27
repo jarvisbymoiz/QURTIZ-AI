@@ -26,6 +26,9 @@ import {
   buildMasterPromptAction,
 
 } from "@/server/actions/visuals";
+import { getImageModePreferenceAction } from "@/server/actions/image-mode";
+import { completeLocalVisualAction, failLocalVisualAction, prepareLocalVisualAction } from "@/server/actions/local-visual";
+import { generateLocalCompanionImage, pairLocalCompanion } from "@/lib/ai/local-companion";
 import { scheduleContentAction } from "@/server/actions/schedule";
 import {
   rejectContentAction,
@@ -187,8 +190,10 @@ export function PostWorkspace({
   const [scheduleTime, setScheduleTime] = useState("18:30");
   const [masterPrompt, setMasterPrompt] = useState<string | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
+  const [visualError, setVisualError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
+  const visualRequestRef = useRef(false);
   const [mediaUploading, setMediaUploading] = useState(false);
 
   const scores = (item.aiScores ?? {}) as Record<string, number>;
@@ -226,12 +231,39 @@ export function PostWorkspace({
 
 
   function generate(mode: "template" | "ai", slideIndex?: number) {
+    if (visualRequestRef.current) return;
+    visualRequestRef.current = true;
+    setVisualError(null);
     start(async () => {
-      const r = await generateVisualAction(item.id, mode, slideIndex, variant?.id);
+      try {
+      let r: { ok: true; visualId?: string; model?: string } | { ok: false; error: string };
+      try {
+        const preference = mode === "ai" ? await getImageModePreferenceAction() : null;
+        if (preference && !preference.ok) throw new Error(preference.error);
+        if (preference?.ok && preference.preference.mode === "local_companion") {
+          const pairingKey = await pairLocalCompanion(preference.userId, preference.workspaceId);
+          const prepared = await prepareLocalVisualAction({ contentItemId: item.id, slideIndex, variantId: variant?.id });
+          if (!prepared.ok) throw new Error(prepared.error);
+          try {
+            const imageBase64 = await generateLocalCompanionImage({ pairingKey, modelId: prepared.modelId,
+              prompt: prepared.prompt, size: prepared.size, references: prepared.references });
+            r = await completeLocalVisualAction({ jobId: prepared.jobId, imageBase64 });
+          } catch (error) {
+            await failLocalVisualAction(prepared.jobId);
+            throw error;
+          }
+        } else {
+          r = await generateVisualAction(item.id, mode, slideIndex, variant?.id);
+        }
+      } catch (error) {
+        r = { ok: false, error: error instanceof Error ? error.message : "Visual generation failed." };
+      }
       if (r.ok) {
+        setVisualError(null);
         toast.success(r.model && r.model !== "satori-template" ? "AI visual created (" + r.model + ")" : willPromoteOnVisual ? "Visual created — moved to Ready for Review" : "Visual created");
         router.refresh();
-      } else toast.error(r.error);
+      } else { setVisualError(r.error); toast.error(r.error); }
+      } finally { visualRequestRef.current = false; }
     });
   }
 
@@ -453,6 +485,7 @@ export function PostWorkspace({
               </>
             ) : null}
           </div>
+          {visualError ? <p role="alert" className="text-sm text-destructive">{visualError}</p> : null}
 
           {/* Carousel (multi-image) / Reel (video) media manager */}
           <MediaUploader itemId={item.id} variantId={variant?.id} format={mediaFormat} media={uploadedMedia}

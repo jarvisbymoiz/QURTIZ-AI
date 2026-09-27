@@ -58,4 +58,14 @@ describe("shared image-generation brief", () => {
     expect(brief.prompt).toContain("Conversion intent (keep the on-image CTA wording specified above)");
     expect(brief.prompt).not.toContain("On-image headline, if text is part of the concept");
   });
+
+  it("honors authored portrait dimensions without a conflicting square instruction", () => {
+    const brief = buildVisualGenerationBrief({ ...post,
+      visualConcept: "Portrait-oriented single-image (1080 × 1350 px) with amber serum on linen." });
+    expect(brief.aspectRatio).toBe("4:5");
+    expect(brief.width).toBe(1080);
+    expect(brief.height).toBe(1350);
+    expect(brief.prompt).toContain("Composition and output: 4:5 (1080 × 1350 px)");
+    expect(brief.prompt).not.toContain("Composition and output: 1:1");
+  });
 });

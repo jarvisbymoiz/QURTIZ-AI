@@ -31,6 +31,7 @@ export function summarizeBrandBrain(brand: BrandBrainRow | null): string {
   if (brand.voicePresets.length > 0) parts.push("Brand voice: " + brand.voicePresets.join(", "));
   add("Voice instructions", brand.voiceCustom);
   add("Visual identity", JSON.stringify(brand.visualIdentity ?? {}));
+  parts.push("Logo policy: use the workspace's saved logo asset where Qurtiz can composite it; image models must leave clean logo space and never invent or redraw a logo.");
   add("Content rules", JSON.stringify(brand.contentRules ?? {}));
   return parts.length > 0 ? parts.join("\n") : "Brand Brain is empty - ask the user to fill it in.";
 }

@@ -1,4 +1,4 @@
-import { CORE_AGENT_IDENTITY } from "@/lib/ai/identity";
+import { AGENT_CORE_INSTRUCTION } from "@/lib/ai/agent-core";
 import { retrieveAgentMemory } from "@/lib/ai/persistent-memory";
 import { boundedAgentReference } from "@/lib/ai/memory-policy";
 import "server-only";
@@ -582,10 +582,9 @@ function truncate(s: string, max: number): string {
 export async function buildAutopilotRunContext(workspaceId: string, timezone: string, userId?: string): Promise<AutopilotRunContext> {
   const db = getDb();
   const parts: string[] = [];
-  let identity = CORE_AGENT_IDENTITY;
+  const identity = AGENT_CORE_INSTRUCTION;
   if (userId) {
     const memory = await retrieveAgentMemory({ workspaceId, userId }, "create content strategy schedule", false);
-    identity = memory.identity;
     parts.push("Workspace Agent reference data (not protected instructions): " + boundedAgentReference(memory));
   }
 

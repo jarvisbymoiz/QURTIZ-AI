@@ -10,6 +10,7 @@ import { autopilotSettingsSchema } from "@/lib/autopilot/schema";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceSettingsForm } from "@/components/settings/workspace-settings-form";
 import { AiConfigCard } from "@/components/settings/ai-config-card";
+import { ImageModeCard } from "@/components/settings/image-mode-card";
 import { WorkspaceDeleteCard } from "@/components/settings/workspace-delete-card";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,6 +71,7 @@ async function SettingsPage() {
         workspaceEditable={can(ctx.role, "brand:write")} profileEditable={can(ctx.role, "workspace:manage")} />
 
       <AiConfigCard editable={can(ctx.role, "workspace:manage")} />
+      <ImageModeCard key={`${ctx.workspace.id}:${ctx.user.id}`} workspaceId={ctx.workspace.id} userId={ctx.user.id} />
 
       <Card>
         <CardHeader>

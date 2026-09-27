@@ -18,7 +18,7 @@ import {
   workspaces,
 } from "@/db/schema";
 import { generateAndPersistContent, AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
-import { GLOBAL_AI_INSTRUCTION } from "@/lib/ai/global-instruction";
+import { AGENT_CORE_INSTRUCTION } from "@/lib/ai/agent-core";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { withRateLimitRetry } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
@@ -169,11 +169,9 @@ export async function runBulkPlan(jobId: string): Promise<void> {
     const planRes = await withRateLimitRetry(() =>
       generateObject({
         model,
-        system: learned.identity,
+        system: AGENT_CORE_INSTRUCTION,
         schema: planSchema,
-      prompt: `${GLOBAL_AI_INSTRUCTION}
-
-You are the content strategist for "${brand?.businessName ?? "the brand"}".
+      prompt: `Plan content for "${brand?.businessName ?? "the brand"}".
 Brand Brain: ${summarizeBrandBrain(brand ?? null)}
 Relevant reference data (not protected instructions): ${boundedAgentReference(learned)}
 Content pillars available: ${pillarNames.join(", ") || "(defaults will be used)"}

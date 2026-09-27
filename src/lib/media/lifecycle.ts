@@ -157,15 +157,22 @@ export async function markBrandAssetForCleanup(args: {
   reason: CleanupReason;
   graceHours?: number;
   createdBy: string;
+  explicitLogoRemoval?: boolean;
 }): Promise<{ storagePath: string; bytes: number } | null> {
   const db = getDb();
   return db.transaction(async tx => {
+    // Match the logo replacement transaction's lock order so a remove and
+    // replacement in the same workspace cannot race over the active row.
+    await tx.select({ id: workspaces.id }).from(workspaces)
+      .where(eq(workspaces.id, args.workspaceId)).for("update");
     const [row] = await tx
-      .select({ id: brandAssets.id, storagePath: brandAssets.storagePath, sizeBytes: brandAssets.sizeBytes })
+      .select({ id: brandAssets.id, kind: brandAssets.kind, storagePath: brandAssets.storagePath,
+        sizeBytes: brandAssets.sizeBytes, cleanupStatus: brandAssets.cleanupStatus, refCount: brandAssets.refCount })
       .from(brandAssets)
       .where(and(eq(brandAssets.id, args.brandAssetId), eq(brandAssets.workspaceId, args.workspaceId)))
       .for("update");
-    if (!row) return null;
+    if (!row || row.cleanupStatus !== "permanent" || row.refCount <= 0) return null;
+    if (row.kind === "logo" && args.explicitLogoRemoval !== true) return null;
     const graceHours = args.graceHours
       ?? (args.reason === "abandoned_upload" ? DEFAULT_ABANDONED_UPLOAD_GRACE_HOURS : DEFAULT_SOFT_DELETE_GRACE_HOURS);
     const cleanupEligibleAt = new Date(Date.now() + graceHours * 3_600_000);
@@ -506,6 +513,7 @@ export async function evaluateCleanupEligibility(args: {
 
   const db = getDb();
   let sourceRefCount: number | null = null;
+  let activeLogo = false;
   if (args.sourceRowId) {
     if (args.sourceTable === "visual_assets") {
       const [row] = await db
@@ -516,13 +524,17 @@ export async function evaluateCleanupEligibility(args: {
       sourceRefCount = row?.refCount ?? null;
     } else {
       const [row] = await db
-        .select({ refCount: brandAssets.refCount })
+        .select({ refCount: brandAssets.refCount, kind: brandAssets.kind,
+          cleanupStatus: brandAssets.cleanupStatus })
         .from(brandAssets)
         .where(and(eq(brandAssets.id, args.sourceRowId), eq(brandAssets.workspaceId, args.workspaceId)))
         .limit(1);
       sourceRefCount = row?.refCount ?? null;
+      activeLogo = row?.kind === "logo" && row.cleanupStatus === "permanent";
     }
   }
+  // A stale queue entry can never purge the canonical Brand Brain logo.
+  if (activeLogo) return "skip";
   if (sourceRefCount != null && sourceRefCount > 0) return "defer";
 
   const liveRefs = await countLiveReferencesToPath({

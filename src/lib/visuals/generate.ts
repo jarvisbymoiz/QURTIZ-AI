@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt } from "drizzle-orm";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getDb } from "@/db";
 import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
@@ -27,13 +27,17 @@ async function fetchAsset(
   const [asset] = await db
     .select()
     .from(brandAssets)
-    .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, kind)))
+    .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, kind),
+      eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0)))
     .orderBy(desc(brandAssets.createdAt))
     .limit(1);
   if (!asset) return null;
 
   const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
-  if (error || !data) return null;
+  if (error || !data) {
+    if (kind === "logo") throw new Error("The saved brand logo could not be loaded. The logo is still attached; retry the visual or check Storage access.");
+    return null;
+  }
   return { data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType, label: asset.label };
 }
 
@@ -43,7 +47,8 @@ async function fetchGenerationReferences(supabase: SupabaseClient, workspaceId: 
   const db = getDb();
   const avatar = await fetchAsset(supabase, workspaceId, "avatar");
   const rows = await db.select().from(brandAssets)
-    .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, "reference")))
+    .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, "reference"),
+      eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0)))
     .orderBy(desc(brandAssets.createdAt)).limit(3);
   const downloads = await Promise.all(rows.map(async asset => {
     const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
@@ -72,7 +77,7 @@ async function uploadVisual(
  * - template: deterministic brand graphic (satori) with the real logo embedded. Free.
  * - ai: photographic generation; avatar/reference images are passed to the model so
  *   people keep the same face/body; the real logo is composited on top afterwards.
- *   Requires paid billing; returns an honest quota/billing state otherwise.
+ *   API Mode uses the configured workspace image provider.
  *
  * `storage` is optional and defaults to the request-scoped client (server
  * actions). Background workers (pg-boss) have no request scope, so they pass
@@ -170,19 +175,7 @@ export async function generateVisual(args: {
       png = result.png;
       usedModel = result.model;
 
-      // Composite the REAL logo — AI never redraws the brand logo.
-      const logo = await fetchAsset(supabase, args.workspaceId, "logo");
-      if (logo) {
-        const sharp = (await import("sharp")).default;
-        const base = await sharp(png).metadata();
-        const targetW = Math.round((base.width ?? 1080) * 0.22);
-        const logoResized = await sharp(logo.data).resize({ width: targetW }).png().toBuffer();
-        const logoMeta = await sharp(logoResized).metadata();
-        png = await sharp(png)
-          .composite([{ input: logoResized, left: 36, top: (base.height ?? 1350) - (logoMeta.height ?? 100) - 36 }])
-          .png()
-          .toBuffer();
-      }
+      png = await compositeBrandLogo(supabase, args.workspaceId, png);
     } else {
       const logo = await fetchAsset(supabase, args.workspaceId, "logo");
       png = await renderTemplateVisual({
@@ -198,33 +191,8 @@ export async function generateVisual(args: {
       usedModel = "satori-template";
     }
 
-    const storagePath = await uploadVisual(supabase, args.workspaceId, args.contentItemId, png);
-    const [savedVisual] = await db
-      .insert(visualAssets)
-      .values({
-        workspaceId: args.workspaceId,
-        contentItemId: args.contentItemId,
-        kind: args.mode,
-        storagePath,
-        mimeType: "image/png",
-        slideIndex: args.slideIndex ?? null,
-        meta: { model: usedModel },
-      })
-      .returning();
-
-    // Visual attached: content moves to Approval/Review if still a draft —
-    // but only when QA passed. Attaching a visual must not promote a
-    // QA-failed draft (status "draft" + qa.passed=false); it stays a draft
-    // until the content is actually re-QA'd.
-    const [freshItem] = await db
-      .select({ status: contentItems.status, qa: contentItems.qa })
-      .from(contentItems)
-      .where(eq(contentItems.id, args.contentItemId));
-    const qaPassed = (freshItem?.qa as { passed?: boolean } | null)?.passed === true;
-    if (freshItem?.status === "draft" && qaPassed) {
-      await db.update(contentItems).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentItems.id, args.contentItemId));
-      await db.update(contentVariants).set({ status: "ready_for_review", updatedAt: new Date() }).where(eq(contentVariants.contentItemId, args.contentItemId));
-    }
+    const savedVisual = await persistVisual({ supabase, workspaceId: args.workspaceId, contentItemId: args.contentItemId,
+      slideIndex: args.slideIndex, mode: args.mode, png, model: usedModel });
 
     await db
       .update(agentRuns)
@@ -237,4 +205,104 @@ export async function generateVisual(args: {
     await db.update(agentRuns).set({ status: "failed", error: message, finishedAt: new Date() }).where(eq(agentRuns.id, run.id));
     return { ok: false, reason: "api_error", message };
   }
+}
+
+async function compositeBrandLogo(supabase: SupabaseClient, workspaceId: string, png: Buffer): Promise<Buffer> {
+  const logo = await fetchAsset(supabase, workspaceId, "logo");
+  if (!logo) return png;
+  const sharp = (await import("sharp")).default;
+  const base = await sharp(png).metadata();
+  const targetW = Math.round((base.width ?? 1080) * 0.22);
+  const logoResized = await sharp(logo.data).resize({ width: targetW }).png().toBuffer();
+  const logoMeta = await sharp(logoResized).metadata();
+  return sharp(png).composite([{ input: logoResized, left: 36,
+    top: (base.height ?? 1350) - (logoMeta.height ?? 100) - 36 }]).png().toBuffer();
+}
+
+async function persistVisual(args: { supabase: SupabaseClient; workspaceId: string; contentItemId: string;
+  slideIndex?: number; mode: VisualMode; png: Buffer; model: string }) {
+  const db = getDb();
+  const storagePath = await uploadVisual(args.supabase, args.workspaceId, args.contentItemId, args.png);
+  const [savedVisual] = await db.insert(visualAssets).values({
+    workspaceId: args.workspaceId, contentItemId: args.contentItemId, kind: args.mode,
+    storagePath, mimeType: "image/png", slideIndex: args.slideIndex ?? null, meta: { model: args.model },
+  }).returning();
+  const [freshItem] = await db.select({ status: contentItems.status, qa: contentItems.qa })
+    .from(contentItems).where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
+  const qaPassed = (freshItem?.qa as { passed?: boolean } | null)?.passed === true;
+  if (freshItem?.status === "draft" && qaPassed) {
+    await db.update(contentItems).set({ status: "ready_for_review", updatedAt: new Date() })
+      .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
+    await db.update(contentVariants).set({ status: "ready_for_review", updatedAt: new Date() })
+      .where(and(eq(contentVariants.contentItemId, args.contentItemId), eq(contentVariants.workspaceId, args.workspaceId)));
+  }
+  return savedVisual;
+}
+
+/** Prepare the same brand-aware brief for a browser-local image transport. */
+export async function prepareExternalVisual(args: { workspaceId: string; userId: string;
+  contentItemId: string; variantId?: string; slideIndex?: number }) {
+  const db = getDb();
+  const [item] = await db.select().from(contentItems)
+    .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
+  if (!item) throw new Error("Content item not found.");
+  const [variant] = await db.select().from(contentVariants)
+    .where(and(eq(contentVariants.contentItemId, args.contentItemId), eq(contentVariants.workspaceId, args.workspaceId),
+      args.variantId ? eq(contentVariants.id, args.variantId) : undefined)).limit(1);
+  if (args.variantId && !variant) throw new Error("Content variant not found.");
+  const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, args.workspaceId));
+  const supabase = await createClient();
+  const generationRefs = (await fetchGenerationReferences(supabase, args.workspaceId)).slice(0, 1);
+  if (generationRefs[0] && (generationRefs[0].data.length > 4 * 1024 * 1024 ||
+      !/^image\/(png|jpeg|webp)$/.test(generationRefs[0].mimeType))) {
+    throw new Error("The brand reference must be a PNG, JPEG or WebP under 4MB for local generation.");
+  }
+  const referenceLabels = generationRefs.map(ref => ref.label || (ref.kind === "avatar" ? "Brand avatar" : "Brand visual reference"));
+  let memoryPreferences: string[] = [];
+  try {
+    const { retrieveAgentMemory } = await import("@/lib/ai/persistent-memory");
+    const learned = await retrieveAgentMemory({ workspaceId: args.workspaceId, userId: args.userId },
+      `visual design for ${item.topic} on ${variant?.platform ?? "instagram"}`);
+    memoryPreferences = [...learned.workspace, ...learned.personal]
+      .filter(entry => /visual|design|image|photo|palette|colour|color|typography|layout|style/i.test(`${entry.key} ${entry.content}`))
+      .slice(0, 3).map(entry => entry.content);
+  } catch { /* Missing memory cannot block image generation. */ }
+  const brief = buildVisualGenerationBrief({
+    brand: brand ?? null, platform: variant?.platform ?? "instagram", contentType: variant?.format ?? item.format ?? "single_image",
+    title: item.topic, objective: item.objective, hook: item.hook, mainCopy: item.mainCopy,
+    caption: variant?.caption || item.caption, cta: variant?.cta || item.cta,
+    firstComment: variant?.firstComment || item.firstComment, hashtags: variant?.hashtags ?? item.hashtags,
+    visualConcept: item.visualConcept, slides: (variant?.slides ?? []) as { index: number; headline?: string; visualPrompt?: string }[],
+    slideIndex: args.slideIndex, memoryPreferences, referenceLabels,
+  });
+  return { brief, references: generationRefs.map(ref => ({ mimeType: ref.mimeType, base64: ref.data.toString("base64") })) };
+}
+
+/** Save an image generated by a local companion through the ordinary visual asset lifecycle. */
+export async function persistExternalVisual(args: { workspaceId: string; contentItemId: string;
+  slideIndex?: number; model: string; imageBase64: string; targetWidth?: number; targetHeight?: number }): Promise<string> {
+  const [item] = await getDb().select({ id: contentItems.id }).from(contentItems)
+    .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
+  if (!item) throw new Error("Content item was removed before the image completed.");
+  const sharp = (await import("sharp")).default;
+  const raw = Buffer.from(args.imageBase64, "base64");
+  if (!raw.length || raw.length > 7 * 1024 * 1024) throw new Error("Generated image exceeds the 7MB upload limit.");
+  let png: Buffer;
+  try {
+    let image = sharp(raw, { limitInputPixels: 16 * 1024 * 1024 });
+    if (args.targetWidth && args.targetHeight && args.targetWidth >= 512 && args.targetHeight >= 512 &&
+        args.targetWidth <= 4096 && args.targetHeight <= 4096) {
+      // The companion accepts standard portrait/square/landscape sizes. Crop
+      // their center to the authored canvas (for example 4:5 from 2:3) before
+      // logo compositing and ordinary Qurtiz storage.
+      image = image.resize(args.targetWidth, args.targetHeight, { fit: "cover", position: "centre" });
+    }
+    png = await image.png().toBuffer();
+    if (png.length > 16 * 1024 * 1024) throw new Error("oversized");
+  } catch { throw new Error("Local companion returned malformed or oversized image data."); }
+  const supabase = await createClient();
+  png = await compositeBrandLogo(supabase, args.workspaceId, png);
+  const saved = await persistVisual({ supabase, workspaceId: args.workspaceId, contentItemId: args.contentItemId,
+    slideIndex: args.slideIndex, mode: "ai", png, model: args.model });
+  return saved.id;
 }

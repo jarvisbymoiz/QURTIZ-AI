@@ -15,7 +15,10 @@
     "db:validate": "node scripts/schema-validate.mjs",
     "db:reconcile": "node scripts/schema-sync.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "companion:image": "node companion/cli.mjs",
+    "test:companion": "node --test companion/*.test.mjs",
+    "package:companion:win": "node scripts/package-companion-win.mjs"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.0",

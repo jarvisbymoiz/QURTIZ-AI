@@ -411,6 +411,15 @@ describe("markVisualAssetForCleanup", () => {
 });
 
 describe("markBrandAssetForCleanup", () => {
+  it("keeps the canonical logo unless removal is explicitly authorized", async () => {
+    const logo = seedBrand();
+    expect(await lifecycle.markBrandAssetForCleanup({ workspaceId: "ws-1", brandAssetId: logo.id,
+      reason: "asset_removed", createdBy: "user-1" })).toBeNull();
+    expect(logo.cleanupStatus).toBe("permanent");
+    expect(logo.refCount).toBe(1);
+    expect(dbState.tables.get("media_cleanup_queue")?.rows ?? []).toHaveLength(0);
+  });
+
   it("decrements refCount and queues with the row's sizeBytes", async () => {
     const ba = seedBrand();
     await lifecycle.markBrandAssetForCleanup({
@@ -418,11 +427,29 @@ describe("markBrandAssetForCleanup", () => {
       brandAssetId: ba.id,
       reason: "asset_removed",
       createdBy: "user-1",
+      explicitLogoRemoval: true,
     });
     const brand = (dbState.tables.get("brand_assets")?.rows ?? []) as Row[];
     expect(brand[0].refCount).toBe(0);
     const queue = (dbState.tables.get("media_cleanup_queue")?.rows ?? []) as Row[];
     expect(queue[0].bytes).toBe(5_000);
+    expect(await lifecycle.markBrandAssetForCleanup({ workspaceId: "ws-1", brandAssetId: ba.id,
+      reason: "asset_removed", createdBy: "user-1", explicitLogoRemoval: true })).toBeNull();
+    expect(queue).toHaveLength(1);
+  });
+});
+
+describe("canonical logo cleanup protection", () => {
+  it("skips a stale cleanup entry for a live logo, even if its reference count is inconsistent", async () => {
+    seedBrand({ refCount: 0, cleanupStatus: "permanent" });
+    expect(await lifecycle.evaluateCleanupEligibility({ sourceTable: "brand_assets", sourceRowId: "ba-1",
+      workspaceId: "ws-1", storagePath: "ws-1/logo/file.png" })).toBe("skip");
+  });
+
+  it("never crosses workspace boundaries when evaluating a logo", async () => {
+    seedBrand({ workspaceId: "ws-other" });
+    expect(await lifecycle.evaluateCleanupEligibility({ sourceTable: "brand_assets", sourceRowId: "ba-1",
+      workspaceId: "ws-1", storagePath: "ws-other/logo/file.png" })).toBe("skip");
   });
 });
 

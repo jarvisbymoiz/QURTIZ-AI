@@ -1,9 +1,9 @@
 import "server-only";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentIdentities, brandMemory, userAgentMemories, workspaceAgentProfiles, workspaceMembers, workspaces } from "@/db/schema";
+import { brandMemory, userAgentMemories, workspaceAgentProfiles, workspaceMembers, workspaces } from "@/db/schema";
 import { can } from "@/lib/permissions";
-import { CORE_AGENT_IDENTITY, CORE_IDENTITY_VERSION } from "./identity";
+import { AGENT_CORE_INSTRUCTION } from "./agent-core";
 import { memoryInputSchema, memoryKey, selectRelevantMemories, type MemoryInput } from "./memory-policy";
 
 export type MemoryActor = { userId: string; workspaceId: string };
@@ -33,17 +33,16 @@ export async function retrieveAgentMemory(actor: MemoryActor, task: string, incl
   const copy = /caption|post|content|write|create|generate|rewrite|tone|style/i.test(task);
   const work = /brand|post|content|caption|strategy|research|analytic|schedul|publish|visual|reel|carousel/i.test(task);
   const rank = (content: typeof brandMemory.content | typeof userAgentMemories.content, key: typeof brandMemory.memoryKey | typeof userAgentMemories.memoryKey, type: typeof brandMemory.type | typeof userAgentMemories.type) => sql`ts_rank(to_tsvector('simple', ${content}), websearch_to_tsquery('simple', ${terms})) + CASE WHEN ${work} AND ${type}='rule' OR ${key} LIKE 'response.%' OR ${key} IN ('copy.emojis','copy.tone') OR ${copy} AND (${key} LIKE 'copy.%' OR ${key} LIKE 'caption.%' OR ${key} LIKE '%.copy.%' OR ${key} LIKE '%.caption.%' OR ${content} ILIKE '%avoid%' OR ${content} ILIKE '%never%' OR ${content} ILIKE '%do not%') THEN 1 ELSE 0 END`;
-  const [personal, workspace, profiles, identities] = await Promise.all([
+  const [personal, workspace, profiles] = await Promise.all([
     includePersonal ? db.select().from(userAgentMemories).where(and(eq(userAgentMemories.workspaceId, actor.workspaceId), eq(userAgentMemories.userId, actor.userId), eq(userAgentMemories.active, true)))
       .orderBy(desc(rank(userAgentMemories.content, userAgentMemories.memoryKey, userAgentMemories.type)), desc(userAgentMemories.updatedAt)).limit(100) : Promise.resolve([]),
     db.select().from(brandMemory).where(and(eq(brandMemory.workspaceId, actor.workspaceId), eq(brandMemory.active, true), isNull(brandMemory.deletedAt)))
       .orderBy(desc(rank(brandMemory.content, brandMemory.memoryKey, brandMemory.type)), desc(brandMemory.updatedAt)).limit(100),
     db.select().from(workspaceAgentProfiles).where(eq(workspaceAgentProfiles.workspaceId, actor.workspaceId)),
-    db.select().from(agentIdentities).where(eq(agentIdentities.version, CORE_IDENTITY_VERSION)),
   ]);
   const profile = profiles[0];
   return {
-    identity: identities[0]?.instructions ?? CORE_AGENT_IDENTITY,
+    identity: AGENT_CORE_INSTRUCTION,
     personal: selectRelevantMemories(personal, task, 1200).map(row => ({ key: row.memoryKey, content: row.content })),
     workspace: selectRelevantMemories(workspace, task, 1200, "workspace").map(row => ({ key: row.memoryKey, type: row.type, content: row.content })),
     profile: work && profile ? { operatingInstructions: profile.operatingInstructions, strategy: /strategy|post|content|research/i.test(task) ? profile.strategy : "",

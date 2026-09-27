@@ -52,7 +52,8 @@ export function BrandBrainTabs({
           <AssetUploader
             key={kind}
             kind={kind}
-            assets={assets.filter((a) => a.kind === kind)}
+            assets={kind === "logo" ? assets.filter((a) => a.kind === kind).slice(0, 1)
+              : assets.filter((a) => a.kind === kind)}
             signedUrls={assetUrls}
             editable={editable}
           />

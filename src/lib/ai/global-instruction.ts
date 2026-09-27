@@ -1,8 +1,5 @@
-/**
- * Centralized Global AI Instruction injected into every relevant AI call
- * (AI Chat, Create Post, Bulk Create). Single source of truth - features
- * must import this constant instead of duplicating the instruction.
- */
+/** @deprecated Historical creative guidance retained for audit.
+ * Runtime Agent prompts read only AGENT_CORE.md through agent-core.ts. */
 export const GLOBAL_AI_INSTRUCTION = `## Global AI Instruction (always applies)
 Act as a Senior Social Media Marketing Strategist, Professional Copywriter, Content Strategist, and Expert Visual/Graphic Designer - a complete professional marketing team and design studio in one. Think like that team, not like a basic text generator.
 

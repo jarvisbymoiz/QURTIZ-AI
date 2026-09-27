@@ -15,47 +15,47 @@ const system = buildContentSystemPrompt({
 
 describe("content generation system prompt — caption craft", () => {
   it("demands audience-first, specific, structured captions with matching CTA intent", () => {
-    expect(system).toMatch(/Caption craft/i);
+    expect(system).toMatch(/Strategy and human copy/i);
     expect(system).toMatch(/audience/i);
-    expect(system).toMatch(/CTA intent/i);
+    expect(system).toMatch(/goal-matched CTA/i);
   });
 
   it("bans generic openers and clichés explicitly", () => {
     expect(system).toContain("Exciting news");
     expect(system).toContain("Check this out");
-    expect(system).toMatch(/clichés/i);
+    expect(system).toMatch(/corporate filler/i);
   });
 
   it("difference-trains the platforms and the hashtags", () => {
-    expect(system).toMatch(/Instagram = strong first line/i);
-    expect(system).toMatch(/Facebook = warmer conversational/i);
-    expect(system).toMatch(/#instagood-style filler/);
+    expect(system).toMatch(/Instagram benefits from a strong first line/i);
+    expect(system).toMatch(/Facebook can be warmer/i);
+    expect(system).toMatch(/niche, locality, and offer/i);
   });
 
   it("requires automatic use of known Brand Brain details (no re-asking)", () => {
-    expect(system).toMatch(/WhatsApp, website, pricing or offer details/i);
-    expect(system).toMatch(/never ask the user for details already in Brand Brain/i);
+    expect(system).toMatch(/WhatsApp, and links only when supplied/i);
+    expect(system).toMatch(/Do not make the user repeat known information/i);
   });
 });
 
 describe("content generation system prompt — visual direction bar", () => {
   it("demands a designer-executable creative brief, not a one-liner", () => {
-    expect(system).toMatch(/Visual direction bar/i);
+    expect(system).toMatch(/Visual creative direction/i);
     expect(system).toContain("aspect ratio");
-    expect(system).toMatch(/text hierarchy/i);
-    expect(system).toMatch(/EXACT headline\/copy/i);
-    expect(system).toMatch(/Never emit a shapeless one-liner/i);
+    expect(system).toMatch(/hierarchy/i);
+    expect(system).toMatch(/exact short on-image headline/i);
+    expect(system).toMatch(/not a vague adjective list/i);
   });
 
   it("requires one consistent carousel design system with a narrative arc and CTA closer", () => {
-    expect(system).toMatch(/ONE consistent design system/i);
-    expect(system).toMatch(/narrative arc/i);
-    expect(system).toMatch(/final slide lands the strongest CTA/i);
+    expect(system).toMatch(/one coherent palette, grid, typography/i);
+    expect(system).toMatch(/varied value progression/i);
+    expect(system).toMatch(/CTA close/i);
   });
 
   it("pins the logo rule and promotional contact/trust elements", () => {
-    expect(system).toMatch(/never draw one/i); // logo composited later
-    expect(system).toMatch(/trust highlights/i);
+    expect(system).toMatch(/never ask an image model to draw, approximate, or render the brand logo/i);
+    expect(system).toMatch(/product or offer treatment, contact placement/i);
   });
 });
 

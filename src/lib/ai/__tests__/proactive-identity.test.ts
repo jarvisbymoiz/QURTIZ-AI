@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentRuns } from "@/db/schema";
 import { CORE_AGENT_IDENTITY, CORE_IDENTITY_VERSION } from "../identity";
+import { AGENT_CORE_INSTRUCTION, agentCoreForTask } from "../agent-core";
 import { buildSystemPrompt } from "../agent";
 import { buildAgentTools } from "../tools";
 import { generateAndPersistContent } from "../content";
@@ -23,19 +24,21 @@ describe("proactive protected identity", () => {
     expect(sql).toContain("$qurtiz$" + CORE_AGENT_IDENTITY + "$qurtiz$");
     expect(sql).not.toMatch(/UPDATE|DELETE|DROP/);
     const prompt = buildSystemPrompt({ workspaceName: "A", brandSummary: "", memories: [], lazyContext: true });
-    expect(prompt.split(CORE_AGENT_IDENTITY)).toHaveLength(2);
+    expect(prompt.split(agentCoreForTask())).toHaveLength(2);
+    expect(prompt).not.toContain(CORE_AGENT_IDENTITY);
     expect(prompt).not.toContain("plan, discuss, and prepare");
-    expect(prompt).toContain("Ask only when an essential fact");
-    expect(prompt).toContain("never silently approve");
-    expect(prompt).toContain("use edit_content on the existing post");
+    expect(prompt).toContain("Ask one focused question only when an essential fact");
+    expect(prompt).toContain("never automatic publishing");
+    expect(prompt).toContain("patch it with `edit_content`");
   });
   it("loads detailed visual guidance only for relevant tasks; creation engine retains it", () => {
     const base = { workspaceName: "A", brandSummary: "", memories: [] };
     const greeting = buildSystemPrompt({ ...base, currentTask: "Hi" });
     const visual = buildSystemPrompt({ ...base, currentTask: "Write a visual prompt" });
-    expect(visual).toContain("Layout and exact text placement");
-    expect(greeting).not.toContain("Layout and exact text placement");
+    expect(visual).toContain("## Visual creative direction");
+    expect(greeting).not.toContain("## Visual creative direction");
     expect(visual.length).toBeGreaterThan(greeting.length);
+    expect(AGENT_CORE_INSTRUCTION).toContain("## Strategy and human copy");
   });
   it.each(["carousel", "reel", "single_image"] as const)("routes requested %s and refinement tone through the existing creation service", async preferredFormat => {
     vi.mocked(generateAndPersistContent).mockResolvedValue({ itemId: "saved-real-item", qa: { score: 95, passed: true, issues: [] } } as Awaited<ReturnType<typeof generateAndPersistContent>>);

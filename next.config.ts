@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
   // Pin the workspace root (Next infers it from lockfiles and warns when
   // multiple lockfiles exist, e.g. C:\Users\IRONMAN\package-lock.json).
   outputFileTracingRoot: path.resolve(),
+  outputFileTracingIncludes: { "/*": ["./AGENT_CORE.md"] },
   // Native binary modules must not be bundled by Turbopack/webpack -
   // they load at runtime via require with their platform binaries.
   serverExternalPackages: [

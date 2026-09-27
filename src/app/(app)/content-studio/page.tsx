@@ -1,8 +1,8 @@
 import { withSchemaGuard } from "@/components/system/schema-guard";
 import { effectiveContent } from "@/lib/content/edit";
-﻿import { desc, eq, inArray } from "drizzle-orm";
+﻿import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contentItems, contentPillars, contentVariants, visualAssets } from "@/db/schema";
+import { contentItems, contentPillars, contentVariants, imageModePreferences, visualAssets } from "@/db/schema";
 import { listAssetSignedUrls } from "@/server/actions/visuals";
 import { hasWorkspaceAIConfig } from "@/lib/ai/config";
 import { requireWorkspace } from "@/lib/workspace";
@@ -46,6 +46,8 @@ async function ContentStudioPage() {
     ? await listAssetSignedUrls(visuals.map((v) => v.storagePath))
     : {};
   const display = items.map(item => effectiveContent(item, variants.filter(variant => variant.contentItemId === item.id)));
+  const [localMode] = await db.select({ mode: imageModePreferences.mode }).from(imageModePreferences)
+    .where(and(eq(imageModePreferences.workspaceId, ctx.workspace.id), eq(imageModePreferences.userId, ctx.user.id))).limit(1);
   return (
     <div className="space-y-6">
       <PageHeader
@@ -59,7 +61,7 @@ async function ContentStudioPage() {
         pillars={pillars}
         visuals={visuals}
         visualUrls={visualUrls}
-        aiConfigured={await hasWorkspaceAIConfig(ctx.workspace.id)}
+        aiConfigured={localMode?.mode === "local_companion" || await hasWorkspaceAIConfig(ctx.workspace.id)}
         editable={can(ctx.role, "brand:write")}
         timezone={ctx.workspace.timezone}
       />

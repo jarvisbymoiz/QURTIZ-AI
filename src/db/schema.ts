@@ -149,6 +149,22 @@ export const workspaceAiConfig = pgTable(
   },
 );
 
+/** Personal image routing preference. No account or companion secrets live here. */
+export const imageModePreferences = pgTable("image_mode_preferences", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  mode: text("mode").notNull().default("api"),
+  modelId: text("model_id"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.workspaceId, t.userId] }),
+  foreignKey({
+    name: "image_mode_preferences_member_fk",
+    columns: [t.workspaceId, t.userId],
+    foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId],
+  }).onDelete("cascade"),
+]);
+
 /* ── Brand Brain ───────────────────────────────────────────────────── */
 
 export const brands = pgTable(
@@ -841,5 +857,3 @@ export const researchUsageEvents = pgTable(
     index("research_usage_events_created_hash_idx").on(t.queryHash, t.createdAt),
   ],
 );
-
-
