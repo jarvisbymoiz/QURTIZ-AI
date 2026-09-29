@@ -209,13 +209,26 @@ whose manually applied changes bypassed history, see
 [database reconciliation and scheduler deployment](docs/DATABASE_SCHEDULER_REPAIR.md).
 Back up production before future migrations and verify the target project.
 
-Scheduled publishing on Vercel needs the committed `vercel.json`, a Production
-`CRON_SECRET`, minute-frequency cron support and an 800-second function budget.
-`/api/cron/publish` runs each minute; `/api/cron/maintenance` runs every five
-minutes. Deploying the source is required to register these jobs. Vercel Hobby's
-daily cron is unsuitable; use a persistent worker or an appropriate deployment
-configuration. Closing a browser is harmless; stopping the only persistent
-worker prevents execution until it restarts, while pending jobs remain in Postgres.
+For **Vercel Hobby**, `vercel.json` intentionally registers no Vercel cron jobs:
+Hobby rejects the previous one-minute and five-minute schedules during
+deployment. The authenticated routes remain unchanged. The repository's
+`.github/workflows/qurtiz-scheduler.yml` invokes publishing and maintenance
+every five minutes. To activate it:
+
+1. Set a random `CRON_SECRET` in the Vercel **Production** environment.
+2. Set GitHub Actions repository secret `QURTIZ_CRON_SECRET` to the **same** value.
+3. Deploy the latest `main` commit, then run **Qurtiz scheduled jobs** once
+   using GitHub Actions → **Run workflow**. Both jobs must finish successfully;
+   a missing secret, non-2xx response, or timeout is a failure.
+4. Check later scheduled workflow runs and the Vercel function logs. Confirm
+   due publishing jobs progress to a real terminal state.
+
+GitHub Actions scheduled runs can be delayed; this setup does **not** promise
+exact-minute publishing. Hobby functions have a 300-second execution budget
+with Fluid Compute, so large carousel/Reel publishing may require a persistent
+worker or a higher-duration plan. Do not advertise precise schedules until the
+chosen worker and end-to-end publishing tests support them. The local ChatGPT
+companion is separate: the user runs it on the same device as their browser.
 
 ### 8e. Verify Live Deployment Health
 You can visit:

@@ -30,7 +30,7 @@ import { buildPublishedNotification, buildPublishFailedNotification, type Publis
 
 const MAX_PUBLISH_ATTEMPTS = 3;
 const PUBLISH_RETRY_BACKOFF_MS = 5 * 60_000; // requeue 5 minutes out
-const STUCK_PROCESSING_MS = 30 * 60_000; // longer than the 800s cron execution budget
+const STUCK_PROCESSING_MS = 30 * 60_000; // longer than the Hobby cron execution budget
 const STUCK_GENERATION_MS = 30 * 60_000;
 
 /**

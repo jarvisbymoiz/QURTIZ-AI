@@ -3,9 +3,9 @@ import { publishDueScan } from "@/lib/jobs/workflows";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-// Multi-image uploads and Reel processing exceed 60 seconds. Requires a
-// Vercel plan/runtime supporting this duration; persistent workers also work.
-export const maxDuration = 800;
+// Hobby's maximum function duration is 300 seconds with Fluid Compute.
+// Longer jobs require a persistent worker or a higher-duration Vercel plan.
+export const maxDuration = 300;
 
 export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization");

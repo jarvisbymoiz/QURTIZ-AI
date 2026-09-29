@@ -1,5 +1,11 @@
 # Database and scheduled publishing repair — 22 September 2026
 
+> **Current Hobby deployment (29 September 2026):** The earlier Vercel
+> minute-cron instructions below are historical. Hobby rejects those schedules.
+> The current source uses `.github/workflows/qurtiz-scheduler.yml` every five
+> minutes and requires GitHub `QURTIZ_CRON_SECRET` equal to Vercel Production
+> `CRON_SECRET`. See `SETUP.md` for activation and timing limitations.
+
 ## pg-boss connection recovery (25 September 2026)
 
 Node instrumentation now launches pg-boss without blocking Next.js startup.
