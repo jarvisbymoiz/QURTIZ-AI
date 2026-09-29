@@ -1,6 +1,6 @@
 # Experimental local image companion integration
 
-Status: **ChatGPT Account Mode implementation complete; distribution QA remains** (2026-09-27). API Mode remains the production default. The companion route is experimental and unofficial.
+Status: **Same-PC ChatGPT Account Mode implemented; mobile relay, unattended Auto Run, and distribution QA remain open** (2026-09-29). API Mode remains the production default. The companion route is experimental and unofficial.
 
 ## 2026-09-29 mobile preview and Windows background installation
 
