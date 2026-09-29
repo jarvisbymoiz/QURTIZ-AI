@@ -5,7 +5,7 @@ This companion is an optional **loopback-only bridge** for a separate local Open
 ## Windows setup
 
 1. Download the official **Qurtiz-Companion-Windows.zip** release artifact when published. Extract it to a folder on your computer.
-2. Double-click **Start Qurtiz Companion.cmd** in that folder. Keep its small status window open while using ChatGPT Account Mode. This starts the bundled local gateway and Qurtiz bridge together; no terminal commands, Node installation, port setup, keys or environment files are needed. Close the window to stop both services.
+2. Double-click **Install Qurtiz Companion.cmd**. It installs under your Windows user profile, starts in the background, and starts again when you sign in to Windows. No terminal commands, Node installation, port setup, keys or environment files are needed. Keep the PC running while generating images. Stop the companion before installing an update.
 3. In Qurtiz Settings, choose **ChatGPT Account Mode** and **Connect ChatGPT**. Your default browser opens the OpenAI sign-in page. The gateway handles the local callback and stores credentials in the companion's private local data folder. The companion discovers an account-scoped Codex model catalog without generating an image, then selects a compatible image route from available capabilities. The optional web-image route is experimental and subject to its own account limit.
 4. For the published Qurtiz site, your browser may ask permission to access the local network. Denying it makes this mode unavailable; choose API Mode instead.
 
@@ -29,7 +29,7 @@ The companion exposes narrow local pairing, sanitized account status, connect, d
 
 ## Limits and recovery
 
-- This works only when the browser and companion are on the same computer. A Vercel function cannot call your localhost. No background or scheduled Free-account generation is available through this bridge.
+- This works only when the browser and companion are on the same computer. A phone cannot use the companion running on a PC through this loopback-only version. A Vercel function cannot call your localhost. The Windows installer starts the companion in the background on sign-in, but background/scheduled server-side image generation is not available through this browser-mediated bridge. Mobile users can choose API Mode. Mobile ChatGPT Account Mode requires a separately authenticated and workspace-isolated cloud job relay to a running PC companion.
 - Browsers differ in CORS and Local Network Access behavior. Test both the local and published Qurtiz origins before relying on it.
 - A `401` from the companion means the local pairing expired; retry Connect ChatGPT. A `424` means the local gateway account needs reconnection. A `502` usually means the local gateway is unavailable or returned malformed output. A `429` can mean companion request throttling or upstream quota; inspect the local gateway for detail. Failed requests do not imply that Qurtiz saved an image.
 - If a brand avatar/reference is configured, Qurtiz sends one bounded reference through JSON `/v1/images/edits` as `images[].image_url`. The gateway must support edits; otherwise the request fails visibly. Qurtiz does not silently discard the reference.

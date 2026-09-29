@@ -21,7 +21,10 @@ export function ImageModeCard({ workspaceId, userId }: { workspaceId: string; us
   const [busy, setBusy] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
+  const [mobileBrowser, setMobileBrowser] = useState(false);
   const imageRequestRef = useRef(false);
+
+  useEffect(() => { setMobileBrowser(/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,8 +148,8 @@ export function ImageModeCard({ workspaceId, userId }: { workspaceId: string; us
         {mode === "local_companion" ? <div className="space-y-3">
           {detection === "checking" ? <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking for Qurtiz Companion…</p> : null}
           {detection === "missing" ? <div className="space-y-2 rounded-lg border p-3 text-sm">
-            <p>Qurtiz Companion is required on this computer.</p>
-            <div className="flex gap-2"><a className={buttonVariants({ variant: "outline" })} href={SETUP_GUIDE} target="_blank" rel="noopener noreferrer">Install / Start Companion</a>
+            <p>{mobileBrowser ? "This local companion works in a browser on the same Windows PC where it is installed. A phone cannot reach the PC companion yet." : "Qurtiz Companion is required on this computer."}</p>
+            <div className="flex flex-wrap gap-2"><a className={buttonVariants({ variant: "outline" })} href={SETUP_GUIDE} target="_blank" rel="noopener noreferrer">{mobileBrowser ? "PC setup guide" : "Install / Start Companion"}</a>
               <Button variant="ghost" onClick={() => { setMessage(null); setRetryNonce(value => value + 1); }}>Try again</Button></div>
           </div> : null}
           {detection === "ready" && account?.connected ? <div className="space-y-3 rounded-lg border p-3 text-sm">
@@ -173,7 +176,7 @@ export function ImageModeCard({ workspaceId, userId }: { workspaceId: string; us
           <p className="text-xs text-muted-foreground">Test Image creates a real image and may use your account&apos;s image quota.</p>
           {savedMode !== "local_companion" && account?.connected ? <p className="text-xs text-muted-foreground">Finish connecting to enable ChatGPT Account Mode in this workspace.</p> : null}
         </div> : null}
-        {message ? <p role="alert" className="text-sm text-destructive">{message}</p> : null}
+          {message && !(mobileBrowser && detection === "missing") ? <p role="alert" className="text-sm text-destructive">{message}</p> : null}
       </>}
     </CardContent>
   </Card>;

@@ -2,6 +2,14 @@
 
 Status: **ChatGPT Account Mode implementation complete; distribution QA remains** (2026-09-27). API Mode remains the production default. The companion route is experimental and unofficial.
 
+## 2026-09-29 mobile preview and Windows background installation
+
+The preview screenshot came from an Android phone. The browser adapter uses `http://127.0.0.1:8788`, so the phone searched for a companion on the phone itself; a PC companion cannot answer. This is an architecture limit, not an OAuth failure. The Settings missing-companion state now explains the same-PC requirement on mobile and leaves API Mode available. The Windows package now includes a per-user installer that copies the companion to `%LOCALAPPDATA%`, starts it hidden, and registers it in the Windows Startup folder. This permits same-PC browser usage without leaving a console window open. The ZIP still needs a signed, public release artifact and a real Windows installation smoke test.
+
+Mobile ChatGPT Account Mode and unattended cloud Auto Run image generation remain **open**. A safe solution needs a workspace/user-scoped authenticated relay with durable jobs, a PC companion outbound worker, strict job ownership, bounded image transfer, revocation, and replay protection. Directly exposing the companion to the internet or making Vercel call a user's localhost would break the present security boundary. API Mode remains available on phone and PC, including background workflows where its provider supports them. Do not mark mobile/Auto Run companion support complete until a real phone-to-PC image and scheduled job are verified.
+
+Validation for this phase: companion tests 18/18, focused browser image-mode tests 12/12, TypeScript typecheck, PowerShell installer parser, Windows ZIP build, archive content inspection, and Next production build all passed. The Windows install/start itself and mobile-to-PC generation have not been smoke-tested. The build initially failed because an older `dist/companion-windows` directory was locked; packaging now uses a fresh temporary build directory, and the subsequent ZIP build succeeded.
+
 ## 2026-09-29 deployed Vercel audit — release blocked
 
 The user reports that Settings opens on `https://qurtiz-ai.vercel.app` but the ChatGPT Account Mode card is absent. Local `main` and `origin/main` are the same commit (`4c64b8a`, 2026-09-28) and that commit renders `ImageModeCard` in `src/app/(app)/settings/page.tsx`. The public GitHub commit status for `4c64b8a` is **Vercel failure**, as are the preceding eight commits. The last successful status found was `95e73d3` (2026-09-21), whose Settings page does not render the card. This is evidence that the live production alias is on an older build; it is not an OAuth callback failure. An unauthenticated visit to `/settings` redirects to login, so the deployed signed-in card cannot be independently inspected from this environment; the user's signed-in observation supplies that part of the evidence.
