@@ -42,7 +42,7 @@ export async function cleanupCompanionStaging() {
     if (!removed.error && (row.status === "completed" ||
         Date.now() - row.updatedAt.getTime() > 3 * 60 * 60_000)) {
       await db.update(companionImageJobs).set({ uploadPath: null, updatedAt: new Date() })
-        .where(and(eq(companionImageJobs.id, row.id), eq(companionImageJobs.status, "completed")));
+        .where(and(eq(companionImageJobs.id, row.id), eq(companionImageJobs.status, row.status)));
     }
   }
 }
