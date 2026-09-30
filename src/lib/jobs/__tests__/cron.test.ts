@@ -29,6 +29,13 @@ describe("machine cron endpoints", () => {
     expect(response.headers.get("location")).toBeNull();
     expect(response.status).toBe(200);
   });
+  it("allows a cookie-free companion request to reach device authentication", async () => {
+    const response = await updateSession(new NextRequest("https://example.test/api/companion/jobs/claim", {
+      method: "POST", headers: { authorization: "Bearer invalid-device-secret" },
+    }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("location")).toBeNull();
+  });
   it("runs a bounded durable scan without a user cookie", async () => {
     vi.stubEnv("CRON_SECRET", "test-cron-secret");
     const response = await publish(new NextRequest("https://example.test/api/cron/publish", { headers: { authorization: "Bearer test-cron-secret" } }));

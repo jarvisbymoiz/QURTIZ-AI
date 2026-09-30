@@ -43,6 +43,8 @@ Migrations 0032–0033 applied to the configured database; `npm run db:validate`
 
 The old `local-visual` server actions and browser adapter remain in the source for rollback but Content Studio no longer invokes them for generation. Remove/deprecate only after live cloud-relay parity. The pairing setup still uses a short one-time browser loopback request on the PC; ongoing image generation does not. A public signed Windows installer and exact Preview origin configuration are distribution blockers.
 
+Production deployment audit exposed an additional blocker before pairing: `src/lib/supabase/middleware.ts` was treating `/api/companion/*` as a browser-only path and redirecting cookie-free device requests to `/login`. The device protocol authenticates its own hashed bearer credential in every route, so the middleware now passes these paths through without a Supabase browser session. A regression test verifies the request reaches device authentication without a login redirect. The protected Vercel Preview URL still returns Vercel SSO HTML to the worker; an exact publicly reachable Production origin is required for live pairing and job processing.
+
 Status: **Same-PC ChatGPT Account Mode implemented; mobile relay, unattended Auto Run, and distribution QA remain open** (2026-09-29). API Mode remains the production default. The companion route is experimental and unofficial.
 
 ## 2026-09-29 mobile preview and Windows background installation

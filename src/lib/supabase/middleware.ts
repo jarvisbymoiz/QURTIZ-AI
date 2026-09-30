@@ -21,8 +21,11 @@ function isPublic(pathname: string): boolean {
  * Must stay edge-runtime safe: no Node APIs here.
  */
 export async function updateSession(request: NextRequest) {
-  // Machine endpoint authenticates its bearer secret in the route itself.
-  if (["/api/cron/publish", "/api/cron/maintenance"].includes(request.nextUrl.pathname)) return NextResponse.next({ request });
+  // Machine endpoints authenticate their bearer credentials in their routes.
+  // The companion has no browser cookie; redirecting it to /login would turn
+  // every claim, heartbeat and upload completion into an HTML response.
+  if (["/api/cron/publish", "/api/cron/maintenance"].includes(request.nextUrl.pathname) ||
+      request.nextUrl.pathname.startsWith("/api/companion/")) return NextResponse.next({ request });
   let supabaseResponse = NextResponse.next({ request });
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
