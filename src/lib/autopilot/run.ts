@@ -5,7 +5,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { generateText } from "ai";
 import { z } from "zod";
 import { getDb } from "@/db";
-import { agentRuns, brands, contentItems, contentVariants, jobs, notifications, researchItems, settings, visualAssets, workspaces } from "@/db/schema";
+import { agentRuns, brands, companionImageJobs, contentItems, contentVariants, imageModePreferences, jobs, notifications, researchItems, settings, visualAssets, workspaces } from "@/db/schema";
 import { getBoss, QUEUES } from "@/lib/jobs/boss";
 import { buildAutopilotRunContext } from "@/lib/jobs/workflows";
 import { hasWorkspaceAIConfig, getWorkspaceTextModel } from "@/lib/ai/config";
@@ -14,6 +14,7 @@ import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
 import { estimateCostFromUsage } from "@/lib/ai/provider";
 import { researchTopics } from "@/lib/ai/research";
 import { generateVisual } from "@/lib/visuals/generate";
+import { enqueueCompanionImage } from "@/lib/companion/image-jobs";
 import { createServiceClient } from "@/lib/supabase/service";
 import { approveItem } from "@/lib/content/lifecycle";
 import { schedulePost, selectItemMedia } from "@/lib/publishing/service";
@@ -23,6 +24,7 @@ import { buildAutoRunCompletedNotification, buildAutoRunTerminalNotification } f
 
 type RunInput = { config: AutopilotSettings; occurrence: string; timezone: string };
 type Checkpoint = { attempts?: number; topics?: string[]; createdIds?: string[]; errors?: string[]; stage?: string; context?: Awaited<ReturnType<typeof buildAutopilotRunContext>> };
+class CompanionPendingError extends Error {}
 export function autoRunItemId(jobId: string, index: number, attempt: number): string {
   const hex = createHash("sha256").update(`${jobId}:${index}:${attempt}`).digest("hex");
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}`;
@@ -134,6 +136,31 @@ export async function executeAutoRun(jobId: string): Promise<void> {
           const assets = await db.select().from(visualAssets).where(and(eq(visualAssets.contentItemId, itemId), eq(visualAssets.workspaceId, job.workspaceId)));
           if (assets.some(a => a.kind === "upload" || (slide.index === -1 ? a.slideIndex == null : a.slideIndex === slide.index))) continue;
           await currentConfig(); await checkpoint("Creating visual");
+          const [imagePreference] = await db.select({ mode: imageModePreferences.mode,
+            offlinePolicy: imageModePreferences.companionOfflinePolicy })
+            .from(imageModePreferences).where(and(eq(imageModePreferences.workspaceId, job.workspaceId),
+              eq(imageModePreferences.userId, job.userId))).limit(1);
+          if (imagePreference?.mode === "local_companion") {
+            const relay = await enqueueCompanionImage({ workspaceId: job.workspaceId, userId: job.userId,
+              contentItemId: itemId, storage, idempotencyKey: `autorun:${job.id}:${itemId}:${slide.index}`,
+              ...(slide.index === -1 ? {} : { slideIndex: slide.index, variantId: variants[0]?.id }) });
+            if (relay.status === "completed") continue;
+            if (relay.status === "failed") { state.errors.push("ChatGPT companion image failed; post retained for review."); break; }
+            if (relay.status === "waiting_for_companion" && imagePreference.offlinePolicy === "fail") {
+              await db.update(companionImageJobs).set({ status: "failed", error: "Explicit fail-on-offline policy selected.", updatedAt: new Date() })
+                .where(and(eq(companionImageJobs.id, relay.id), eq(companionImageJobs.status, "waiting_for_companion")));
+              state.errors.push("ChatGPT companion is offline; post retained for review."); break;
+            }
+            if (relay.status === "waiting_for_companion" && imagePreference.offlinePolicy === "api_fallback") {
+              // Explicit user policy only. Cancel the pending companion task
+              // before invoking API Mode so it cannot generate later too.
+              await db.update(companionImageJobs).set({ status: "failed", error: "Explicit API fallback selected.", updatedAt: new Date() })
+                .where(and(eq(companionImageJobs.id, relay.id), eq(companionImageJobs.status, "waiting_for_companion")));
+            } else {
+              await checkpoint("Waiting for ChatGPT companion image");
+              throw new CompanionPendingError("Waiting for the paired companion to finish the image.");
+            }
+          }
           const visual = await generateVisual({ workspaceId: job.workspaceId, userId: job.userId, contentItemId: itemId, mode: "ai", storage, ...(slide.index === -1 ? {} : { slideIndex: slide.index, variantId: variants[0]?.id }) });
           if (!visual.ok) { state.errors.push(`Visual unavailable: ${visual.message}`); break; }
         }
@@ -192,6 +219,12 @@ export async function executeAutoRun(jobId: string): Promise<void> {
       meta: summary.meta,
     });
   } catch (error) {
+    if (error instanceof CompanionPendingError) {
+      state.attempts = Math.max(0, (state.attempts ?? 1) - 1);
+      await db.update(jobs).set({ status: "queued", error: null,
+        result: state as Record<string, unknown>, updatedAt: new Date() }).where(eq(jobs.id, job.id));
+      return;
+    }
     const message = error instanceof Error ? error.message : "Auto Run failed";
     const disabled = message === "AUTO_RUN_DISABLED";
     const terminal = state.attempts >= 3 || message.startsWith("INVALID_AUTO_RUN_CONFIG:");

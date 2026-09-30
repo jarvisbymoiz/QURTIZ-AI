@@ -1,6 +1,7 @@
 Option Explicit
-Dim shell, folder, command
+Dim shell, folder, root, command
 Set shell = CreateObject("WScript.Shell")
 folder = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-command = """" & folder & "\node.exe"" """ & folder & "\companion\windows\start.mjs"""
+root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(CreateObject("Scripting.FileSystemObject").GetParentFolderName(folder))
+command = """" & root & "\node.exe"" """ & root & "\companion\windows\start.mjs"""
 shell.Run command, 0, False

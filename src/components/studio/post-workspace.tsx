@@ -27,8 +27,8 @@ import {
 
 } from "@/server/actions/visuals";
 import { getImageModePreferenceAction } from "@/server/actions/image-mode";
-import { completeLocalVisualAction, failLocalVisualAction, prepareLocalVisualAction } from "@/server/actions/local-visual";
-import { generateLocalCompanionImage, pairLocalCompanion } from "@/lib/ai/local-companion";
+import { enqueueCompanionImageAction, getCompanionImageJobAction,
+  getPendingCompanionImageJobAction } from "@/server/actions/companion-image";
 import { scheduleContentAction } from "@/server/actions/schedule";
 import {
   rejectContentAction,
@@ -191,9 +191,48 @@ export function PostWorkspace({
   const [masterPrompt, setMasterPrompt] = useState<string | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [visualError, setVisualError] = useState<string | null>(null);
+  const [pendingCompanionJobId, setPendingCompanionJobId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const visualRequestRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getPendingCompanionImageJobAction(item.id).then(result => {
+      if (!cancelled && result.ok && result.job) setPendingCompanionJobId(result.job.id);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [item.id]);
+
+  useEffect(() => {
+    if (!pendingCompanionJobId) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const result = await getCompanionImageJobAction(pendingCompanionJobId);
+        if (stopped) return;
+        if (!result.ok) throw new Error(result.error);
+        if (result.job.status === "completed") {
+          setPendingCompanionJobId(null);
+          setVisualError(null);
+          toast.success("ChatGPT visual saved");
+          router.refresh();
+          return;
+        }
+        if (result.job.status === "failed") {
+          setPendingCompanionJobId(null);
+          setVisualError(result.job.error ?? "Companion image generation failed.");
+          return;
+        }
+      } catch (error) {
+        if (!stopped) setVisualError(error instanceof Error ? error.message : "Could not check companion image job.");
+      }
+      if (!stopped) timer = setTimeout(poll, 5_000);
+    };
+    timer = setTimeout(poll, 2_000);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [pendingCompanionJobId, router]);
   const [mediaUploading, setMediaUploading] = useState(false);
 
   const scores = (item.aiScores ?? {}) as Record<string, number>;
@@ -231,7 +270,7 @@ export function PostWorkspace({
 
 
   function generate(mode: "template" | "ai", slideIndex?: number) {
-    if (visualRequestRef.current) return;
+    if (visualRequestRef.current || pendingCompanionJobId) return;
     visualRequestRef.current = true;
     setVisualError(null);
     start(async () => {
@@ -241,17 +280,14 @@ export function PostWorkspace({
         const preference = mode === "ai" ? await getImageModePreferenceAction() : null;
         if (preference && !preference.ok) throw new Error(preference.error);
         if (preference?.ok && preference.preference.mode === "local_companion") {
-          const pairingKey = await pairLocalCompanion(preference.userId, preference.workspaceId);
-          const prepared = await prepareLocalVisualAction({ contentItemId: item.id, slideIndex, variantId: variant?.id });
-          if (!prepared.ok) throw new Error(prepared.error);
-          try {
-            const imageBase64 = await generateLocalCompanionImage({ pairingKey, modelId: prepared.modelId,
-              prompt: prepared.prompt, size: prepared.size, references: prepared.references });
-            r = await completeLocalVisualAction({ jobId: prepared.jobId, imageBase64 });
-          } catch (error) {
-            await failLocalVisualAction(prepared.jobId);
-            throw error;
-          }
+          const queued = await enqueueCompanionImageAction({ contentItemId: item.id, slideIndex,
+            variantId: variant?.id, idempotencyKey: crypto.randomUUID() });
+          if (!queued.ok) throw new Error(queued.error);
+          setPendingCompanionJobId(queued.job.id);
+          toast.success(queued.job.status === "waiting_for_companion"
+            ? "Image queued. It will generate when your companion reconnects."
+            : "Image queued for your companion.");
+          return;
         } else {
           r = await generateVisualAction(item.id, mode, slideIndex, variant?.id);
         }
@@ -486,6 +522,7 @@ export function PostWorkspace({
             ) : null}
           </div>
           {visualError ? <p role="alert" className="text-sm text-destructive">{visualError}</p> : null}
+          {pendingCompanionJobId ? <p role="status" className="text-sm text-muted-foreground">Your companion image job is queued or running. The visual will appear here after it is saved.</p> : null}
 
           {/* Carousel (multi-image) / Reel (video) media manager */}
           <MediaUploader itemId={item.id} variantId={variant?.id} format={mediaFormat} media={uploadedMedia}

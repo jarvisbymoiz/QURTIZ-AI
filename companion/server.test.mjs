@@ -217,10 +217,43 @@ test("test-image verifies a real local response without returning image data", a
 });
 
 test("disconnect rotates pairing and refuses the old key", async () => {
+  const originalFetch = globalThis.fetch;
+  const deviceId = "00000000-0000-4000-8000-000000000009";
+  let cloudRevoked = false;
+  globalThis.fetch = (input, options) => {
+    const url = String(input);
+    if (url === `${origin}/api/companion/pair`) {
+      const body = JSON.parse(options.body);
+      assert.equal(body.challenge, "c".repeat(43));
+      assert.equal(body.userId, "00000000-0000-4000-8000-000000000001");
+      assert.equal(body.workspaceId, "00000000-0000-4000-8000-000000000002");
+      return Promise.resolve(Response.json({ deviceId, credential: `${deviceId}.${"z".repeat(43)}` }));
+    }
+    if (url === `${origin}/api/companion/revoke`) {
+      assert.equal(options.headers.Authorization, `Bearer ${deviceId}.${"z".repeat(43)}`);
+      cloudRevoked = true;
+      return Promise.resolve(Response.json({ revoked: true }));
+    }
+    return originalFetch(input, options);
+  };
+  try {
+    const paired = await fetch(`${base}/cloud-pair`, { method: "POST", headers: {
+      Origin: origin, "x-qurtiz-pairing": "pairing-only-local", "Content-Type": "application/json",
+    }, body: JSON.stringify({ challenge: "c".repeat(43) }) });
+    assert.equal(paired.status, 200);
+    const safe = await paired.text();
+    assert.match(safe, /paired/);
+    assert.doesNotMatch(safe, /\.zzzz/);
+  } finally { globalThis.fetch = originalFetch; }
+  globalThis.fetch = (input, options) => String(input) === `${origin}/api/companion/revoke`
+    ? Promise.resolve((cloudRevoked = true, Response.json({ revoked: true }))) : originalFetch(input, options);
+  try {
   const response = await fetch(`${base}/disconnect`, { method: "POST", headers: {
     Origin: origin, "x-qurtiz-pairing": "pairing-only-local",
   } });
   assert.equal(response.status, 200);
+  assert.equal(cloudRevoked, true);
   const old = await fetch(`${base}/status`, { headers: { Origin: origin, "x-qurtiz-pairing": "pairing-only-local" } });
   assert.equal(old.status, 401);
+  } finally { globalThis.fetch = originalFetch; }
 });

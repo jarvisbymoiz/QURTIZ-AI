@@ -2,13 +2,14 @@ import http from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { hostname } from "node:os";
 import { selectImageRoute } from "./image-capability.mjs";
 
 const DEFAULT_ORIGINS = ["https://qurtiz-ai.vercel.app", "https://localhost:3000", "http://localhost:3000"];
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 24 * 1024 * 1024;
 const IMAGE_TIMEOUT_MS = 240_000;
-const ALLOWED_PATHS = new Set(["/health", "/pair", "/status", "/connect", "/disconnect", "/test-image",
+const ALLOWED_PATHS = new Set(["/health", "/pair", "/cloud-pair", "/cloud-rotate", "/status", "/connect", "/disconnect", "/test-image",
   "/v1/models", "/v1/images/generations", "/v1/images/edits"]);
 
 function asOrigin(value) {
@@ -86,6 +87,7 @@ export function createCompanionServer(config) {
   let recentGenerations = [];
   let pairingSecret = config.pairingSecret;
   let owner = null;
+  let cloudPairing = null;
   let lastImageRateLimited = false;
   if (config.statePath && existsSync(config.statePath)) {
     const saved = JSON.parse(readFileSync(config.statePath, "utf8"));
@@ -96,12 +98,21 @@ export function createCompanionServer(config) {
     pairingSecret = saved.pairingSecret;
     owner = saved.owner;
     lastImageRateLimited = saved.lastImageRateLimited === true;
+    if (saved.cloudPairing != null) {
+      const cloud = saved.cloudPairing;
+      if (typeof cloud.origin !== "string" || !origins.has(cloud.origin) ||
+          typeof cloud.deviceId !== "string" || !/^[0-9a-f-]{36}$/i.test(cloud.deviceId) ||
+          typeof cloud.credential !== "string" || cloud.credential.length < 80) {
+        throw new Error("Local cloud pairing state is invalid. Reinstall or restore the companion state.");
+      }
+      cloudPairing = cloud;
+    }
   }
   function savePairing() {
     if (!config.statePath) return;
     mkdirSync(dirname(config.statePath), { recursive: true });
     const temporary = `${config.statePath}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ pairingSecret, owner, lastImageRateLimited }), { mode: 0o600 });
+    writeFileSync(temporary, JSON.stringify({ pairingSecret, owner, lastImageRateLimited, cloudPairing }), { mode: 0o600 });
     renameSync(temporary, config.statePath);
   }
   let connecting = false;
@@ -186,6 +197,61 @@ export function createCompanionServer(config) {
     if (!matchesSecret(req.headers["x-qurtiz-pairing"], pairingSecret) || !owner) {
       return sendJson(res, 401, { error: { message: "Pairing key is invalid." } });
     }
+    if (path === "/cloud-pair" && req.method === "POST") {
+      if (cloudPairing) {
+        try {
+          const check = await fetch(`${cloudPairing.origin}/api/companion/self`, {
+            method: "GET", headers: { Authorization: `Bearer ${cloudPairing.credential}` },
+            redirect: "error", signal: AbortSignal.timeout(8_000),
+          });
+          if (check.status !== 401 && check.status !== 410) return sendJson(res, 409, { error: { message: "This companion is already paired to Qurtiz cloud." } });
+          cloudPairing = null;
+          savePairing();
+        } catch {
+          return sendJson(res, 503, { error: { message: "Could not check existing cloud pairing. Try again when online." } });
+        }
+      }
+      try {
+        const body = JSON.parse((await readBounded(req, 512)).toString("utf8"));
+        if (typeof body.challenge !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.challenge)) {
+          return sendJson(res, 400, { error: { message: "Invalid pairing challenge." } });
+        }
+        // Origin was checked above against the companion's exact allowlist.
+        const cloudResponse = await fetch(`${origin}/api/companion/pair`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challenge: body.challenge, displayName: hostname().slice(0, 64),
+            userId: owner.split(":")[0], workspaceId: owner.split(":")[1] }),
+          redirect: "error", signal: AbortSignal.timeout(15_000),
+        });
+        const result = JSON.parse((await readBounded(cloudResponse.body, 1024)).toString("utf8"));
+        if (!cloudResponse.ok || typeof result.deviceId !== "string" ||
+            typeof result.credential !== "string" || !result.credential.startsWith(`${result.deviceId}.`)) {
+          return sendJson(res, 502, { error: { message: "Cloud pairing could not be completed. Retry from Qurtiz Settings." } });
+        }
+        cloudPairing = { origin, deviceId: result.deviceId, credential: result.credential };
+        savePairing();
+        return sendJson(res, 200, { paired: true, deviceId: result.deviceId });
+      } catch {
+        return sendJson(res, 502, { error: { message: "Cloud pairing could not be completed. Retry from Qurtiz Settings." } });
+      }
+    }
+    if (path === "/cloud-rotate" && req.method === "POST") {
+      if (!cloudPairing) return sendJson(res, 409, { error: { message: "Pair this PC to Qurtiz cloud first." } });
+      try {
+        const response = await fetch(`${cloudPairing.origin}/api/companion/rotate`, {
+          method: "POST", headers: { Authorization: `Bearer ${cloudPairing.credential}` },
+          redirect: "error", signal: AbortSignal.timeout(10_000),
+        });
+        const rotated = JSON.parse((await readBounded(response.body, 1024)).toString("utf8"));
+        if (!response.ok || rotated.deviceId !== cloudPairing.deviceId ||
+            typeof rotated.credential !== "string") throw new Error("rotation_failed");
+        cloudPairing = { ...cloudPairing, credential: rotated.credential };
+        savePairing();
+        return sendJson(res, 200, { rotated: true });
+      } catch {
+        return sendJson(res, 502, { error: { message: "Credential rotation failed. Re-pair this PC if it no longer connects." } });
+      }
+    }
     if (path === "/health" && req.method === "GET") return sendJson(res, 200, { ok: true, service: "qurtiz-image-companion" });
     if (path === "/status" && req.method === "GET") {
       try { return sendJson(res, 200, await safeStatus(await gatewayAdmin("/_gateway/admin/config"))); }
@@ -213,6 +279,17 @@ export function createCompanionServer(config) {
       } finally { connecting = false; }
     }
     if (path === "/disconnect" && req.method === "POST") {
+      if (cloudPairing) {
+        try {
+          const revoked = await fetch(`${cloudPairing.origin}/api/companion/revoke`, {
+            method: "POST", headers: { Authorization: `Bearer ${cloudPairing.credential}` },
+            redirect: "error", signal: AbortSignal.timeout(10_000),
+          });
+          if (!revoked.ok && revoked.status !== 401 && revoked.status !== 410) throw new Error("cloud_revoke_failed");
+        } catch {
+          return sendJson(res, 503, { error: { message: "Could not revoke cloud pairing. Check the connection and retry Disconnect." } });
+        }
+      }
       // Remove the active local OAuth profile before allowing another Qurtiz owner.
       try {
         const configView = await gatewayAdmin("/_gateway/admin/config");
@@ -221,6 +298,7 @@ export function createCompanionServer(config) {
       } catch { return sendJson(res, 503, { error: { message: "Could not remove the local ChatGPT account. Start the gateway and retry Disconnect." } }); }
       pairingSecret = randomBytes(24).toString("base64url");
       owner = null;
+      cloudPairing = null;
       lastImageTestOk = false;
       lastImageRateLimited = false; catalogCache = null; savePairing();
       return sendJson(res, 200, { disconnected: true });

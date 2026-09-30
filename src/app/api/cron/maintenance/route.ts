@@ -5,6 +5,7 @@ import { mediaCleanupTick } from "@/lib/media/cleanup-worker";
 import { and, eq, lt } from "drizzle-orm";
 import { getDb } from "@/db";
 import { jobs } from "@/db/schema";
+import { cleanupCompanionStaging, expireCompanionImageJobs } from "@/lib/companion/image-jobs";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,7 +16,8 @@ export async function GET(req: NextRequest) {
   if (!secret) return NextResponse.json({ error: "Cron is not configured" }, { status: 503 });
   if (req.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const results = await Promise.allSettled([
-    reconcileBufferDeliveries().then(() => refreshPendingDeliveryNotifications()), autopilotLoop(), mediaCleanupTick(),
+    reconcileBufferDeliveries().then(() => refreshPendingDeliveryNotifications()),
+    expireCompanionImageJobs().then(() => Promise.all([autopilotLoop(), cleanupCompanionStaging()])), mediaCleanupTick(),
     getDb().update(jobs).set({ status: "failed", error: "Local image request expired before completion.", updatedAt: new Date() })
       .where(and(eq(jobs.type, "local_image"), eq(jobs.status, "queued"),
         lt(jobs.createdAt, new Date(Date.now() - 10 * 60_000)))),

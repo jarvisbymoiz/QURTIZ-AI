@@ -155,6 +155,8 @@ export const imageModePreferences = pgTable("image_mode_preferences", {
   userId: uuid("user_id").notNull(),
   mode: text("mode").notNull().default("api"),
   modelId: text("model_id"),
+  companionOfflinePolicy: text("companion_offline_policy").notNull().default("wait"),
+  companionTimeoutMinutes: integer("companion_timeout_minutes").notNull().default(120),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   primaryKey({ columns: [t.workspaceId, t.userId] }),
@@ -227,6 +229,75 @@ export const agentIdentities = pgTable("agent_identities", {
   instructions: text("instructions").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Outbound cloud relay. Only token hashes and safe capability state are persisted. */
+export const companionPairingChallenges = pgTable("companion_pairing_challenges", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  challengeHash: text("challenge_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("companion_pairing_challenge_hash_idx").on(t.challengeHash),
+  index("companion_pairing_expiry_idx").on(t.expiresAt),
+  foreignKey({ name: "companion_pairing_member_fk", columns: [t.workspaceId, t.userId],
+    foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId] }).onDelete("cascade"),
+]);
+
+export const companionDevices = pgTable("companion_devices", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  displayName: text("display_name").notNull(),
+  credentialHash: text("credential_hash").notNull(),
+  credentialVersion: integer("credential_version").notNull().default(1),
+  chatgptConnected: boolean("chatgpt_connected").notNull().default(false),
+  imageStatus: text("image_status").notNull().default("unavailable"),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("companion_devices_credential_hash_idx").on(t.credentialHash),
+  index("companion_devices_owner_idx").on(t.workspaceId, t.userId),
+  foreignKey({ name: "companion_devices_member_fk", columns: [t.workspaceId, t.userId],
+    foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId] }).onDelete("cascade"),
+]);
+
+export const companionImageJobs = pgTable("companion_image_jobs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  deviceId: uuid("device_id").notNull().references(() => companionDevices.id, { onDelete: "cascade" }),
+  contentItemId: uuid("content_item_id").references(() => contentItems.id, { onDelete: "set null" }),
+  variantId: uuid("variant_id").references(() => contentVariants.id, { onDelete: "set null" }),
+  slideIndex: integer("slide_index"),
+  idempotencyKey: text("idempotency_key").notNull(),
+  status: text("status").notNull().default("queued"),
+  prompt: text("prompt").notNull(),
+  contentType: text("content_type").notNull(),
+  size: text("size").notNull(),
+  targetWidth: integer("target_width"),
+  targetHeight: integer("target_height"),
+  referenceAssets: jsonb("reference_assets").notNull().default([]),
+  options: jsonb("options").notNull().default({}),
+  claimTokenHash: text("claim_token_hash"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  uploadPath: text("upload_path"),
+  visualAssetId: uuid("visual_asset_id").references(() => visualAssets.id, { onDelete: "set null" }),
+  error: text("error"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("companion_image_jobs_idempotency_idx").on(t.workspaceId, t.userId, t.idempotencyKey),
+  index("companion_image_jobs_claim_idx").on(t.deviceId, t.status, t.createdAt),
+  index("companion_image_jobs_owner_idx").on(t.workspaceId, t.userId, t.createdAt),
+  foreignKey({ name: "companion_image_jobs_member_fk", columns: [t.workspaceId, t.userId],
+    foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId] }).onDelete("cascade"),
+]);
 
 export const workspaceAgentProfiles = pgTable("workspace_agent_profiles", {
   workspaceId: uuid("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),

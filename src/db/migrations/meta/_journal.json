@@ -225,6 +225,20 @@
       "when": 1790425799848,
       "tag": "0031_safe_valkyrie",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790738795474,
+      "tag": "0032_cloud_companion_relay",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790741021108,
+      "tag": "0033_companion_device_lifecycle",
+      "breakpoints": true
     }
   ]
 }

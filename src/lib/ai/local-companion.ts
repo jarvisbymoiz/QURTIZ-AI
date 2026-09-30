@@ -61,6 +61,14 @@ export async function pairLocalCompanion(userId: string, workspaceId: string): P
   return result.pairingKey;
 }
 
+/** One-time setup only. Image requests never use browser-to-localhost transport. */
+export async function pairCloudCompanion(pairingKey: string, challenge: string): Promise<string> {
+  const result = await requestLocal("/cloud-pair", pairingKey,
+    { method: "POST", body: JSON.stringify({ challenge }) }, 20_000) as { deviceId?: string };
+  if (typeof result.deviceId !== "string") throw new Error("Companion cloud pairing did not complete.");
+  return result.deviceId;
+}
+
 export async function getLocalAccountStatus(pairingKey: string): Promise<LocalAccountStatus> {
   const result = await requestLocal("/status", pairingKey, { method: "GET" }, 12_000);
   return { connected: result.connected === true, email: result.email ?? null, planType: result.planType ?? null,

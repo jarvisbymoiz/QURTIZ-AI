@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { contentItems, contentVariants, jobs, researchItems, settings, visualAssets } from "@/db/schema";
+import { contentItems, contentVariants, imageModePreferences, jobs, researchItems, settings, visualAssets } from "@/db/schema";
 import { autopilotSettingsSchema } from "../schema";
-const mocks = vi.hoisted(() => ({ db:vi.fn(), context:vi.fn(), research:vi.fn(), plan:vi.fn(), generate:vi.fn(), approve:vi.fn(), schedule:vi.fn(), media:vi.fn() }));
+const mocks = vi.hoisted(() => ({ db:vi.fn(), context:vi.fn(), research:vi.fn(), plan:vi.fn(), generate:vi.fn(), approve:vi.fn(), schedule:vi.fn(), media:vi.fn(), relay:vi.fn(), apiImage:vi.fn() }));
 vi.mock("@/db",()=>({getDb:mocks.db}));
 vi.mock("ai",()=>({generateText:mocks.plan}));
 vi.mock("@/lib/jobs/workflows",()=>({buildAutopilotRunContext:mocks.context}));
@@ -9,7 +9,8 @@ vi.mock("@/lib/jobs/boss",()=>({getBoss:vi.fn(),QUEUES:{autopilotRun:"autopilot-
 vi.mock("@/lib/ai/config",()=>({hasWorkspaceAIConfig:async()=>true,getWorkspaceTextModel:async()=>({model:{}})}));
 vi.mock("@/lib/ai/content",()=>({AI_GENERATION_TIMEOUT_MS:120000,generateAndPersistContent:mocks.generate}));
 vi.mock("@/lib/ai/research",()=>({researchTopics:mocks.research}));
-vi.mock("@/lib/visuals/generate",()=>({generateVisual:vi.fn()}));
+vi.mock("@/lib/visuals/generate",()=>({generateVisual:mocks.apiImage}));
+vi.mock("@/lib/companion/image-jobs",()=>({enqueueCompanionImage:mocks.relay}));
 vi.mock("@/lib/supabase/service",()=>({createServiceClient:()=>({})}));
 vi.mock("@/lib/content/lifecycle",()=>({approveItem:mocks.approve}));
 vi.mock("@/lib/publishing/service",()=>({schedulePost:mocks.schedule,selectItemMedia:mocks.media}));
@@ -21,9 +22,13 @@ function fixture(requireApproval=true) {
   const items = new Map<string,Row>();
   const savedSettings = {value:config};
   const updates: Row[]=[];
-  const selectRows = (table:unknown) => table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?[{kind:"upload",mimeType:"image/png"}]:table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:[];
+  let imagePreference: Row | null = null;
+  const selectRows = (table:unknown) => table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?(config.generateImages?[]:[{kind:"upload",mimeType:"image/png"}]):table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:table===imageModePreferences?(imagePreference?[imagePreference]:[]):[];
   const db = {
-    select:()=>({from:(table:unknown)=>({where:async()=>selectRows(table)})}),
+    select:()=>({from:(table:unknown)=>({where:()=>{
+      const result=Promise.resolve(selectRows(table)) as Promise<Row[]> & {limit:()=>Promise<Row[]>};
+      result.limit=async()=>selectRows(table);return result;
+    }})}),
     update:(table:unknown)=>({set:(values:Row)=>({where:()=>{
       const canClaim = job.status==="queued";
       if(table===jobs) {Object.assign(job,structuredClone(values));updates.push(values);}
@@ -39,7 +44,7 @@ function fixture(requireApproval=true) {
     return {itemId:args.contentItemId,qa:{passed:true}};
   };
   mocks.generate.mockImplementation(persist);
-  return {job,items,config,savedSettings,updates,persist};
+  return {job,items,config,savedSettings,updates,persist,setImagePreference:(value:Row)=>{imagePreference=value;}};
 }
 beforeEach(()=>{
   vi.clearAllMocks();
@@ -48,8 +53,31 @@ beforeEach(()=>{
   mocks.plan.mockResolvedValue({text:'["Educational brand topic","Practical brand topic","Brand customer topic"]'});
   mocks.schedule.mockResolvedValue({ok:true});
   mocks.media.mockResolvedValue({kind:"image",paths:["image.png"]});
+  mocks.relay.mockReset(); mocks.apiImage.mockReset();
 });
 describe("durable Auto Run execution",()=>{
+  it("waits for a companion image without silently calling the API provider", async()=>{
+    const f=fixture(false);f.config.generateImages=true;
+    f.setImagePreference({mode:"local_companion",offlinePolicy:"wait"});
+    mocks.relay.mockResolvedValue({id:"relay-1",status:"waiting_for_companion"});
+    await executeAutoRun("job-1");
+    expect(mocks.relay).toHaveBeenCalledTimes(1);
+    expect(mocks.apiImage).not.toHaveBeenCalled();
+    expect(f.job.status).toBe("queued");
+    expect(f.job.result).toMatchObject({stage:"Waiting for ChatGPT companion image"});
+  });
+  it("resumes the saved Auto Run after the companion completes the image", async()=>{
+    const f=fixture(false);f.config.generateImages=true;
+    f.setImagePreference({mode:"local_companion",offlinePolicy:"wait"});
+    mocks.relay.mockResolvedValueOnce({id:"relay-1",status:"waiting_for_companion"})
+      .mockResolvedValue({id:"relay-1",status:"completed"});
+    await executeAutoRun("job-1");
+    expect(f.job.status).toBe("queued");
+    await executeAutoRun("job-1");
+    expect(f.job.status).toBe("completed");
+    expect(mocks.apiImage).not.toHaveBeenCalled();
+    expect(mocks.schedule).toHaveBeenCalledTimes(3);
+  });
   it("creates exactly 3 requested posts even with only one research result, respecting platform/format and approval",async()=>{
     const f=fixture(); await executeAutoRun("job-1");
     expect(f.items.size).toBe(3); expect(mocks.generate).toHaveBeenCalledTimes(3);

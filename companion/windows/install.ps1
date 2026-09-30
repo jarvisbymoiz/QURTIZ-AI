@@ -30,4 +30,4 @@ $shortcut.Description = 'Start Qurtiz Companion when you sign in to Windows'
 $shortcut.Save()
 Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + $launcher + '"') -WindowStyle Hidden
 Write-Host 'Qurtiz Companion installed and started in the background. It will start when you sign in to Windows.'
-Write-Host 'Return to Qurtiz Settings and click Try again, then Connect ChatGPT.'
+Write-Host 'Return to Qurtiz Settings, choose ChatGPT Account Mode, then Pair this computer and Connect ChatGPT.'

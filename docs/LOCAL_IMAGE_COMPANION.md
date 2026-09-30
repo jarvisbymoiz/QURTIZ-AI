@@ -1,19 +1,19 @@
 # Local image companion (experimental)
 
-This companion is an optional **loopback-only bridge** for a separate local OpenAI-compatible image gateway. The gateway performs ChatGPT OAuth/PKCE and stores its tokens locally; the Qurtiz companion starts that local login and returns only safe account status. Qurtiz's cloud server never connects to the gateway. API-key image generation remains the production default.
+This companion keeps ChatGPT OAuth/PKCE and its tokens on a Windows PC. The browser uses loopback only once to pair that PC and start local login. Image requests use a durable Qurtiz cloud job; the companion makes outbound HTTPS requests, generates locally, uploads binary to a signed Supabase Storage URL, and reports completion. Qurtiz cloud never receives ChatGPT OAuth credentials. API-key image generation remains the production default.
 
 ## Windows setup
 
 1. Download the official **Qurtiz-Companion-Windows.zip** release artifact when published. Extract it to a folder on your computer.
 2. Double-click **Install Qurtiz Companion.cmd**. It installs under your Windows user profile, starts in the background, and starts again when you sign in to Windows. No terminal commands, Node installation, port setup, keys or environment files are needed. Keep the PC running while generating images. Stop the companion before installing an update.
-3. In Qurtiz Settings, choose **ChatGPT Account Mode** and **Connect ChatGPT**. Your default browser opens the OpenAI sign-in page. The gateway handles the local callback and stores credentials in the companion's private local data folder. The companion discovers an account-scoped Codex model catalog without generating an image, then selects a compatible image route from available capabilities. The optional web-image route is experimental and subject to its own account limit.
-4. For the published Qurtiz site, your browser may ask permission to access the local network. Denying it makes this mode unavailable; choose API Mode instead.
+3. On the PC, open Qurtiz Settings, choose **ChatGPT Account Mode**, then **Pair this computer** and **Connect ChatGPT**. Your default browser opens the OpenAI sign-in page. The local gateway handles the callback and stores ChatGPT credentials in the companion's private local data folder. The companion discovers account capabilities without spending image quota.
+4. Once paired, the PC companion runs with the browser closed. Qurtiz on Android or another PC can enqueue image jobs for that device as long as it is powered, online, and logged in to ChatGPT. The paired PC must be online to finish an image job. Pairing itself still requires the browser and companion on the same PC and may need browser local-network permission.
 
 **Distribution status:** The Windows ZIP is built locally with `npm run package:companion:win` and lands at `dist/Qurtiz-Companion-Windows.zip`. It has not been uploaded to a public release or code-signed. The Settings install link currently opens this guide; a public download link must be configured only after a vetted release artifact exists. The ZIP bundles Node and the MIT-licensed AI-Zero-Token 2.0.15 npm package. Qurtiz does not copy its OAuth configuration into the SaaS server. The default-browser launcher handles upstream's Windows browser-command lookup failure without exposing the one-use OAuth URL to Qurtiz cloud.
 
-Settings and Content Studio contain the browser-mediated flow. Migration 0031 was applied to the configured database and schema validation passed. A published HTTPS browser test and successful image output remain necessary before calling this production-ready.
+Migrations 0032–0033 add devices, pairing challenges, image jobs, Auto Run fallback settings and safe device/member deletion behavior. They were applied to the configured database and schema validation passed. A public companion release, deployed relay build, and real Production/mobile/Auto Run image tests remain necessary before calling this production-ready.
 
-For another Qurtiz environment, apply `src/db/migrations/0031_safe_valkyrie.sql` through the repository's normal `npm run db:migrate` process before deploying the code. Verify that `image_mode_preferences` exists.
+For another Qurtiz environment, apply migrations through `0033_companion_device_lifecycle.sql` using the repository's normal `npm run db:migrate` process before deploying the code. Verify the device and image job tables with `npm run db:validate`.
 
 ## Configuration
 
@@ -29,7 +29,8 @@ The companion exposes narrow local pairing, sanitized account status, connect, d
 
 ## Limits and recovery
 
-- This works only when the browser and companion are on the same computer. A phone cannot use the companion running on a PC through this loopback-only version. A Vercel function cannot call your localhost. The Windows installer starts the companion in the background on sign-in, but background/scheduled server-side image generation is not available through this browser-mediated bridge. Mobile users can choose API Mode. Mobile ChatGPT Account Mode requires a separately authenticated and workspace-isolated cloud job relay to a running PC companion.
+- Pairing and ChatGPT OAuth start on the PC where the companion runs. Image jobs no longer require that browser or computer: mobile and Auto Run can enqueue work through the cloud. Real deployed mobile and browser-closed verification is still pending. A Vercel function never calls the user's localhost.
+- Production is an allowed companion origin by default. A separate Preview deployment must either share the Production database and already paired device, or use a companion build configured with that exact Preview origin. Arbitrary `*.vercel.app` origins are intentionally not trusted.
 - Browsers differ in CORS and Local Network Access behavior. Test both the local and published Qurtiz origins before relying on it.
 - A `401` from the companion means the local pairing expired; retry Connect ChatGPT. A `424` means the local gateway account needs reconnection. A `502` usually means the local gateway is unavailable or returned malformed output. A `429` can mean companion request throttling or upstream quota; inspect the local gateway for detail. Failed requests do not imply that Qurtiz saved an image.
 - If a brand avatar/reference is configured, Qurtiz sends one bounded reference through JSON `/v1/images/edits` as `images[].image_url`. The gateway must support edits; otherwise the request fails visibly. Qurtiz does not silently discard the reference.
