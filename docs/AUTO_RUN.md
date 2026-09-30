@@ -14,6 +14,8 @@ The independent `/api/cron/publish` invocation scans due `publishing_jobs`, atom
 
 **Code verification:** focused serverless dispatch tests prove Vercel never calls pg-boss; a three-post run resumes across separate invocations, QA retries and images consume bounded slices, deferred jobs are skipped, and companion waiting does not charge an API image provider. Full app regression: **872 passed, one skipped**; TypeScript typecheck, schema validation (36 tables, zero problems), and the production build passed. These tests do not substitute for the live release gates above.
 
+**Deployment check:** commit `aec3e8d` built successfully on Vercel Preview and Production. The Production alias still returns HTTP **503** from both cron routes before authentication because `CRON_SECRET` remains unset. This is the expected fail-closed response; no live Auto Run or scheduled publish was triggered. GitHub `QURTIZ_CRON_SECRET` also remains unconfigured at the last checked scheduled run. Production and Preview full-path results are **not verified**.
+
 ## Audit and root causes
 
 The previous minute scanner performed research, creation and scheduling inline. It claimed an exact-minute occurrence before doing work, so a missed scan, crash or provider failure could permanently lose that run. Saving settings replaced the JSON claim. Research results were truncated to the requested quantity but did not guarantee that quantity. Platforms were fixed to Facebook and Instagram, and every post received the same next-day hour with an 18:30 fallback.
