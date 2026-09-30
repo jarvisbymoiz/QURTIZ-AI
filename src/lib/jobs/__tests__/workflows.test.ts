@@ -34,11 +34,13 @@ vi.mock("@/lib/ai/config", () => ({ hasWorkspaceAIConfig: vi.fn() }));
 vi.mock("@/lib/ai/research", () => ({ researchTopics: vi.fn() }));
 vi.mock("@/lib/ai/content", () => ({ generateAndPersistContent: vi.fn() }));
 vi.mock("@/lib/visuals/generate", () => ({ generateVisual: vi.fn() }));
+vi.mock("@/lib/autopilot/run", () => ({ scanAutoRuns: vi.fn(), executeAutoRun: vi.fn() }));
 
 const { getDb } = await import("@/db");
 const mockedGetDb = vi.mocked(getDb);
 const { claimScheduledPublishJob } = await import("@/lib/jobs/publish-claim");
-const { attemptPublish, recoverStuckGenerationJobs, refreshPendingDeliveryNotifications } = await import("@/lib/jobs/workflows");
+const { attemptPublish, recoverStuckGenerationJobs, refreshPendingDeliveryNotifications, autopilotLoop } = await import("@/lib/jobs/workflows");
+const { scanAutoRuns, executeAutoRun } = await import("@/lib/autopilot/run");
 const { publishNow } = await import("@/lib/publishing/service");
 const { resolvePublishProviderForPlatform } = await import("@/lib/publish/provider");
 const mockedPublishNow = vi.mocked(publishNow);
@@ -116,6 +118,18 @@ function okResult(provider: "meta" | "buffer") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("Vercel Auto Run dispatch", () => {
+  it("processes a durable queued slice without relying on a resident pg-boss worker", async () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.mocked(scanAutoRuns).mockResolvedValue(["job-a", "job-b"]);
+    try {
+      await autopilotLoop();
+      expect(scanAutoRuns).toHaveBeenCalledWith({ dispatch: "serverless" });
+      expect(executeAutoRun).toHaveBeenCalledExactlyOnceWith("job-a", { serverlessSlice: true });
+    } finally { vi.unstubAllEnvs(); }
+  });
 });
 
 describe("attemptPublish — provider re-resolution at fire time", () => {

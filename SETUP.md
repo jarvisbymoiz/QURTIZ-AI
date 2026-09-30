@@ -211,7 +211,7 @@ Back up production before future migrations and verify the target project.
 
 For **Vercel Hobby**, `vercel.json` intentionally registers no Vercel cron jobs:
 Hobby rejects the previous one-minute and five-minute schedules during
-deployment. The authenticated routes remain unchanged. The repository's
+deployment. The authenticated routes use durable database jobs. The repository's
 `.github/workflows/qurtiz-scheduler.yml` invokes publishing and maintenance
 every five minutes. To activate it:
 
@@ -222,6 +222,10 @@ every five minutes. To activate it:
    a missing secret, non-2xx response, or timeout is a failure.
 4. Check later scheduled workflow runs and the Vercel function logs. Confirm
    due publishing jobs progress to a real terminal state.
+
+Maintenance now resumes bounded Auto Run slices directly in Vercel; it does
+not depend on a resident pg-boss worker. See [Auto Run production status](docs/AUTO_RUN.md)
+for the current live-test gates and recovery behavior.
 
 GitHub Actions scheduled runs can be delayed; this setup does **not** promise
 exact-minute publishing. Hobby functions have a 300-second execution budget

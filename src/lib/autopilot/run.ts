@@ -23,7 +23,9 @@ import { dueOccurrence, postingTimes } from "./timing";
 import { buildAutoRunCompletedNotification, buildAutoRunTerminalNotification } from "@/lib/notifications/payload";
 
 type RunInput = { config: AutopilotSettings; occurrence: string; timezone: string };
-type Checkpoint = { attempts?: number; topics?: string[]; createdIds?: string[]; errors?: string[]; stage?: string; context?: Awaited<ReturnType<typeof buildAutopilotRunContext>> };
+type Checkpoint = { attempts?: number; topics?: string[]; createdIds?: string[]; errors?: string[];
+  nextPostIndex?: number; qaAttemptByPost?: Record<string, number>; nextAttemptAt?: string; stage?: string;
+  context?: Awaited<ReturnType<typeof buildAutopilotRunContext>> };
 class CompanionPendingError extends Error {}
 export function autoRunItemId(jobId: string, index: number, attempt: number): string {
   const hex = createHash("sha256").update(`${jobId}:${index}:${attempt}`).digest("hex");
@@ -32,7 +34,7 @@ export function autoRunItemId(jobId: string, index: number, attempt: number): st
 
 /** Transactionally claim occurrences and persist jobs before sending to pg-boss.
  * Catch up missed occurrences within 24h, one per workspace per scan. */
-export async function scanAutoRuns(): Promise<void> {
+export async function scanAutoRuns(options: { dispatch?: "boss" | "serverless" } = {}): Promise<string[]> {
   const db = getDb();
   const rows = await db.select({ workspaceId: settings.workspaceId }).from(settings).where(eq(settings.key, "autopilot"));
   for (const row of rows) {
@@ -56,22 +58,48 @@ export async function scanAutoRuns(): Promise<void> {
   }
   // Per-phase heartbeats + bounded AI requests allow safe restart recovery.
   await db.update(jobs).set({ status: "queued", updatedAt: new Date() }).where(and(eq(jobs.type, "autopilot"), eq(jobs.status, "running"), sql`${jobs.updatedAt} < now() - interval '30 minutes'`));
-  const queued = await db.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.type, "autopilot"), eq(jobs.status, "queued"))).orderBy(asc(jobs.createdAt)).limit(50);
-  if (!queued.length) return;
+  const queued = await db.select({ id: jobs.id, result: jobs.result }).from(jobs)
+    .where(and(eq(jobs.type, "autopilot"), eq(jobs.status, "queued")))
+    .orderBy(asc(jobs.updatedAt)).limit(50);
+  const eligible = queued.filter(job => {
+    const next = (job.result as Checkpoint | null)?.nextAttemptAt;
+    return !next || new Date(next).getTime() <= Date.now();
+  });
+  if (!eligible.length) return [];
+  if (options.dispatch === "serverless") return eligible.map(job => job.id);
   const boss = await getBoss();
-  for (const job of queued) await boss.send(QUEUES.autopilotRun, { jobId: job.id }, { singletonKey: job.id, singletonSeconds: 60, retryLimit: 3, retryDelay: 60, expireInSeconds: 1800 });
+  for (const job of eligible) await boss.send(QUEUES.autopilotRun, { jobId: job.id }, { singletonKey: job.id, singletonSeconds: 60, retryLimit: 3, retryDelay: 60, expireInSeconds: 1800 });
+  return eligible.map(job => job.id);
 }
 
-export async function executeAutoRun(jobId: string): Promise<void> {
+export async function executeAutoRun(jobId: string, options: { serverlessSlice?: boolean } = {}): Promise<void> {
   const db = getDb();
   const [job] = await db.update(jobs).set({ status: "running", updatedAt: new Date() }).where(and(eq(jobs.id, jobId), eq(jobs.type, "autopilot"), eq(jobs.status, "queued"))).returning();
   if (!job) return;
   const input = job.input as RunInput;
   const state = (job.result ?? {}) as Checkpoint;
-  state.createdIds ??= []; state.errors ??= []; state.attempts = (state.attempts ?? 0) + 1;
+  state.nextAttemptAt = undefined;
+  state.createdIds ??= []; state.errors ??= []; state.qaAttemptByPost ??= {};
+  state.attempts = (state.attempts ?? 0) + 1;
   const checkpoint = async (stage: string) => {
     state.stage = stage;
     await db.update(jobs).set({ result: state as Record<string, unknown>, progress: state.createdIds!.length, updatedAt: new Date() }).where(eq(jobs.id, job.id));
+  };
+  const yieldForNextInvocation = async (stage: string) => {
+    state.attempts = Math.max(0, (state.attempts ?? 1) - 1);
+    await checkpoint(stage);
+    await db.update(jobs).set({ status: "queued", result: state as Record<string, unknown>,
+      updatedAt: new Date() }).where(and(eq(jobs.id, job.id), eq(jobs.status, "running")));
+  };
+  const finishPost = async (index: number) => {
+    state.nextPostIndex = index + 1;
+    const targetCount = state.topics?.length ?? job.total;
+    await checkpoint(`Post ${index + 1} / ${targetCount} ready`);
+    if (options.serverlessSlice && state.nextPostIndex < targetCount) {
+      await yieldForNextInvocation(`Queued post ${index + 2} / ${targetCount}`);
+      return true;
+    }
+    return false;
   };
   const currentConfig = async () => {
     const [row] = await db.select().from(settings).where(and(eq(settings.workspaceId, job.workspaceId), eq(settings.key, "autopilot")));
@@ -105,6 +133,10 @@ export async function executeAutoRun(jobId: string): Promise<void> {
       if (new Set(topics.map(t => t.toLowerCase().trim())).size !== cfg.maxPostsPerRun) throw new Error("AI returned duplicate topics; retrying the plan.");
       state.topics = topics;
       await checkpoint("Strategy saved");
+      if (options.serverlessSlice) {
+        await yieldForNextInvocation("Strategy saved; content generation queued");
+        return;
+      }
       } catch (error) {
         await db.update(agentRuns).set({ status: "failed", error: error instanceof Error ? error.message : "Strategy failed", finishedAt: new Date() }).where(eq(agentRuns.id, planRunId));
         throw error;
@@ -112,15 +144,21 @@ export async function executeAutoRun(jobId: string): Promise<void> {
     }
     let storage: ReturnType<typeof createServiceClient> | null = null;
     try { storage = createServiceClient(); } catch { state.errors.push("Image storage unavailable; affected content remains for review."); }
-    for (let index = 0; index < cfg.maxPostsPerRun; index++) {
+    for (let index = state.nextPostIndex ?? 0; index < cfg.maxPostsPerRun; index++) {
       await currentConfig();
       let itemId = state.createdIds[index];
       if (!itemId) {
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = options.serverlessSlice ? (state.qaAttemptByPost[index] ?? 0) : 0; attempt < 3; attempt++) {
           await checkpoint(`Creating post ${index + 1} / ${cfg.maxPostsPerRun}`);
           const generated = await generateAndPersistContent({ workspaceId: job.workspaceId, userId: job.userId, workspaceOnlyMemory: true, contentItemId: autoRunItemId(job.id, index, attempt), abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
             input: { topic: state.topics[index], objective: `Auto Run strategy: ${state.context.text}. Distinct angle ${index + 1}; QA attempt ${attempt + 1}.`, platforms: cfg.platforms, preferredFormat: cfg.formats[index % cfg.formats.length] } });
-          if (generated.qa.passed) { itemId = generated.itemId; break; }
+          if (generated.qa.passed) { itemId = generated.itemId; delete state.qaAttemptByPost[index]; break; }
+          if (options.serverlessSlice && attempt < 2) {
+            state.qaAttemptByPost[index] = attempt + 1;
+            await checkpoint(`Post ${index + 1} did not pass QA; retry ${attempt + 2} / 3 queued`);
+            await yieldForNextInvocation(`QA retry queued for post ${index + 1}`);
+            return;
+          }
         }
         if (!itemId) throw new Error(`Post ${index + 1} failed QA after three attempts. Valid saved posts are preserved.`);
         state.createdIds[index] = itemId;
@@ -129,7 +167,10 @@ export async function executeAutoRun(jobId: string): Promise<void> {
       const [item] = await db.select().from(contentItems).where(and(eq(contentItems.id, itemId), eq(contentItems.workspaceId, job.workspaceId)));
       if (!item) throw new Error("A saved Auto Run post was removed. Review the run before retrying.");
       const variants = await db.select().from(contentVariants).where(and(eq(contentVariants.contentItemId, itemId), eq(contentVariants.workspaceId, job.workspaceId)));
-      if (["scheduled", "published", "archived"].includes(item.status)) continue;
+      if (["scheduled", "published", "archived"].includes(item.status)) {
+        if (await finishPost(index)) return;
+        continue;
+      }
       if (cfg.generateImages && storage && item.format !== "reel" && item.format !== "text_post") {
         const slides = item.format === "carousel" ? (variants[0]?.slides ?? []) as { index: number }[] : [{ index: -1 }];
         for (const slide of slides) {
@@ -144,7 +185,13 @@ export async function executeAutoRun(jobId: string): Promise<void> {
             const relay = await enqueueCompanionImage({ workspaceId: job.workspaceId, userId: job.userId,
               contentItemId: itemId, storage, idempotencyKey: `autorun:${job.id}:${itemId}:${slide.index}`,
               ...(slide.index === -1 ? {} : { slideIndex: slide.index, variantId: variants[0]?.id }) });
-            if (relay.status === "completed") continue;
+            if (relay.status === "completed") {
+              if (options.serverlessSlice) {
+                await yieldForNextInvocation(`Companion visual saved for post ${index + 1}`);
+                return;
+              }
+              continue;
+            }
             if (relay.status === "failed") { state.errors.push("ChatGPT companion image failed; post retained for review."); break; }
             if (relay.status === "waiting_for_companion" && imagePreference.offlinePolicy === "fail") {
               await db.update(companionImageJobs).set({ status: "failed", error: "Explicit fail-on-offline policy selected.", updatedAt: new Date() })
@@ -163,6 +210,10 @@ export async function executeAutoRun(jobId: string): Promise<void> {
           }
           const visual = await generateVisual({ workspaceId: job.workspaceId, userId: job.userId, contentItemId: itemId, mode: "ai", storage, ...(slide.index === -1 ? {} : { slideIndex: slide.index, variantId: variants[0]?.id }) });
           if (!visual.ok) { state.errors.push(`Visual unavailable: ${visual.message}`); break; }
+          if (options.serverlessSlice) {
+            await yieldForNextInvocation(`Visual saved for post ${index + 1}`);
+            return;
+          }
         }
       }
       const live = await currentConfig();
@@ -170,7 +221,10 @@ export async function executeAutoRun(jobId: string): Promise<void> {
       const media = await selectItemMedia({ workspaceId: job.workspaceId, contentItemId: itemId });
       const readyMedia = item.format === "reel" ? media.kind === "video" : item.format === "carousel" ? media.kind === "images" && media.paths.length >= Math.max(2, ((variants[0]?.slides ?? []) as unknown[]).length) : item.format === "text_post" ? !cfg.platforms.includes("instagram") : media.kind === "image" || media.kind === "images";
       if (!readyMedia) state.errors.push(`Post ${index + 1} needs complete ${item.format === "reel" ? "video" : "image"} media; retained for review.`);
-      if (cfg.requireApproval || live.requireApproval || !cfg.autoSchedule || !live.autoSchedule || !readyMedia || item.status === "rejected" || !(item.qa as { passed?: boolean }).passed) continue;
+      if (cfg.requireApproval || live.requireApproval || !cfg.autoSchedule || !live.autoSchedule || !readyMedia || item.status === "rejected" || !(item.qa as { passed?: boolean }).passed) {
+        if (await finishPost(index)) return;
+        continue;
+      }
       if (item.status !== "approved") await approveItem(job.workspaceId, itemId);
       for (const variant of variants) {
         await currentConfig();
@@ -182,6 +236,7 @@ export async function executeAutoRun(jobId: string): Promise<void> {
         if (!result.ok) throw new Error(`${variant.platform} schedule failed: ${result.message}`);
         await checkpoint("Saving calendar slots");
       }
+      if (await finishPost(index)) return;
     }
     await checkpoint(state.errors.length ? "Completed with warnings" : "Completed");
     await db.update(jobs).set({ status: "completed", error: null, updatedAt: new Date() }).where(eq(jobs.id, job.id));
@@ -221,6 +276,7 @@ export async function executeAutoRun(jobId: string): Promise<void> {
   } catch (error) {
     if (error instanceof CompanionPendingError) {
       state.attempts = Math.max(0, (state.attempts ?? 1) - 1);
+      state.nextAttemptAt = new Date(Date.now() + 60_000).toISOString();
       await db.update(jobs).set({ status: "queued", error: null,
         result: state as Record<string, unknown>, updatedAt: new Date() }).where(eq(jobs.id, job.id));
       return;
@@ -228,6 +284,13 @@ export async function executeAutoRun(jobId: string): Promise<void> {
     const message = error instanceof Error ? error.message : "Auto Run failed";
     const disabled = message === "AUTO_RUN_DISABLED";
     const terminal = state.attempts >= 3 || message.startsWith("INVALID_AUTO_RUN_CONFIG:");
+    const code = disabled ? "disabled" : message.includes("rate") || message.includes("429") ? "rate_limit"
+      : message.includes("timeout") || message.includes("aborted") ? "timeout"
+      : message.includes("schedule") ? "scheduling" : message.includes("image") || message.includes("Visual") ? "visual"
+      : "generation";
+    console.error("[autopilot/run]", { jobId: job.id, stage: state.stage ?? "claim",
+      code, attempt: state.attempts, terminal });
+    if (!disabled && !terminal) state.nextAttemptAt = new Date(Date.now() + Math.min(10, 5 * state.attempts) * 60_000).toISOString();
     await db.update(jobs).set({ status: disabled ? "cancelled" : terminal ? "failed" : "queued", error: message, result: state as Record<string, unknown>, updatedAt: new Date() }).where(eq(jobs.id, job.id));
     if (disabled || terminal) {
       const terminalNote = buildAutoRunTerminalNotification({ jobId: job.id, createdCount: state.createdIds.length, total: job.total, disabled, message });

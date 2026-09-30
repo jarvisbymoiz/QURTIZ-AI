@@ -756,9 +756,15 @@ export async function buildAutopilotRunContext(workspaceId: string, timezone: st
   return { identity, text, metricsCount: metricRows.length, bestHours: hours, metrics: metricRows };
 }
 
-/** Scan durable Auto Run occurrences; AI executes in the existing pg-boss worker. */
+/** Scan durable Auto Run occurrences. Vercel processes one resumable slice
+ * inside the authenticated maintenance invocation; persistent hosts use pg-boss. */
 export async function autopilotLoop(): Promise<void> {
-  const { scanAutoRuns } = await import("@/lib/autopilot/run");
+  const { scanAutoRuns, executeAutoRun } = await import("@/lib/autopilot/run");
+  if (process.env.VERCEL) {
+    const queued = await scanAutoRuns({ dispatch: "serverless" });
+    if (queued.length) await executeAutoRun(queued[0], { serverlessSlice: true });
+    return;
+  }
   await scanAutoRuns();
 }
 

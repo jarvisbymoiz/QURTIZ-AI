@@ -31,7 +31,14 @@ jobs:
           fi
       - name: Invoke authenticated Qurtiz job
         run: |
-          curl --fail --silent --show-error --retry 0 --max-time 295 \
-            --output /dev/null \
+          response_file="$RUNNER_TEMP/qurtiz-${{ matrix.endpoint }}-response.json"
+          if ! curl --fail-with-body --silent --show-error --retry 0 --max-time 295 \
+            --output "$response_file" \
             --header "Authorization: Bearer $CRON_SECRET" \
-            "https://qurtiz-ai.vercel.app/api/cron/${{ matrix.endpoint }}"
+            "https://qurtiz-ai.vercel.app/api/cron/${{ matrix.endpoint }}"; then
+            echo "Qurtiz ${{ matrix.endpoint }} endpoint failed. Safe route response:"
+            head -c 1200 "$response_file" || true
+            exit 1
+          fi
+          echo "Qurtiz ${{ matrix.endpoint }} endpoint completed:"
+          head -c 1200 "$response_file"

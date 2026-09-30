@@ -14,7 +14,8 @@ vi.mock("@/lib/companion/image-jobs",()=>({enqueueCompanionImage:mocks.relay}));
 vi.mock("@/lib/supabase/service",()=>({createServiceClient:()=>({})}));
 vi.mock("@/lib/content/lifecycle",()=>({approveItem:mocks.approve}));
 vi.mock("@/lib/publishing/service",()=>({schedulePost:mocks.schedule,selectItemMedia:mocks.media}));
-import { autoRunItemId, executeAutoRun } from "../run";
+import { autoRunItemId, executeAutoRun, scanAutoRuns } from "../run";
+import { getBoss } from "@/lib/jobs/boss";
 type Row = Record<string, unknown>;
 function fixture(requireApproval=true) {
   const config = autopilotSettingsSchema.parse({enabled:true,requireApproval,maxPostsPerRun:3,runTimes:["09:00"],platforms:["facebook"],formats:["single_image"],generateImages:false});
@@ -23,7 +24,8 @@ function fixture(requireApproval=true) {
   const savedSettings = {value:config};
   const updates: Row[]=[];
   let imagePreference: Row | null = null;
-  const selectRows = (table:unknown) => table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?(config.generateImages?[]:[{kind:"upload",mimeType:"image/png"}]):table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:table===imageModePreferences?(imagePreference?[imagePreference]:[]):[];
+  let visualStored=false;
+  const selectRows = (table:unknown) => table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?(config.generateImages&&!visualStored?[]:[{kind:"upload",mimeType:"image/png"}]):table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:table===imageModePreferences?(imagePreference?[imagePreference]:[]):[];
   const db = {
     select:()=>({from:(table:unknown)=>({where:()=>{
       const result=Promise.resolve(selectRows(table)) as Promise<Row[]> & {limit:()=>Promise<Row[]>};
@@ -44,7 +46,7 @@ function fixture(requireApproval=true) {
     return {itemId:args.contentItemId,qa:{passed:true}};
   };
   mocks.generate.mockImplementation(persist);
-  return {job,items,config,savedSettings,updates,persist,setImagePreference:(value:Row)=>{imagePreference=value;}};
+  return {job,items,config,savedSettings,updates,persist,setImagePreference:(value:Row)=>{imagePreference=value;},setVisualStored:()=>{visualStored=true;}};
 }
 beforeEach(()=>{
   vi.clearAllMocks();
@@ -56,6 +58,52 @@ beforeEach(()=>{
   mocks.relay.mockReset(); mocks.apiImage.mockReset();
 });
 describe("durable Auto Run execution",()=>{
+  it("selects eligible database work on Vercel without starting pg-boss", async()=>{
+    const queued = [{id:"deferred",result:{nextAttemptAt:new Date(Date.now()+300_000).toISOString()}},
+      {id:"ready",result:{nextAttemptAt:new Date(Date.now()-1_000).toISOString()}}];
+    mocks.db.mockReturnValue({
+      select:()=>({from:(table:unknown)=>({where:()=>Object.assign(Promise.resolve(table===settings?[]:queued),
+        {orderBy:()=>({limit:async()=>queued})})})}),
+      update:()=>({set:()=>({where:async()=>[]})}),
+    });
+    expect(await scanAutoRuns({dispatch:"serverless"})).toEqual(["ready"]);
+    expect(getBoss).not.toHaveBeenCalled();
+  });
+  it("resumes one saved post per serverless invocation without duplicate generation", async()=>{
+    const f=fixture();
+    await executeAutoRun("job-1", {serverlessSlice:true});
+    expect(f.job.status).toBe("queued");
+    expect(mocks.generate).not.toHaveBeenCalled();
+    for(let index=1;index<=3;index++) {
+      await executeAutoRun("job-1", {serverlessSlice:true});
+      expect(mocks.generate).toHaveBeenCalledTimes(index);
+      expect(f.job.result).toMatchObject({nextPostIndex:index});
+    }
+    expect(f.job.status).toBe("completed");
+    expect(f.items.size).toBe(3);
+  });
+  it("bounds a failed QA attempt to one serverless slice and resumes at the next attempt", async()=>{
+    const f=fixture();
+    mocks.generate.mockResolvedValueOnce({itemId:"qa-failed",qa:{passed:false}});
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    expect(f.job.result).toMatchObject({qaAttemptByPost:{0:1}});
+    expect(mocks.generate).toHaveBeenCalledTimes(1);
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    expect(mocks.generate).toHaveBeenCalledTimes(2);
+    expect(mocks.generate.mock.calls[1][0].contentItemId).toBe(autoRunItemId("job-1",0,1));
+  });
+  it("bounds API image generation to one visual per serverless invocation", async()=>{
+    const f=fixture();f.config.generateImages=true;
+    mocks.apiImage.mockImplementation(async()=>{f.setVisualStored();return {ok:true};});
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    expect(mocks.apiImage).toHaveBeenCalledTimes(1);
+    expect(f.job.status).toBe("queued");
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    expect(mocks.apiImage).toHaveBeenCalledTimes(1);
+    expect(f.job.result).toMatchObject({nextPostIndex:1});
+  });
   it("waits for a companion image without silently calling the API provider", async()=>{
     const f=fixture(false);f.config.generateImages=true;
     f.setImagePreference({mode:"local_companion",offlinePolicy:"wait"});
@@ -65,6 +113,7 @@ describe("durable Auto Run execution",()=>{
     expect(mocks.apiImage).not.toHaveBeenCalled();
     expect(f.job.status).toBe("queued");
     expect(f.job.result).toMatchObject({stage:"Waiting for ChatGPT companion image"});
+    expect(new Date((f.job.result as {nextAttemptAt:string}).nextAttemptAt).getTime()).toBeGreaterThan(Date.now());
   });
   it("resumes the saved Auto Run after the companion completes the image", async()=>{
     const f=fixture(false);f.config.generateImages=true;
@@ -115,6 +164,7 @@ describe("durable Auto Run execution",()=>{
   it("retries scheduling errors while preserving the requested posts", async () => {
     const f=fixture(false);mocks.schedule.mockResolvedValueOnce({ok:false,message:"Provider temporarily unavailable"});
     await expect(executeAutoRun("job-1")).rejects.toThrow("Provider temporarily unavailable");
+    expect(new Date((f.job.result as {nextAttemptAt:string}).nextAttemptAt).getTime()).toBeGreaterThan(Date.now());
     await executeAutoRun("job-1");expect(f.items.size).toBe(3);expect(mocks.generate).toHaveBeenCalledTimes(3);expect(f.job.status).toBe("completed");
   });
   it("retains media-incomplete posts for review without approving or scheduling them", async () => {
