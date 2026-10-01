@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validCronAuthorization } from "@/lib/jobs/cron-auth";
 import { publishDueScan } from "@/lib/jobs/workflows";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
   if (!cronSecret) {
     return NextResponse.json({ error: "Cron is not configured" }, { status: 503 });
   }
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  if (!validCronAuthorization(authHeader, cronSecret, "publish")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

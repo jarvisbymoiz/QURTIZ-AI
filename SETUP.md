@@ -211,28 +211,30 @@ Back up production before future migrations and verify the target project.
 
 For **Vercel Hobby**, `vercel.json` intentionally registers no Vercel cron jobs:
 Hobby rejects the previous one-minute and five-minute schedules during
-deployment. The authenticated routes use durable database jobs. The repository's
-`.github/workflows/qurtiz-scheduler.yml` invokes publishing and maintenance
-every five minutes. To activate it:
+deployment. The authenticated routes use durable database jobs. Supabase pg_cron
+invokes publishing and maintenance every five minutes. To activate it:
 
 1. Set a random `CRON_SECRET` in the Vercel **Production** environment.
 2. Set GitHub Actions repository secret `QURTIZ_CRON_SECRET` to the **same** value.
-3. Deploy the latest `main` commit, then run **Qurtiz scheduled jobs** once
-   using GitHub Actions → **Run workflow**. Both jobs must finish successfully;
-   a missing secret, non-2xx response, or timeout is a failure.
-4. Check later scheduled workflow runs and the Vercel function logs. Confirm
-   due publishing jobs progress to a real terminal state.
+3. Deploy the latest `main` commit. Set `SCHEDULER_SECRET_FILE` to a private
+   file containing the same credential, then run
+   `node scripts/configure-supabase-scheduler.mjs --apply` from an administrator
+   environment with the correct `DATABASE_URL`. It stores the credential in
+   Supabase Vault and creates two named schedules. Never commit the secret file.
+4. Check Supabase `cron.job_run_details`, pg_net HTTP response status and Vercel
+   function logs. Confirm due jobs reach a real terminal state. GitHub Actions
+   **Run workflow** remains a manual recovery trigger; it is not the recurring scheduler.
 
 Maintenance now resumes bounded Auto Run slices directly in Vercel; it does
 not depend on a resident pg-boss worker. See [Auto Run production status](docs/AUTO_RUN.md)
 for the current live-test gates and recovery behavior.
 
-GitHub Actions scheduled runs can be delayed; this setup does **not** promise
-exact-minute publishing. Hobby functions have a 300-second execution budget
+Five-minute scans may publish after the selected minute; this setup does **not**
+promise exact-minute publishing. Hobby functions have a 300-second execution budget
 with Fluid Compute, so large carousel/Reel publishing may require a persistent
 worker or a higher-duration plan. Do not advertise precise schedules until the
-chosen worker and end-to-end publishing tests support them. The local ChatGPT
-companion is separate: the user runs it on the same device as their browser.
+chosen worker and end-to-end publishing tests support them. The ChatGPT companion
+runs on a paired computer and receives durable cloud jobs independently of the browser.
 
 ### 8e. Verify Live Deployment Health
 You can visit:

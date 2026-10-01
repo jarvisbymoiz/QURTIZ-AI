@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validCronAuthorization } from "@/lib/jobs/cron-auth";
 import { autopilotLoop, refreshPendingDeliveryNotifications } from "@/lib/jobs/workflows";
 import { reconcileBufferDeliveries } from "@/lib/publishing/service";
 import { mediaCleanupTick } from "@/lib/media/cleanup-worker";
@@ -14,7 +15,7 @@ export const maxDuration = 300;
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return NextResponse.json({ error: "Cron is not configured" }, { status: 503 });
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!validCronAuthorization(req.headers.get("authorization"), secret, "maintenance")) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const results = await Promise.allSettled([
     reconcileBufferDeliveries().then(() => refreshPendingDeliveryNotifications()),
     expireCompanionImageJobs().then(() => autopilotLoop()), cleanupCompanionStaging(), mediaCleanupTick(),
