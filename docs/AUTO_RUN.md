@@ -2,6 +2,10 @@
 
 ## Production follow-up (1 October 2026)
 
+Final validation after request-signing changes: 877 tests passed / one skipped; typecheck, schema validation and production build passed. Vercel Production and Preview successfully deployed `a7725e5`; signed Production authentication was verified before reactivating both five-minute schedules.
+
+Automatic signed scheduler verification at 17:55 UTC / 22:55 Asia/Karachi: Supabase jobs 3 and 4 executed independently of the browser; both HTTP responses were 200 with no timeout. The pending run `e17c6a5d-b132-4699-b4e5-d45de92ce8d6` resumed and completed with exactly one post. The older catch-up run also completed with one post; these are separate configured occurrences, not duplicate posts from one click. Production background content/image/scheduling/notification execution is verified. Preview deployment builds successfully but has no separate unattended schedule: it must not share Production's recurring trigger against the same database. External publishing/First Comment verification remains pending until the selected publication time.
+
 The secrets were added and redeployed. GitHub scheduled run `36871611511` succeeded, and Production persisted a real Auto Run strategy. However, scheduled GitHub invocations were hours apart despite the five-minute configuration; processing only one checkpoint per invocation left content creation waiting for the next delivery.
 
 Production now uses **Supabase pg_cron + pg_net** to call the existing authenticated Vercel maintenance and publishing endpoints every five minutes. `qurtiz-maintenance` and `qurtiz-publish` are installed in the existing database. Their commands reference the dedicated `qurtiz_cron_secret` Vault record; no secret is embedded in source or cron command text. ChatGPT credentials remain on the companion. GitHub Actions remains a manual recovery trigger, with recurring scheduling removed to avoid two primary schedulers.
