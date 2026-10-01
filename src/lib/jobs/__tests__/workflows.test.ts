@@ -123,11 +123,27 @@ beforeEach(() => {
 describe("Vercel Auto Run dispatch", () => {
   it("processes a durable queued slice without relying on a resident pg-boss worker", async () => {
     vi.stubEnv("VERCEL", "1");
-    vi.mocked(scanAutoRuns).mockResolvedValue(["job-a", "job-b"]);
+    vi.mocked(scanAutoRuns).mockResolvedValueOnce(["job-a", "job-b"]).mockResolvedValue([]);
     try {
       await autopilotLoop();
       expect(scanAutoRuns).toHaveBeenCalledWith({ dispatch: "serverless" });
       expect(executeAutoRun).toHaveBeenCalledExactlyOnceWith("job-a", { serverlessSlice: true });
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("continues saved checkpoints until no work is immediately ready", async () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.mocked(scanAutoRuns).mockResolvedValueOnce(["job-a"]).mockResolvedValueOnce(["job-a"]).mockResolvedValue([]);
+    try {
+      await autopilotLoop();
+      expect(executeAutoRun).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("bounds draining even when a job remains ready", async () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.mocked(scanAutoRuns).mockResolvedValue(["job-a"]);
+    try {
+      await autopilotLoop();
+      expect(executeAutoRun).toHaveBeenCalledTimes(6);
     } finally { vi.unstubAllEnvs(); }
   });
 });

@@ -1,5 +1,19 @@
 # Agent Auto Run
 
+## Production follow-up (1 October 2026)
+
+The secrets were added and redeployed. GitHub scheduled run `36871611511` succeeded, and Production persisted a real Auto Run strategy. However, scheduled GitHub invocations were hours apart despite the five-minute configuration; processing only one checkpoint per invocation left content creation waiting for the next delivery.
+
+Production now uses **Supabase pg_cron + pg_net** to call the existing authenticated Vercel maintenance and publishing endpoints every five minutes. `qurtiz-maintenance` and `qurtiz-publish` are installed in the existing database. Their commands reference the dedicated `qurtiz_cron_secret` Vault record; no secret is embedded in source or cron command text. ChatGPT credentials remain on the companion. GitHub Actions remains a manual recovery trigger, with recurring scheduling removed to avoid two primary schedulers.
+
+`autopilotLoop` drains up to six ready checkpoints, starting no new checkpoint after 90 seconds. Every phase still claims/persists its database state. Waiting companion jobs and retry delays yield without an in-process timer. This reduces dependence on subsequent cron delivery while retaining cold-start recovery and duplicate claims protection.
+
+Live Production evidence: deployed maintenance created one real post (`ad769f3a-4150-4e3a-ae36-4f02e6c54779`), and companion image job `e77ada0c-2503-4f7a-81f1-361ee850b4ea` completed. Automatic Supabase HTTP delivery and subsequent scheduling/publishing verification are in progress; full release gate remains open.
+
+Operations: `node scripts/configure-supabase-scheduler.mjs --status` prints only safe job metadata. `--apply` verifies the deployed credential, installs supported extensions, and idempotently configures the two schedules. Supply `SCHEDULER_SECRET_FILE` pointing to a private file containing the same secret as Vercel `CRON_SECRET`; `SCHEDULER_APP_URL` defaults to the Production origin. `--disable` removes only these two schedules. After disabling, GitHub **Run workflow** remains available. pg_net HTTP results, not just cron SQL success, must be checked for endpoint errors.
+
+Validation: 37 relevant Auto Run/publishing worker tests passed; typecheck, schema validation (36 tables / 410 columns / zero problems), and production build passed. Existing AI SDK bundle warnings remain.
+
 ## Vercel Production repair (30 September 2026) — live release gate open
 
 **Root causes observed on Production:** `vercel.json` has no Cron entries because the project uses Hobby. The existing GitHub Actions scheduler is the intended five-minute trigger, but the latest two scheduled runs both failed at **Require scheduler credential**: repository secret `QURTIZ_CRON_SECRET` is absent. Unauthenticated Production probes of `/api/cron/maintenance` and `/api/cron/publish` both returned HTTP **503**, confirming Vercel Production `CRON_SECRET` is absent too. No background scan or due-post publication can start until the same strong secret is configured in both places. The Vercel runtime also intentionally omits pg-boss workers, while the old maintenance route only enqueued Auto Run work into pg-boss; even a valid trigger would have left that work unconsumed.

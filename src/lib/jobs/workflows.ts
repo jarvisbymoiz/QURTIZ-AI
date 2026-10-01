@@ -756,13 +756,20 @@ export async function buildAutopilotRunContext(workspaceId: string, timezone: st
   return { identity, text, metricsCount: metricRows.length, bestHours: hours, metrics: metricRows };
 }
 
-/** Scan durable Auto Run occurrences. Vercel processes one resumable slice
+/** Scan durable Auto Run occurrences. Vercel processes bounded resumable slices
  * inside the authenticated maintenance invocation; persistent hosts use pg-boss. */
 export async function autopilotLoop(): Promise<void> {
   const { scanAutoRuns, executeAutoRun } = await import("@/lib/autopilot/run");
   if (process.env.VERCEL) {
-    const queued = await scanAutoRuns({ dispatch: "serverless" });
-    if (queued.length) await executeAutoRun(queued[0], { serverlessSlice: true });
+    // Drain ready checkpoints without requiring a separate cron delivery for
+    // every phase. Do not start another phase after 90s: bounded generation
+    // calls need headroom within the maintenance route's 300s budget.
+    const startedAt = Date.now();
+    for (let slice = 0; slice < 6 && Date.now() - startedAt < 90_000; slice++) {
+      const queued = await scanAutoRuns({ dispatch: "serverless" });
+      if (!queued.length) break;
+      await executeAutoRun(queued[0], { serverlessSlice: true });
+    }
     return;
   }
   await scanAutoRuns();

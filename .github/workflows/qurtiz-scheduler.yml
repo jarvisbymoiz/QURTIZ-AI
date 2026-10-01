@@ -1,8 +1,8 @@
 name: Qurtiz scheduled jobs
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # Production recurrence is owned by Supabase pg_cron. Keep this workflow
+  # as an authenticated manual recovery/diagnostic trigger.
   workflow_dispatch:
 
 permissions:
