@@ -33,7 +33,7 @@ export default function SignupPage() {
         return;
       }
       if (data.session) {
-        window.location.href = "/";
+        window.location.href = "/dashboard";
         return;
       }
       setEmailSent(true);

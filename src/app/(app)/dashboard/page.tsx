@@ -297,4 +297,4 @@ async function DashboardPage() {
 
 
 
-export default withSchemaGuard("(app)/page.tsx", DashboardPage);
+export default withSchemaGuard("(app)/dashboard/page.tsx", DashboardPage);

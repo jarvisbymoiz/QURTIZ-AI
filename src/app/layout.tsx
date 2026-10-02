@@ -1,4 +1,5 @@
 ﻿import type { Metadata } from "next";
+import { getPublicAppUrl } from "@/lib/app-url";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,6 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(getPublicAppUrl()),
+  manifest: "/manifest.webmanifest",
   title: {
     default: "QURTIZ AI — Social Media Agent",
     template: "%s · QURTIZ AI",

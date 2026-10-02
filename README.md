@@ -8,6 +8,10 @@ visuals → platform adaptation → QA → approval → schedule → publish →
 
 ## Stack
 
+The public website renders at `/`; the authenticated dashboard is at `/dashboard`.
+See [the public website guide](docs/PUBLIC-WEBSITE.md) for the audit, editorial
+workflow, SEO configuration, browser checks and production launch requirements.
+
 - **Next.js 15** (App Router, TypeScript strict, React 19)
 - **Tailwind CSS v4 + shadcn/ui** — dark-first premium design system
 - **Supabase** — Auth (email + magic link), Postgres, Storage (later)

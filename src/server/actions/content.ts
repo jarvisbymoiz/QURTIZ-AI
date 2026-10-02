@@ -56,7 +56,7 @@ export async function createContentAction(input: {
       },
     });
     revalidatePath("/content-studio");
-    revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, itemId, qaScore: qa.score };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed";
@@ -75,7 +75,7 @@ export async function setContentStatusAction(
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Could not change status." }; }
 
   revalidatePath("/content-studio");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }
 
@@ -224,7 +224,7 @@ export async function deleteContentAction(itemId: string): Promise<ActionResult>
   }
 
   revalidatePath("/content-studio");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }
 

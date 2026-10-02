@@ -131,7 +131,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
   }
 
   async function refreshContent() {
-    try { for (const path of ["/content-studio", "/content-library", "/calendar", "/"]) revalidatePath(path); }
+    try { for (const path of ["/content-studio", "/content-library", "/calendar", "/dashboard"]) revalidatePath(path); }
     catch { console.warn("[agent-content] cache invalidation unavailable", { workspaceId: ctx.workspaceId, runId: ctx.runId }); }
   }
 

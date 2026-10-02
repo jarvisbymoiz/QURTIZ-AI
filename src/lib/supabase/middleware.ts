@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { isPublicWebsitePath } from "@/lib/public/routes";
 import { getAppCookieOptions } from "./cookie-options";
 
 // /api/meta/callback and /api/buffer/callback must be reachable without a
@@ -21,6 +22,8 @@ function isPublic(pathname: string): boolean {
  * Must stay edge-runtime safe: no Node APIs here.
  */
 export async function updateSession(request: NextRequest) {
+  // Static public content stays available independently of auth/provider health.
+  if (isPublicWebsitePath(request.nextUrl.pathname)) return NextResponse.next({ request });
   // Machine endpoints authenticate their bearer credentials in their routes.
   // The companion has no browser cookie; redirecting it to /login would turn
   // every claim, heartbeat and upload completion into an HTML response.
@@ -83,7 +86,7 @@ export async function updateSession(request: NextRequest) {
 
   if (user && (pathname === "/login" || pathname === "/signup")) {
     const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/";
+    redirectUrl.pathname = "/dashboard";
     redirectUrl.search = "";
     const redirectResponse = NextResponse.redirect(redirectUrl);
     // Copy any cookies set during updateSession (e.g. refreshed sessions)

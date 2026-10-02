@@ -68,7 +68,7 @@ export async function createWorkspaceAction(formData: FormData): Promise<ActionR
   });
 
   revalidatePath("/", "layout");
-  redirect("/");
+  redirect("/dashboard");
 }
 
 export async function switchWorkspaceAction(workspaceId: string): Promise<ActionResult> {

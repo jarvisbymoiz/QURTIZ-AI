@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import Link from "next/link";
+import { QurtizMark } from "@/components/brand/mark";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import {
@@ -39,7 +40,7 @@ import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const NAV_MAIN = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/chat", label: "AI Chat", icon: MessageSquare },
   { href: "/content-studio", label: "Content Studio", icon: PenSquare },
   { href: "/research-lab", label: "Research Lab", icon: FlaskConical },
@@ -82,7 +83,7 @@ export function Sidebar({
     startSwitch(async () => {
       const result = await switchWorkspaceAction(workspaceId);
       if (result.ok) {
-        router.push("/");
+        router.push("/dashboard");
         router.refresh();
       }
     });
@@ -102,9 +103,7 @@ export function Sidebar({
       if ((event.target as HTMLElement).closest("a")) setMobileOpen(false);
     }}>
       <div className="flex h-14 items-center gap-2 border-b px-4">
-        <div className="flex size-7 items-center justify-center rounded-md bg-gradient-to-br from-primary to-primary/70 font-bold text-primary-foreground">
-          Q
-        </div>
+        <QurtizMark className="size-7" />
         <div className="font-semibold tracking-tight">QURTIZ AI</div>
       </div>
 
@@ -157,7 +156,7 @@ export function Sidebar({
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 pb-3 scrollbar-hide" aria-label="Main">
         {NAV_MAIN.map((item) => {
           const active =
-            item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+            item.href === "/dashboard" ? pathname === "/dashboard" : pathname.startsWith(item.href);
           return (
             <Link
               key={item.href}

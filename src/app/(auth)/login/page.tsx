@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ExternalLink } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { loginWithPasswordAction } from "@/server/actions/auth";
+import { safeAuthDestination } from "@/lib/public/routes";
 import { getPublicAppUrl } from "@/lib/app-url";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,14 +17,7 @@ import { Separator } from "@/components/ui/separator";
 
 function LoginForm() {
   const searchParams = useSearchParams();
-  const rawNext = searchParams.get("next") ?? "/";
-  // Prevent redirect loops back to login/signup
-  const next =
-    rawNext.startsWith("/login") || rawNext.startsWith("/signup")
-      ? "/"
-      : rawNext.startsWith("/")
-        ? rawNext
-        : "/";
+  const next = safeAuthDestination(searchParams.get("next"));
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

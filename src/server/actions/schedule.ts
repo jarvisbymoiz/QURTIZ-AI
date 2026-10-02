@@ -50,7 +50,7 @@ export async function scheduleContentAction(input: { itemId: string; dateIso: st
 
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }
 
@@ -97,7 +97,7 @@ export async function rescheduleContentAction(input: {
 
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true, scheduledAt: result.scheduledAt.toISOString(), variants: result.variants };
 }
 
@@ -235,7 +235,7 @@ export async function publishNowAction(input: {
 
   revalidatePath("/calendar");
   revalidatePath("/content-studio");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return {
     ok: true,
     providerPostId: result.providerPostId,
@@ -265,7 +265,7 @@ export async function bulkApproveReadyAction(): Promise<ActionResult & { count?:
 
   revalidatePath("/content-studio");
   revalidatePath("/calendar");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   if (failures.length) return { ok: false, error: `${approved} approved; ${failures.length} need attention. ${failures[0]}`, count: approved };
   return { ok: true, count: approved };
 }

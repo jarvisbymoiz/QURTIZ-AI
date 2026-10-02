@@ -1,5 +1,6 @@
-﻿import Link from "next/link";
-
+import Link from "next/link";
+import { QurtizMark } from "@/components/brand/mark";
+export const metadata = { robots: { index: false, follow: false } };
 export default function AuthLayout({
   children,
 }: {
@@ -7,13 +8,20 @@ export default function AuthLayout({
 }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-muted/30 p-4">
-      <Link href="/login" className="flex items-center gap-2">
-        <div className="flex size-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary/70 font-bold text-primary-foreground">
-          Q
-        </div>
-        <span className="text-lg font-semibold tracking-tight">QURTIZ AI</span>
+      <Link
+        href="/"
+        className="flex items-center gap-2"
+        aria-label="Qurtiz AI home"
+      >
+        <QurtizMark className="size-10" />
+        <span className="text-lg font-semibold tracking-tight">Qurtiz AI</span>
       </Link>
       <div className="w-full max-w-sm">{children}</div>
+      <p className="flex gap-4 text-xs text-muted-foreground">
+        <Link href="/">Home</Link>
+        <Link href="/privacy">Privacy</Link>
+        <Link href="/terms">Terms</Link>
+      </p>
     </div>
   );
 }

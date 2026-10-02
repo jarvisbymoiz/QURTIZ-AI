@@ -1,3 +1,4 @@
+export const metadata = { robots: { index: false, follow: false } };
 import { withSchemaGuard } from "@/components/system/schema-guard";
 import { Sidebar } from "@/components/layout/sidebar";
 import { requireWorkspace } from "@/lib/workspace";

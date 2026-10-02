@@ -1,0 +1,14 @@
+# Developer environments, build output and private/generated data
+.tools/
+.codex-remote-attachments/
+.git/
+.next*/
+node_modules/
+graphify-out/
+coverage/
+artifacts/
+certificates/
+.env*
+*.pem
+*.log
+src/db/migrations/meta/

@@ -1,0 +1,9 @@
+.git/
+node_modules/
+.env*
+.tools/
+.agents/
+.codex/
+graphify-out/
+.graphifyignore
+.codex-remote-attachments/

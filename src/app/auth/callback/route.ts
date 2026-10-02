@@ -1,17 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { safeAuthDestination } from "@/lib/public/routes";
 import { getPublicAppUrl } from "@/lib/app-url";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
-  const rawNext = searchParams.get("next") ?? "/";
-  const next =
-    rawNext.startsWith("/login") || rawNext.startsWith("/signup")
-      ? "/"
-      : rawNext.startsWith("/")
-        ? rawNext
-        : "/";
+  const next = safeAuthDestination(searchParams.get("next"));
 
   // Determine the canonical public origin (e.g. https://qurtiz-ai.vercel.app)
   const publicOrigin = getPublicAppUrl(request);

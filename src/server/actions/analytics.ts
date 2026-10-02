@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, desc, eq } from "drizzle-orm";
@@ -120,7 +120,7 @@ Rules: reference the actual numbers; label estimates as estimates; no generic ad
       .returning();
 
     revalidatePath("/analytics");
-    revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, insight: insight.content };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Analysis failed" };

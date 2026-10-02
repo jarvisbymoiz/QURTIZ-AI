@@ -1,4 +1,4 @@
-﻿"use server";
+"use server";
 
 import { revalidatePath } from "next/cache";
 import { and, eq } from "drizzle-orm";
@@ -66,7 +66,7 @@ export async function updateBusinessInfoAction(formData: FormData): Promise<Acti
     .where(eq(brands.workspaceId, ctx.workspaceId));
 
   revalidatePath("/brand-brain");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }
 

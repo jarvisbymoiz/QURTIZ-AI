@@ -14,6 +14,8 @@ const eslintConfig = [
   {
     ignores: [
       "node_modules/**",
+      ".tools/**",
+      "graphify-out/**",
       ".next/**",
       ".next*/**",
       "out/**",

@@ -15,7 +15,7 @@ export default function NotFound() {
         href="/"
         className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
       >
-        Back to dashboard
+        Back to homepage
       </Link>
     </main>
   );

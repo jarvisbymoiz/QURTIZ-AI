@@ -52,5 +52,16 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Local Graphify developer tooling and generated repository index
+/.tools/graphify/
+/graphify-out/
+/.codex/config.toml
+
 # leftover create-next-app temp scaffold (deletion pending user approval)
 .scaffold/
+
+# Local browser validation artifacts
+/.public-qa/
+
+# Local task attachments
+/.codex-remote-attachments/

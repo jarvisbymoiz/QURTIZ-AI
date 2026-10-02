@@ -39,7 +39,7 @@ export async function runResearchAction(input: {
     });
     if (!result.ok) return { ok: false, error: result.message };
     revalidatePath("/research-lab");
-    revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, count: result.count, sourced: result.sourced, note: result.note };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Research failed";

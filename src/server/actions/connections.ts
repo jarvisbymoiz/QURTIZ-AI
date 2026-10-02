@@ -332,7 +332,7 @@ export async function saveSelectedMetaAccountsAction(input: {
   }
 
   revalidatePath("/connections");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
 
   return {
     ok: true,
@@ -458,7 +458,7 @@ export async function disconnectPlatformAction(
     );
 
   revalidatePath("/connections");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }
 
@@ -487,6 +487,6 @@ export async function updatePublishingProviderAction(provider: string): Promise<
   await updateWorkspacePublishProvider(workspaceId, parsed.data as PublishProvider);
 
   revalidatePath("/connections");
-  revalidatePath("/");
+  revalidatePath("/dashboard");
   return { ok: true };
 }

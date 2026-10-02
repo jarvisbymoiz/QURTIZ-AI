@@ -2759,3 +2759,18 @@ continuous Chat + Chat History reliable. Complete multi-media
 publishing. Complete SaaS commercial foundations. Make the entire
 product responsive. Build the real public landing page. Test the actual
 customer journey. Deliver production-ready Qurtiz AI.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- Use Graphify for unfamiliar large-codebase questions, architecture, cross-file dependencies, impact analysis, and locating related files. Prefer the project MCP tools or `node .codex/graphify.mjs query "<question>" --budget 1500`. Use `node .codex/graphify.mjs path "<A>" "<B>"` for relationships and `node .codex/graphify.mjs explain "<concept>"` for focused concepts.
+- For small edits in known files, read the relevant files directly. Do not run a graph query or load the full report for every edit. Graph edges are navigation evidence; verify exact behavior against current source before changing code.
+- If the index is missing or stale, update it when cross-file analysis needs it; use normal `rg` and file reads if Graphify is unavailable. Do not block a routine fix on indexing.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- Refresh after a meaningful batch of structural code changes with `node .codex/graphify.mjs extract . --code-only --max-workers 4`. Keep extraction local and code-only unless the user explicitly requests semantic document/media extraction. Never index secrets, generated build output, attachments or dependency environments.
+- This is Codex development tooling only; do not import Graphify into Qurtiz's product Agent, change AGENT_CORE.md, add application dependencies, or run it in Vercel. No global model, provider, permission or multi-agent settings are required.
