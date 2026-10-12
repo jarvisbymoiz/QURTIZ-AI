@@ -18,7 +18,7 @@ export function BusinessForm({ brand, editable }: { brand: Brand; editable: bool
         <TextField id="businessName" label="Business name" defaultValue={brand?.businessName} placeholder="e.g. Moiz Academy" />
         <TextField id="industry" label="Industry" defaultValue={brand?.industry} placeholder="e.g. Education / EdTech" />
       </div>
-      <TextAreaField id="description" label="Description" defaultValue={brand?.description} rows={4} placeholder="What the business does, in plain words." />
+      <TextAreaField id="description" label="Description" hint="Up to 6,000 characters." defaultValue={brand?.description} rows={4} placeholder="What the business does, in plain words." />
       <div className="grid gap-4 sm:grid-cols-2">
         <TextAreaField id="products" label="Products" defaultValue={brand?.products} hint="One per line." />
         <TextAreaField id="services" label="Services" defaultValue={brand?.services} hint="One per line." />
