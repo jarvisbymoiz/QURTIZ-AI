@@ -19,7 +19,7 @@ export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;
 
 export const businessInfoSchema = z.object({
   businessName: z.string().trim().max(120).optional().or(z.literal("")),
-  description: z.string().trim().max(4000).optional().or(z.literal("")),
+  description: z.string().trim().max(6000).optional().or(z.literal("")),
   industry: z.string().trim().max(120).optional().or(z.literal("")),
   products: z.string().trim().max(4000).optional().or(z.literal("")),
   services: z.string().trim().max(4000).optional().or(z.literal("")),
