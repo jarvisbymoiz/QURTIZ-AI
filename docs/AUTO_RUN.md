@@ -1,5 +1,37 @@
 # Agent Auto Run
 
+## Multiple daily publishing slots repair (13 October 2026)
+
+Read-only Production diagnostics confirmed three run-start occurrences per day,
+one post per run, a three-post/platform daily cap and four configured publishing
+times. The scheduler nevertheless saved only `["16:00"]` as its measured candidate
+list, putting each additional ready post at 16:00 on a different day.
+
+Measured hours now rank first and are followed by every unique configured fallback
+time in saved order. Slot allocation also merges these fallbacks, so older queued
+run snapshots with a measured-only shortlist remain compatible. It exhausts the
+available candidates for a local day before advancing. Existing Calendar occupancy,
+per-platform daily caps, minimum gaps, tomorrow-first scheduling, QA, media and
+approval safeguards remain in place. The publishing job records all candidate
+times, configured times, daily cap and gap for diagnostics.
+
+Three run starts with one post/run can provide three posts per platform/day when
+all posts are ready and three nonconflicting slots remain. The daily cap is a limit,
+not a promise to publish incomplete posts. Production also showed one morning post
+retained for review after a Companion image failure; the scheduler must not bypass
+that safeguard. Existing future schedules have not been rewritten by this repair.
+
+Regression tests reproduce the single-hour failure, exercise three separate runs,
+the fourth-post daily rollover, occupied slots, both Facebook/Instagram service
+inserts, timezone and DST. Local changes require rollout before new Production
+runs use the repaired allocator.
+
+Local verification: 169 focused Auto Run/publishing/scheduling tests passed;
+the full offline suite passed 1,025 tests with one skipped. TypeScript and the
+production build passed (52 static pages; existing non-blocking warnings).
+Production diagnostics were read-only: no jobs or schedules were changed, no
+provider generation was triggered, and no post was published as a test.
+
 ## Production follow-up (1 October 2026)
 
 Final validation after request-signing changes: 877 tests passed / one skipped; typecheck, schema validation and production build passed. Vercel Production and Preview successfully deployed `a7725e5`; signed Production authentication was verified before reactivating both five-minute schedules.
@@ -81,7 +113,7 @@ Configuration saves merge into JSON, preserving the occurrence cursor. Re-enabli
 
 ## Timing evidence and Calendar behavior
 
-Timing uses real synced post performance by platform and, when sufficient rows exist, format. At least three measured posts and repeated positive engagement in a candidate hour are required. Measured engagement is a proxy for suitable posting hours; it is **not audience-online data**, and no audience activity numbers are fabricated. If evidence is insufficient, validated configurable fallback slots apply.
+Timing uses real synced post performance by platform and, when sufficient rows exist, format. At least three measured posts and repeated positive engagement in a candidate hour are required. Measured engagement is a proxy for suitable posting hours; it is **not audience-online data**, and no audience activity numbers are fabricated. Measured hours rank first, followed by the validated configurable fallback slots. If evidence is insufficient, only configured slots apply. Performance evidence never discards the other configured slots.
 
 Ranked candidate times are checked from tomorrow in the workspace timezone through a bounded 60-day horizon. The next available candidate must respect the per-platform minimum gap and daily cap. Pending, processing and published publishing jobs occupy slots; cancelled/failed jobs do not. Multiple platforms for one item can share a time, while different posts on the same platform are distributed. A full horizon fails visibly rather than stacking posts.
 

@@ -9,6 +9,8 @@ import { PageHeader } from "@/components/layout/page-header";
 import { BrandBrainTabs } from "@/components/brand/brand-brain-tabs";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Lock } from "lucide-react";
+import { getSavedWebsiteKnowledge } from "@/lib/brand-website/service";
+import { websiteKnowledgeView } from "@/lib/brand-website/knowledge";
 
 export const metadata = { title: "Brand Brain" };
 
@@ -33,6 +35,7 @@ async function BrandBrainPage() {
     ? await listAssetSignedUrls(assets.map((a) => a.storagePath))
     : {};
   const editable = can(ctx.role, "brand:write");
+  const websiteKnowledge = websiteKnowledgeView(await getSavedWebsiteKnowledge(ctx.workspace.id,brand?.website));
 
   return (
     <div className="space-y-6">
@@ -50,7 +53,7 @@ async function BrandBrainPage() {
           </AlertDescription>
         </Alert>
       ) : null}
-      <BrandBrainTabs brand={brand ?? null} memories={memories} assets={assets} assetUrls={signedUrls} editable={editable} />
+      <BrandBrainTabs brand={brand ?? null} memories={memories} assets={assets} assetUrls={signedUrls} editable={editable} websiteKnowledge={websiteKnowledge} />
     </div>
   );
 }

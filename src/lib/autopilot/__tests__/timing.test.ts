@@ -24,8 +24,34 @@ describe("Auto Run scheduling", () => {
   it("filters timing evidence by platform and requires repeated measured posts", () => {
     const metric = (platform: "facebook" | "instagram", hour:number, likes:number): MetricsRow => ({platform, contentItemId:null,postedAt:now,hourOfDay:hour,format:"carousel",metrics:{likes}});
     const rows = [metric("facebook",8,10),metric("facebook",8,12),metric("facebook",9,1),metric("instagram",20,100)];
-    expect(postingTimes(rows,"facebook","carousel",["13:15"])).toEqual({times:["08:00"],source:"measured-post-performance"});
+    expect(postingTimes(rows,"facebook","carousel",["13:15"])).toEqual({times:["08:00","13:15"],source:"measured-post-performance"});
     expect(postingTimes(rows,"instagram","reel",["13:15"])).toEqual({times:["13:15"],source:"configured-fallback"});
+  });
+  it("keeps every configured publishing time when analytics recommends only one hour", () => {
+    const rows: MetricsRow[] = [10, 20, 30].map(likes => ({platform:"facebook",contentItemId:null,
+      postedAt:now,hourOfDay:16,format:"single_image",metrics:{likes}}));
+    expect(postingTimes(rows,"facebook","single_image",["16:00","14:00","18:00","10:30"]))
+      .toEqual({times:["16:00","14:00","18:00","10:30"],source:"measured-post-performance"});
+  });
+  it("schedules three separate daily runs on one day using saved publishing times, even with a legacy single-hour shortlist", () => {
+    const p = {...policy,fallbackTimes:["16:00","14:00","18:00","10:30"]};
+    const occupied: Date[] = [];
+    const chosen = Array.from({length:4}, () => {
+      const slot = choosePostingSlot(p,["16:00"],occupied,now);
+      occupied.push(slot);
+      return slot;
+    });
+    expect(chosen.slice(0,3).map(d => dateIsoInTz(p.timezone,d))).toEqual(Array(3).fill("2026-09-17"));
+    expect(chosen.slice(0,3).map(d => hmInTz(p.timezone,d))).toEqual(["16:00","14:00","18:00"]);
+    expect(dateIsoInTz(p.timezone,chosen[3])).toBe("2026-09-18");
+  });
+  it("uses another configured time on the same day when the best hour conflicts, without reducing the minimum gap", () => {
+    const p = {...policy,fallbackTimes:["16:00","14:00","18:00","10:30"]};
+    const occupied = [parseZonedDateTime("2026-09-17","15:30",p.timezone)];
+    const at = choosePostingSlot(p,["16:00"],occupied,now);
+    expect(dateIsoInTz(p.timezone,at)).toBe("2026-09-17");
+    expect(hmInTz(p.timezone,at)).toBe("18:00");
+    expect(Math.abs(at.getTime()-occupied[0].getTime())).toBeGreaterThanOrEqual(120*60_000);
   });
   it("skips nonexistent DST posting times", () => {
     const p = {...policy,timezone:"America/New_York",fallbackTimes:["02:30","10:00"]};

@@ -1541,7 +1541,10 @@ export async function schedulePost(args: {
         provider,
         scheduledAt: args.scheduledAt,
         status: "pending",
-        ...(args.autoTiming ? { result: { schedulingSource: args.autoTiming.source, timezone: args.autoTiming.timezone, candidateTimes: args.autoTiming.times } } : {}),
+        ...(args.autoTiming ? { result: { schedulingSource: args.autoTiming.source, timezone: args.autoTiming.timezone,
+          candidateTimes: [...new Set([...args.autoTiming.times, ...args.autoTiming.fallbackTimes])],
+          configuredTimes: args.autoTiming.fallbackTimes, maxPostsPerDay: args.autoTiming.maxPostsPerDay,
+          minGapMinutes: args.autoTiming.minGapMinutes } } : {}),
       })
       .returning();
     if (!job) throw new Error("Failed to create the publishing job.");

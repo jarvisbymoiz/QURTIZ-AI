@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertAllowedAiEndpoint, assertPublicAiEndpoint, fetchPublicAiEndpoint, isPublicAiAddress } from "../ai-endpoint";
+import { assertAllowedAiEndpoint, assertPublicAiEndpoint, fetchPublicAiEndpoint, fetchPublicWebsiteResource, isPublicAiAddress } from "../ai-endpoint";
 
 describe("AI endpoint boundary without a domain allowlist", () => {
+  it("uses the same guarded connector for credential-free website GETs and requires manual redirects",async()=>{
+    const fetch=vi.fn<(url:string,init:RequestInit)=>Promise<Response>>(async()=>new Response("public text"));vi.stubGlobal("fetch",fetch);
+    try {
+      await fetchPublicWebsiteResource("https://public.example.org/",new AbortController().signal);
+      expect(fetch).toHaveBeenCalledWith("https://public.example.org/",expect.objectContaining({method:"GET",redirect:"manual",credentials:"omit",dispatcher:expect.any(Object)}));
+      const init=fetch.mock.calls[0][1] as RequestInit;
+      expect(init.headers).not.toHaveProperty("Authorization");expect(init.headers).not.toHaveProperty("Cookie");
+      await expect(fetchPublicWebsiteResource("https://127.0.0.1/",new AbortController().signal)).rejects.toThrow();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally {vi.unstubAllGlobals();}
+  });
   it("accepts arbitrary public HTTPS provider bases and Cloudflare account endpoints", () => {
     for (const base of [
       "https://api.openai.com/v1",

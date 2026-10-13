@@ -81,3 +81,12 @@ export async function fetchPublicAiEndpoint(url: string, init: RequestInit): Pro
   assertAllowedAiEndpoint(url);
   return fetch(url, { ...init, redirect: "error", dispatcher: publicAiAgent } as RequestInit & { dispatcher: Agent });
 }
+
+/** Credential-free public website GET. Callers must validate each manual redirect.
+ * Shares the DNS-rebinding/private-address socket guard used by AI endpoints. */
+export async function fetchPublicWebsiteResource(url: string, signal: AbortSignal): Promise<Response> {
+  assertAllowedAiEndpoint(url);
+  return fetch(url, { method: "GET", redirect: "manual", credentials: "omit", cache: "no-store",
+    headers: { "User-Agent": "QurtizAIWebsiteReader/1.0", Accept: "text/html, text/plain;q=0.9" },
+    signal, dispatcher: publicAiAgent } as RequestInit & { dispatcher: Agent });
+}

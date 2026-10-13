@@ -1444,9 +1444,10 @@ describe("schedulePost — partial-schedule visibility", () => {
 
 describe("schedulePost — Auto Run Calendar policy", () => {
   const policy = { timezone: "Asia/Karachi", times: ["09:00", "12:00", "17:00"], source: "configured-fallback", fallbackTimes: ["09:00", "12:00", "17:00"], minGapMinutes: 120, maxPostsPerDay: 3 };
-  function autoDb(config: Row, occupied: Row[]) {
-    return makeFakeDb({ platformConnections: [[makeConnRow()]], contentItems: [[ITEM_ROW]],
-      contentVariants: [[VARIANT_ROW], [VARIANT_ROW], [{ status: "scheduled" }]], visualAssets: [[]],
+  function autoDb(config: Row, occupied: Row[], platform: "facebook" | "instagram" = "facebook") {
+    const variant = {...VARIANT_ROW, platform};
+    return makeFakeDb({ platformConnections: [[makeConnRow({platform})]], contentItems: [[ITEM_ROW]],
+      contentVariants: [[variant], [variant], [{ status: "scheduled" }]], visualAssets: [[]],
       workspaces: [[{ id: WORKSPACE_ID, createdBy: "user-1" }]], settings: [[{ value: config }]],
       publishingJobs: [occupied, [], []] });
   }
@@ -1462,6 +1463,30 @@ describe("schedulePost — Auto Run Calendar policy", () => {
     expect(hmInTz(policy.timezone, fake.inserts[0].values.scheduledAt as Date)).toBe("12:00");
     expect(dateIsoInTz(policy.timezone, fake.inserts[0].values.scheduledAt as Date)).toBe(day);
     expect(fake.inserts[0].values.result).toMatchObject({ schedulingSource: "configured-fallback", timezone: policy.timezone });
+  });
+  it.each(["facebook", "instagram"] as const)("fills three %s slots per day across separate runs despite a single measured hour", async platform => {
+    const occupied: Row[] = [];
+    const dates: Date[] = [];
+    const autoTiming = {...policy, times:["16:00"], source:"measured-post-performance",
+      fallbackTimes:["16:00","14:00","18:00","10:30"]};
+    for (let run = 0; run < 4; run++) {
+      const fake = autoDb({enabled:true, requireApproval:false, autoSchedule:true},[...occupied],platform);
+      mockedGetDb.mockReturnValue(fake.db as never);
+      const res = await schedulePost({workspaceId:WORKSPACE_ID,contentItemId:ITEM_ID,
+        contentVariantId:VARIANT_ID,platform,scheduledAt:new Date(Date.now()+60_000),autoTiming});
+      expect(res.ok).toBe(true);
+      const inserted = fake.inserts[0].values;
+      expect(inserted.platform).toBe(platform);
+      expect(inserted.status).toBe("pending");
+      expect(inserted.result).toMatchObject({candidateTimes:["16:00","14:00","18:00","10:30"],
+        configuredTimes:autoTiming.fallbackTimes,maxPostsPerDay:3,minGapMinutes:120});
+      dates.push(inserted.scheduledAt as Date);
+      occupied.push({scheduledAt:inserted.scheduledAt,contentItemId:`other-run-${run}`});
+    }
+    expect(new Set(dates.slice(0,3).map(d => dateIsoInTz(policy.timezone,d))).size).toBe(1);
+    expect(dates.slice(0,3).map(d => hmInTz(policy.timezone,d))).toEqual(["16:00","14:00","18:00"]);
+    expect(dateIsoInTz(policy.timezone,dates[3])).not.toBe(dateIsoInTz(policy.timezone,dates[0]));
+    expect(mockedCreatePostForBuffer).not.toHaveBeenCalled();
   });
   it.each([{ enabled: false, requireApproval: false }, { enabled: true, requireApproval: true }, { enabled: true, requireApproval: false, autoSchedule: false }])("honors changed approval/enable/scheduling settings at commit time: %j", async config => {
     const fake = autoDb(config, []); mockedGetDb.mockReturnValue(fake.db as never);

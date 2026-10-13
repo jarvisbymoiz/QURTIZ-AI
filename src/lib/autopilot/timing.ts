@@ -8,19 +8,28 @@ export function postingTimes(metrics: MetricsRow[], platform: string, format: st
   const formatRows = platformRows.filter(m => m.format === format);
   const rows = formatRows.length >= 3 ? formatRows : platformRows;
   const hours = rows.length >= 3 ? bestPostingHours(rows).filter(h => h.avgEngagement > 0 && h.posts >= 2).slice(0, 3) : [];
-  return { times: hours.length ? hours.map(h => `${String(h.hour % 24).padStart(2, "0")}:00`) : sanitizeRunTimes(fallback).length ? sanitizeRunTimes(fallback) : DEFAULT_POSTING_TIMES,
+  const configured = sanitizeRunTimes(fallback);
+  // Performance ranks preferences; it must not remove the user's other slots.
+  // A single measured hour otherwise forces every subsequent post onto a new day.
+  return { times: [...new Set([
+    ...hours.map(h => `${String(h.hour % 24).padStart(2, "0")}:00`),
+    ...(configured.length ? configured : DEFAULT_POSTING_TIMES),
+  ])],
     source: hours.length ? "measured-post-performance" : "configured-fallback" };
 }
 
 /** Try ranked slots across future local dates; never invent engagement numbers. */
 export function choosePostingSlot(policy: TimingPolicy, times: string[], occupied: Date[], now = new Date()): Date {
+  // Also expand at allocation time for saved/in-flight runs with an older,
+  // measured-only shortlist. Check every candidate on this day before advancing.
+  const candidates = [...new Set([...times, ...sanitizeRunTimes(policy.fallbackTimes)])];
   const today = dateIsoInTz(policy.timezone, now);
   const date = new Date(`${today}T12:00:00Z`);
   for (let offset = 1; offset <= 60; offset++) {
     const day = new Date(date); day.setUTCDate(date.getUTCDate() + offset);
     const iso = day.toISOString().slice(0, 10);
     if (occupied.filter(d => dateIsoInTz(policy.timezone, d) === iso).length >= policy.maxPostsPerDay) continue;
-    for (const time of times) {
+    for (const time of candidates) {
       let slot: Date;
       try { slot = parseZonedDateTime(iso, time, policy.timezone); } catch { continue; }
       if (!Number.isFinite(slot.getTime())) continue;

@@ -14,6 +14,7 @@ import { getMembership } from "@/lib/workspace";
 import { can } from "@/lib/permissions";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { summarizeBrandBrain } from "@/lib/ai/brand-summary";
+import { getBrandWebsiteContext } from "@/lib/brand-website/service";
 export { summarizeBrandBrain };
 import { appendRateLimitHint, capMessage, normalizeToolOutput, scrubCredentials } from "@/lib/ai/stream-errors";
 import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
@@ -140,7 +141,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
 
   const getBrandBrain = tool({
     description:
-      "Read the Brand Brain for the current workspace: business info, audience, brand voice, visual identity, and content rules.",
+      "Read the Brand Brain for the current workspace: business info, audience, brand voice, visual identity, content rules, and public source text from its saved website. Website reading is cached and includes actual source URLs; report any unavailable pages honestly.",
     inputSchema: z.object({}),
     execute: async () => {
       // A DB failure must surface as a tool result the agent can explain —
@@ -148,8 +149,9 @@ export function buildAgentTools(ctx: AgentToolContext) {
       try {
         const rows = await db.select().from(brands).where(eq(brands.workspaceId, ctx.workspaceId));
         const summary = summarizeBrandBrain(rows[0] ?? null);
-        await logStep("get_brand_brain", {}, { summary });
-        return { brandBrain: summary };
+        const websiteKnowledge = await getBrandWebsiteContext(ctx.workspaceId,rows[0]?.website,ctx.currentTask,ctx.abortSignal);
+        await logStep("get_brand_brain", {}, { summary, ...(websiteKnowledge?{websiteKnowledge}:{}) });
+        return { brandBrain: summary, ...(websiteKnowledge?{websiteKnowledge}:{}) };
       } catch (error) {
         const message = formatAgentToolError(error);
         await logStep("get_brand_brain", {}, { brandBrain: null, error: message });

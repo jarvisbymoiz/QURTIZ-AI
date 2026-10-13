@@ -157,12 +157,13 @@ export function AutopilotCard({
           <div className="space-y-2">
             <Label htmlFor="ap-fallback">Fallback posting slots ({timezone ?? "workspace timezone"})</Label>
             <Input id="ap-fallback" disabled={!editable || pending} value={fallbackTimes} onChange={e => setFallbackTimes(e.target.value)} placeholder="09:00, 12:00, 17:00" />
-            <p className="text-xs text-muted-foreground">Used when measured timing data is insufficient. Comma-separated HH:MM, up to 6 slots. These are preferences, not measured audience activity.</p>
+            <p className="text-xs text-muted-foreground">Measured best hours are preferred first; these slots remain available to fill the daily allowance. Comma-separated HH:MM, up to 6 slots, subject to the minimum gap and existing Calendar posts.</p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-2"><Label htmlFor="ap-gap">Minimum posting gap (minutes)</Label><Input id="ap-gap" type="number" min={30} max={1440} disabled={!editable || pending} value={options.minGapMinutes} onChange={e => setOptions({...options,minGapMinutes:Number(e.target.value)})} /></div>
             <div className="space-y-2"><Label htmlFor="ap-day-max">Posts per platform per day</Label><Input id="ap-day-max" type="number" min={1} max={6} disabled={!editable || pending} value={options.maxPostsPerDay} onChange={e => setOptions({...options,maxPostsPerDay:Number(e.target.value)})} /></div>
           </div>
+          <p className="text-xs text-muted-foreground">This is a daily scheduling limit. Each run creates the selected Posts per run; three run times with one post per run create up to three posts. Ready posts start from tomorrow, filling available slots before moving to a later day.</p>
 
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div>

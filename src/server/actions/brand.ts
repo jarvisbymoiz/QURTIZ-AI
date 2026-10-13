@@ -13,6 +13,7 @@ import {
   voiceSchema,
 } from "@/lib/validation";
 import { requireRoleForActiveWorkspace } from "./workspace";
+import { ensureWebsiteKnowledge } from "@/lib/brand-website/service";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -65,6 +66,12 @@ export async function updateBusinessInfoAction(formData: FormData): Promise<Acti
     })
     .where(eq(brands.workspaceId, ctx.workspaceId));
 
+  // Website knowledge is supplementary. Failed reads must not roll back or
+  // misreport a successful save of the user's own business details.
+  if (safeHttpUrl(d.website)) {
+    try {await ensureWebsiteKnowledge(ctx.workspaceId,safeHttpUrl(d.website));}
+    catch {console.warn("[brand-website] save-time read unavailable",{code:"storage_error"});}
+  }
   revalidatePath("/brand-brain");
   revalidatePath("/dashboard");
   return { ok: true };

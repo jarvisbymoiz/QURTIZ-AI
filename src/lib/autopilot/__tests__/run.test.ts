@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { contentItems, contentVariants, imageModePreferences, jobs, researchItems, settings, visualAssets } from "@/db/schema";
+import { brands, contentItems, contentVariants, imageModePreferences, jobs, researchItems, settings, visualAssets } from "@/db/schema";
 import { autopilotSettingsSchema } from "../schema";
-const mocks = vi.hoisted(() => ({ db:vi.fn(), context:vi.fn(), research:vi.fn(), plan:vi.fn(), generate:vi.fn(), approve:vi.fn(), schedule:vi.fn(), media:vi.fn(), relay:vi.fn(), apiImage:vi.fn() }));
+const mocks = vi.hoisted(() => ({ db:vi.fn(), context:vi.fn(), website:vi.fn(), research:vi.fn(), plan:vi.fn(), generate:vi.fn(), approve:vi.fn(), schedule:vi.fn(), media:vi.fn(), relay:vi.fn(), apiImage:vi.fn() }));
 vi.mock("@/db",()=>({getDb:mocks.db}));
 vi.mock("ai",()=>({generateText:mocks.plan}));
 vi.mock("@/lib/jobs/workflows",()=>({buildAutopilotRunContext:mocks.context}));
@@ -9,6 +9,7 @@ vi.mock("@/lib/jobs/boss",()=>({getBoss:vi.fn(),QUEUES:{autopilotRun:"autopilot-
 vi.mock("@/lib/ai/config",()=>({hasWorkspaceAIConfig:async()=>true,getWorkspaceTextModel:async()=>({model:{}})}));
 vi.mock("@/lib/ai/content",()=>({AI_GENERATION_TIMEOUT_MS:120000,generateAndPersistContent:mocks.generate}));
 vi.mock("@/lib/ai/research",()=>({researchTopics:mocks.research}));
+vi.mock("@/lib/brand-website/service",()=>({getBrandWebsiteContext:mocks.website}));
 vi.mock("@/lib/visuals/generate",()=>({generateVisual:mocks.apiImage}));
 vi.mock("@/lib/companion/image-jobs",()=>({enqueueCompanionImage:mocks.relay}));
 vi.mock("@/lib/supabase/service",()=>({createServiceClient:()=>({})}));
@@ -25,7 +26,8 @@ function fixture(requireApproval=true) {
   const updates: Row[]=[];
   let imagePreference: Row | null = null;
   let visualStored=false;
-  const selectRows = (table:unknown) => table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?(config.generateImages&&!visualStored?[]:[{kind:"upload",mimeType:"image/png"}]):table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:table===imageModePreferences?(imagePreference?[imagePreference]:[]):[];
+  let website:string | null=null;
+  const selectRows = (table:unknown) => table===brands?(website?[{businessName:"Studio",website,voicePresets:[]}]:[]):table===settings?[savedSettings]:table===contentItems?[...items.values()].slice(-1):table===contentVariants?[{id:"v",platform:"facebook",format:"single_image",status:"ready_for_review",slides:[]}]:table===visualAssets?(config.generateImages&&!visualStored?[]:[{kind:"upload",mimeType:"image/png"}]):table===researchItems?[{topic:"One research opportunity",summary:"Source summary",sourceUrl:null}]:table===imageModePreferences?(imagePreference?[imagePreference]:[]):[];
   const db = {
     select:()=>({from:(table:unknown)=>({where:()=>{
       const result=Promise.resolve(selectRows(table)) as Promise<Row[]> & {limit:()=>Promise<Row[]>};
@@ -46,11 +48,12 @@ function fixture(requireApproval=true) {
     return {itemId:args.contentItemId,qa:{passed:true}};
   };
   mocks.generate.mockImplementation(persist);
-  return {job,items,config,savedSettings,updates,persist,setImagePreference:(value:Row)=>{imagePreference=value;},setVisualStored:()=>{visualStored=true;}};
+  return {job,items,config,savedSettings,updates,persist,setWebsite:(value:string)=>{website=value;},setImagePreference:(value:Row)=>{imagePreference=value;},setVisualStored:()=>{visualStored=true;}};
 }
 beforeEach(()=>{
   vi.clearAllMocks();
   mocks.context.mockResolvedValue({text:"Real data unavailable",metrics:[],metricsCount:0,bestHours:[]});
+  mocks.website.mockResolvedValue("");
   mocks.research.mockResolvedValue({ok:true,insertedIds:["research-one"]});
   mocks.plan.mockResolvedValue({text:'["Educational brand topic","Practical brand topic","Brand customer topic"]'});
   mocks.schedule.mockResolvedValue({ok:true});
@@ -58,6 +61,15 @@ beforeEach(()=>{
   mocks.relay.mockReset(); mocks.apiImage.mockReset();
 });
 describe("durable Auto Run execution",()=>{
+  it("uses sourced brand website knowledge in its strategy without overwriting configured brand or scheduling",async()=>{
+    const f=fixture();f.setWebsite("https://brand.example.org/");
+    mocks.website.mockResolvedValue('Public website reference data: document formatting. Source: https://brand.example.org/services/');
+    await executeAutoRun("job-1",{serverlessSlice:true});
+    expect(mocks.website).toHaveBeenCalledWith("ws","https://brand.example.org/","brand content strategy");
+    expect(mocks.plan).toHaveBeenCalledWith(expect.objectContaining({prompt:expect.stringContaining("https://brand.example.org/services/")}));
+    expect(f.job.result).toMatchObject({topics:expect.any(Array)});
+    expect(mocks.generate).not.toHaveBeenCalled();expect(mocks.schedule).not.toHaveBeenCalled();
+  });
   it("selects eligible database work on Vercel without starting pg-boss", async()=>{
     const queued = [{id:"deferred",result:{nextAttemptAt:new Date(Date.now()+300_000).toISOString()}},
       {id:"ready",result:{nextAttemptAt:new Date(Date.now()-1_000).toISOString()}}];

@@ -9,6 +9,8 @@ import { VoiceForm } from "./voice-form";
 import { VisualForm } from "./visual-form";
 import { RulesForm } from "./rules-form";
 import { MemoryPanel } from "./memory-panel";
+import { WebsiteKnowledgeCard } from "./website-knowledge-card";
+import type { WebsiteKnowledgeView } from "@/lib/brand-website/knowledge";
 
 type Brand = typeof brands.$inferSelect | null;
 type Memory = typeof brandMemory.$inferSelect;
@@ -20,12 +22,14 @@ export function BrandBrainTabs({
   assets,
   assetUrls,
   editable,
+  websiteKnowledge,
 }: {
   brand: Brand;
   memories: Memory[];
   assets: Asset[];
   assetUrls: Record<string, string | null>;
   editable: boolean;
+  websiteKnowledge?: WebsiteKnowledgeView | null;
 }) {
   return (
     <Tabs defaultValue="business">
@@ -37,8 +41,9 @@ export function BrandBrainTabs({
         <TabsTrigger value="rules">Content rules</TabsTrigger>
         <TabsTrigger value="memory">Memory ({memories.length})</TabsTrigger>
       </TabsList>
-      <TabsContent value="business" className="mt-4">
+      <TabsContent value="business" className="mt-4 space-y-4">
         <BusinessForm brand={brand} editable={editable} />
+        <WebsiteKnowledgeCard website={brand?.website} knowledge={websiteKnowledge ?? null} editable={editable} />
       </TabsContent>
       <TabsContent value="audience" className="mt-4">
         <AudienceForm brand={brand} editable={editable} />
