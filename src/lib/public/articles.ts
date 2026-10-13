@@ -8,6 +8,8 @@ export type ArticleSection = {
   link?: { label: string; href: string };
 };
 export type Article = {
+  /** Omitted means published for existing entries. Drafts never enter public discovery. */
+  status?: "published" | "draft";
   slug: string;
   title: string;
   description: string;
@@ -259,12 +261,15 @@ const articles: Article[] = [
   },
 ];
 export function getArticles(): Article[] {
-  return [...articles].sort((a, b) =>
+  return articles.filter(isPublishedArticle).sort((a, b) =>
     b.publishedAt.localeCompare(a.publishedAt),
   );
 }
 export function getArticle(slug: string): Article | undefined {
-  return articles.find((article) => article.slug === slug);
+  return getArticles().find((article) => article.slug === slug);
+}
+export function isPublishedArticle(article: Article): boolean {
+  return article.status !== "draft";
 }
 export function getRelatedArticles(article: Article, limit = 3): Article[] {
   const relevance = (candidate: Article) =>

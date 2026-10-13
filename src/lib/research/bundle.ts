@@ -36,7 +36,7 @@ const DEFAULT_TREND_STRATEGIES: ResearchStrategy[] = ["trends", "news", "communi
 export async function trendSourceBundle(
   ctx: { workspaceId: string; userId: string },
   query: string,
-  opts?: { strategies?: ResearchStrategy[]; countPerStrategy?: number },
+  opts?: { strategies?: ResearchStrategy[]; countPerStrategy?: number; signal?: AbortSignal },
 ): Promise<TrendSourceBundle> {
   const strategies = opts?.strategies ?? DEFAULT_TREND_STRATEGIES;
   const countPerStrategy = opts?.countPerStrategy ?? 6;
@@ -49,6 +49,7 @@ export async function trendSourceBundle(
         query,
         strategy,
         count: countPerStrategy,
+        signal: opts?.signal,
       }).then((outcome) => ({ strategy, outcome })),
     ),
   );
@@ -80,7 +81,7 @@ export async function trendSourceBundle(
   // Diagnostic: which source classes contributed / failed. No keys, no
   // private tenant context — the query is truncated for log hygiene.
   console.info(
-    `[research] trend bundle "${query.slice(0, 120)}" strategies=${strategies.join(",")} succeeded=${succeeded.join(",") || "-"} failures=${failures
+    `[research] trend bundle strategies=${strategies.join(",")} succeeded=${succeeded.join(",") || "-"} failures=${failures
       .map((f) => `${f.strategy}:${f.reason}`)
       .join(",") || "-"} sources=${sources.length}`,
   );

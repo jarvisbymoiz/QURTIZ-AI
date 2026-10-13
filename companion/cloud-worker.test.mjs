@@ -8,7 +8,7 @@ import { startCloudWorker } from "./cloud-worker.mjs";
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
 
-test("outbound worker claims once, uploads binary, and completes without cloud image JSON", async () => {
+test("outbound worker sends five ordered reference images, uploads binary, and completes without cloud image JSON", async () => {
   const root = mkdtempSync(join(tmpdir(), "qurtiz-cloud-worker-"));
   const statePath = join(root, "session.json");
   const origin = "https://qurtiz-ai.vercel.app";
@@ -25,10 +25,11 @@ test("outbound worker claims once, uploads binary, and completes without cloud i
     if (url.endsWith("/api/companion/jobs/claim")) {
       claims += 1;
       return Response.json({ job: claims === 1 ? { id: "job-1", claimToken: "claim-token", prompt: "A blue circle",
-        size: "1024x1024", quality: "low", references: [] } : null });
+        size: "1024x1024", quality: "low", references: [{ url: "https://example.supabase.co/logo" }, { url: "https://example.supabase.co/avatar" }, ...[0,1,2].map(index => ({ url: `https://example.supabase.co/design-${index}` }))] } : null });
     }
     if (url.endsWith("/api/companion/jobs/job-1/state")) return Response.json({ status: "generating" });
-    if (url.endsWith("/v1/images/generations")) return Response.json({ data: [{ b64_json: png.toString("base64") }] });
+    if (url === "https://example.supabase.co/logo" || url === "https://example.supabase.co/avatar" || url.startsWith("https://example.supabase.co/design-")) return new Response(png);
+    if (url.endsWith("/v1/images/edits")) return Response.json({ data: [{ b64_json: png.toString("base64") }] });
     if (url.endsWith("/api/companion/jobs/job-1/upload-ticket")) {
       return Response.json({ path: "workspace/visuals/job-1-raw", uploadUrl: "https://example.supabase.co/upload" });
     }
@@ -39,7 +40,9 @@ test("outbound worker claims once, uploads binary, and completes without cloud i
   const stop = startCloudWorker({ statePath, port: 8788, origins: [origin] });
   try {
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.equal(seen.filter(row => row.url.endsWith("/v1/images/generations")).length, 1);
+    const generated = seen.filter(row => row.url.endsWith("/v1/images/edits"));
+    assert.equal(generated.length, 1);
+    assert.equal(JSON.parse(generated[0].body).images.length, 5);
     assert.equal(seen.filter(row => row.url.endsWith("/api/companion/jobs/job-1/complete")).length, 1);
     const upload = seen.find(row => row.url === "https://example.supabase.co/upload");
     assert.equal(upload.method, "PUT");

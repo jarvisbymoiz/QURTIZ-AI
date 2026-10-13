@@ -17,6 +17,8 @@ import { getMembership, getSessionUser } from "@/lib/workspace";
 import { and, eq } from "drizzle-orm";
 import { getPublicAppUrl } from "@/lib/app-url";
 
+import { can } from "@/lib/permissions";
+
 export const dynamic = "force-dynamic";
 
 /** Buffer OAuth callback (provider="buffer"). Verifies the signed state marker
@@ -97,9 +99,9 @@ export async function GET(request: NextRequest) {
     );
   }
   const membership = await getMembership(sessionUser.id, scope.workspaceId);
-  if (!membership) {
+  if (!membership || !can(membership.role, "workspace:manage")) {
     return NextResponse.json(
-      { error: "You are not a member of this workspace." },
+      { error: "Only workspace administrators can connect accounts." },
       { status: 403 },
     );
   }

@@ -4,6 +4,11 @@ import { buildSystemPrompt } from "@/lib/ai/agent";
 import { buildContentSystemPrompt } from "@/lib/ai/content";
 
 describe("AGENT_CORE.md", () => {
+  it("includes caption craft on edit turns without burdening greetings", () => {
+    expect(agentCoreForTask("Improve this caption")).toContain("Caption edits need vivid hooks");
+    expect(agentCoreForTask("Write a post about design")).toContain("### High-Engagement Social Caption Rule");
+    expect(agentCoreForTask("Hi")).not.toContain("### High-Engagement Social Caption Rule");
+  });
   it("is the single complete permanent creative instruction source", () => {
     expect(AGENT_CORE_INSTRUCTION.length).toBeGreaterThan(3000);
     expect(AGENT_CORE_INSTRUCTION).toContain("social media strategist");

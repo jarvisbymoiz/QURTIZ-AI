@@ -5,6 +5,24 @@ import { generateImage } from "@/lib/ai/image";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OpenAI-compatible image adapter capability negotiation", () => {
+  it("uses OpenRouter's discovered native reference capacity and preserves all five inputs", async () => {
+    const image = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#123456" } }).png().toBuffer();
+    const fetchMock = vi.fn(async (url: string) => url.endsWith("/endpoints")
+      ? Response.json({ endpoints: [{ provider_tag: "reference-provider", supported_parameters: { input_references: { type: "range", max: 5 } } }] })
+      : Response.json({ data: [{ b64_json: image.toString("base64") }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const references = Array.from({ length: 5 }, (_, index) => ({ mimeType: "image/png", base64: Buffer.from(`ref-${index}`).toString("base64") }));
+    const args = { provider: "openrouter" as const, apiKey: "test-key", modelId: "arbitrary/image-model", baseUrl: null, prompt: "Brand-aware composition", references };
+    expect((await generateImage(args)).ok).toBe(true);
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls[1][0]).toBe("https://openrouter.ai/api/v1/images");
+    const body = JSON.parse(String(calls[1][1].body));
+    expect(body.input_references.map((ref: { image_url: { url: string } }) => ref.image_url.url)).toEqual(references.map(ref => `data:${ref.mimeType};base64,${ref.base64}`));
+    expect(body.provider).toEqual({ only: ["reference-provider"], allow_fallbacks: false });
+    fetchMock.mockClear();
+    expect(await generateImage({ ...args, references: [...references, references[0]] })).toMatchObject({ ok: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
   it("uses image edits when the selected endpoint accepts a generation reference", async () => {
     const image = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#123456" } }).png().toBuffer();
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ b64_json: image.toString("base64") }] }),
@@ -20,18 +38,27 @@ describe("OpenAI-compatible image adapter capability negotiation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to generation when edits are unavailable without losing the visual brief", async () => {
-    const image = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#abcdef" } }).png().toBuffer();
-    const fetchMock = vi.fn(async (url: string) => url.endsWith("/images/edits")
-      ? new Response("", { status: 404 })
-      : new Response(JSON.stringify({ data: [{ b64_json: image.toString("base64") }] }), { headers: { "Content-Type": "application/json" } }));
+  it("does not silently drop references when the configured endpoint rejects edits", async () => {
+    const fetchMock = vi.fn(async () => new Response("", { status: 404 }));
     vi.stubGlobal("fetch", fetchMock);
     const result = await generateImage({ provider: "openai", apiKey: "test-key", modelId: "new-model",
-      baseUrl: null, prompt: "Precise product photograph", references: [{ mimeType: "image/png", base64: image.toString("base64") }] });
-    expect(result.ok).toBe(true);
-    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
-    expect(calls.map(([url]) => url)).toEqual(["https://api.openai.com/v1/images/edits", "https://api.openai.com/v1/images/generations"]);
-    expect(JSON.parse(String(calls[1][1].body)).prompt).toBe("Precise product photograph");
+      baseUrl: null, prompt: "Precise product photograph", references: [{ mimeType: "image/png", base64: "aGVsbG8=" }] });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("No references were silently discarded") });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends logo, identity and three designs in attachment order", async () => {
+    const image = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#abcdef" } }).png().toBuffer();
+    const fetchMock = vi.fn(async () => Response.json({ data: [{ b64_json: image.toString("base64") }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const roles = ["logo", "profileAvatar", "designReference", "designReference", "designReference"] as const;
+    const references = roles.map((role, index) => ({ role, mimeType: "image/png", base64: Buffer.from(`pixels-${index}`).toString("base64") }));
+    expect((await generateImage({ provider: "custom", apiKey: "test-key", modelId: "configured-model", baseUrl: "https://images.example.com/v1", prompt: "role-aware brief", references })).ok).toBe(true);
+    const form = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as FormData;
+    const files = form.getAll("image[]") as File[];
+    expect(files).toHaveLength(5);
+    expect(await Promise.all(files.map(file => file.text()))).toEqual(roles.map((_, index) => `pixels-${index}`));
+    expect(files.every(file => file.type === "image/png")).toBe(true);
   });
 
   it("redacts provider-reflected API keys from image failures", async () => {

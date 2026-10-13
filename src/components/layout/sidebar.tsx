@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import Link from "next/link";
+import "@/app/(app)/app-theme.css";
 import { QurtizMark } from "@/components/brand/mark";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -99,16 +100,16 @@ export function Sidebar({
   }
 
   const navigation = (
-    <aside className="flex h-full w-full min-h-0 flex-col border-r bg-sidebar text-sidebar-foreground" onClick={(event) => {
+    <aside className="qurtiz-sidebar flex h-full w-full min-h-0 flex-col border-r bg-sidebar text-sidebar-foreground" onClick={(event) => {
       if ((event.target as HTMLElement).closest("a")) setMobileOpen(false);
     }}>
-      <div className="flex h-14 items-center gap-2 border-b px-4">
+      <div className="app-brand flex h-14 items-center gap-2 border-b px-4">
         <QurtizMark className="size-7" />
         <div className="font-semibold tracking-tight">QURTIZ AI</div>
       </div>
 
       {/* Workspace switcher */}
-      <div className="p-3">
+      <div className="app-workspace-switcher p-3">
         <DropdownMenu>
           <DropdownMenuTrigger
             render={
@@ -122,7 +123,7 @@ export function Sidebar({
             <span className="truncate">{activeWorkspaceName}</span>
             <ChevronDown className="size-4 shrink-0 opacity-50" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
+          <DropdownMenuContent align="start" className="qurtiz-app-popover w-56">
             <DropdownMenuGroup>
             <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
             {workspaces.map((w) => (
@@ -153,7 +154,8 @@ export function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-1 overflow-y-auto px-3 pb-3 scrollbar-hide" aria-label="Main">
+      <nav className="app-navigation flex-1 space-y-1 overflow-y-auto px-3 pb-3 scrollbar-hide" aria-label="Main">
+        <p className="app-nav-label" aria-hidden>WORKSPACE</p>
         {NAV_MAIN.map((item) => {
           const active =
             item.href === "/dashboard" ? pathname === "/dashboard" : pathname.startsWith(item.href);
@@ -163,7 +165,7 @@ export function Sidebar({
               href={item.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+                "app-nav-link flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
                 active
                   ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
                   : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
@@ -216,7 +218,7 @@ export function Sidebar({
             </span>
             <ChevronDown className="size-4 shrink-0 opacity-50" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
+          <DropdownMenuContent align="start" className="qurtiz-app-popover w-56">
             <DropdownMenuItem render={<Link href="/settings" />}>Settings</DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={signOut} variant="destructive">
@@ -230,12 +232,12 @@ export function Sidebar({
   );
   return <>
     <div className="hidden h-full w-64 shrink-0 lg:block">{navigation}</div>
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b px-3 lg:hidden">
+    <header className="app-mobile-header flex h-14 shrink-0 items-center gap-3 border-b px-3 lg:hidden">
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetTrigger render={<Button variant="ghost" size="icon" aria-label="Open navigation" />}>
           <Menu aria-hidden className="size-5" />
         </SheetTrigger>
-        <SheetContent side="left" className="w-[min(20rem,90vw)] gap-0" aria-describedby={undefined}>
+        <SheetContent side="left" className="qurtiz-app-popover w-[min(20rem,90vw)] gap-0" aria-describedby={undefined}>
           <SheetTitle className="sr-only">Application navigation</SheetTitle>
           {navigation}
         </SheetContent>

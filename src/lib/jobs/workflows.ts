@@ -20,10 +20,10 @@ import {
 } from "@/db/schema";
 import { QUEUES } from "./boss";
 import { claimScheduledPublishJob } from "./publish-claim";
-import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
+import { syncDueInsights } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import type { PgBoss } from "pg-boss";
-import { generateAndPersistContent } from "@/lib/ai/content";
+import { AIContentParseError, generateAndPersistContent } from "@/lib/ai/content";
 import { publishNow, readCommentState, reconcileBufferDeliveries, type PublishResult } from "@/lib/publishing/service";
 import { resolvePublishProviderForPlatform } from "@/lib/publish/provider";
 import { buildPublishedNotification, buildPublishFailedNotification, type PublishedDestination } from "@/lib/notifications/payload";
@@ -438,7 +438,7 @@ export async function bulkGenerate(jobId: string): Promise<void> {
 /**
  * Campaign generation: produce content for each day of the arc.
  */
-export async function generateCampaign(campaignId: string): Promise<void> {
+export async function generateCampaign(campaignId: string, options: { oneDay?: boolean } = {}): Promise<void> {
   const db = getDb();
   const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
   if (!campaign) return;
@@ -479,11 +479,12 @@ export async function generateCampaign(campaignId: string): Promise<void> {
   // updated so the UI shows real progress and a truthful terminal state.
   let generated = days.length - pending.length;
   let failed = 0;
+  let failureReason: string | null = null;
   if (campaign.jobId) {
     await db.update(jobs).set({ progress: generated, updatedAt: new Date() }).where(eq(jobs.id, campaign.jobId));
   }
 
-  for (const day of pending) {
+  for (const day of options.oneDay ? pending.slice(0, 1) : pending) {
     const [current] = await db.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, campaignId));
     if (!current || current.status !== "generating") {
       await db.update(jobs).set({ status: "cancelled", progress: generated, result: { generated, failed }, updatedAt: new Date() })
@@ -494,9 +495,11 @@ export async function generateCampaign(campaignId: string): Promise<void> {
       const { itemId } = await generateAndPersistContent({
         workspaceId: campaign.workspaceId,
         userId: campaign.createdBy ?? campaign.workspaceId,
+        contentItemId: day.id,
+        abortSignal: options.oneDay ? AbortSignal.timeout(150000) : undefined,
         input: {
           topic: "Campaign \"" + campaign.name + "\" - Day " + day.dayIndex + ": " + day.theme + (campaign.offer ? " (offer: " + campaign.offer + ")" : ""),
-          objective: "Campaign day " + day.dayIndex + "/" + campaign.durationDays + ": " + day.theme,
+          objective: "Campaign day " + day.dayIndex + "/" + campaign.durationDays + ": " + day.theme + ". Goal: " + (campaign.goal ?? "awareness") + ". Audience: " + (campaign.audience ?? "brand audience") + ". CTA: " + (campaign.cta ?? "brand default") + ". Do not invent testimonials, discounts, scarcity or results.",
           platforms,
           preferredFormat: null,
         },
@@ -508,8 +511,23 @@ export async function generateCampaign(campaignId: string): Promise<void> {
       }
     } catch (e) {
       failed++;
+      failureReason = e instanceof AIContentParseError
+        ? `AI response failed content validation: ${e.diagnostics.issues}`
+        : e instanceof Error && e.name === "TimeoutError"
+          ? "Campaign generation exceeded its execution time limit."
+          : "Campaign content generation failed. Review the provider failure in the agent run history.";
       console.error("[campaign] day failed", e instanceof Error ? e.message : e);
     }
+  }
+
+  if (options.oneDay && generated < days.length) {
+    const prior = (claimed.result ?? {}) as { sliceFailures?: number };
+    const sliceFailures = failed ? (prior.sliceFailures ?? 0) + 1 : 0;
+    await db.update(jobs).set({ status: sliceFailures >= 3 ? "failed" : "queued", progress: generated,
+      result: { generated, failed, sliceFailures }, error: failureReason, updatedAt: new Date() })
+      .where(and(eq(jobs.id, campaign.jobId), eq(jobs.status, "running")));
+    if (sliceFailures >= 3) await db.update(campaigns).set({ status: "cancelled", updatedAt: new Date() }).where(eq(campaigns.id, campaignId));
+    return;
   }
 
   if (generated === 0) {
@@ -550,6 +568,14 @@ export async function generateCampaign(campaignId: string): Promise<void> {
     body: generated + " of " + days.length + " posts generated" + (failed > 0 ? " — " + failed + " failed." : "."),
     link: "/campaigns",
   });
+}
+
+/** One durable campaign day per serverless wake, sharing the worker claim. */
+export async function runQueuedCampaign(): Promise<void> {
+  await recoverStuckGenerationJobs();
+  const [job] = await getDb().select().from(jobs).where(and(eq(jobs.type, "campaign"), eq(jobs.status, "queued"))).orderBy(asc(jobs.updatedAt)).limit(1);
+  const id = (job?.input as { campaignId?: string } | null)?.campaignId;
+  if (id) await generateCampaign(id, { oneDay: true });
 }
 
 
@@ -787,6 +813,8 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
     // phantom "running" rows forever.
     const { recoverStaleChatRuns } = await import("@/lib/ai/chat-persistence");
     const recovered = await recoverStaleChatRuns();
+    const { workspaceDeletionTick } = await import("@/lib/workspace-deletion");
+    await workspaceDeletionTick();
     if (recovered > 0) {
       console.log(`[chat-run-sweep] recovered ${recovered} stale chat run(s)`);
     }
@@ -820,27 +848,7 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
     }
   });
   await boss.work(QUEUES.syncInsights, async () => {
-    // The cron schedule passes workspace scoping by iterating all connected
-    // workspaces via platform_connections (service-style scan).
-    const { getDb } = await import("@/db");
-    const { platformConnections } = await import("@/db/schema");
-    const db = getDb();
-    const conns = await db
-      .selectDistinct({ workspaceId: platformConnections.workspaceId })
-      .from(platformConnections)
-      .where(eq(platformConnections.status, "connected"));
-    for (const row of conns) {
-      try {
-        const result = await syncInsightsForWorkspace(row.workspaceId);
-        if (result.errors.length > 0) {
-          console.error(`[sync-insights] workspace ${row.workspaceId}: ${result.synced} synced, ${result.errors.length} failed — ${result.errors.slice(0, 3).join("; ")}`);
-        } else if (result.synced > 0) {
-          console.log(`[sync-insights] workspace ${row.workspaceId}: ${result.synced} post(s) synced`);
-        }
-      } catch (e) {
-        console.error("[sync-insights]", e instanceof Error ? e.message : e);
-      }
-    }
+    await syncDueInsights();
   });
   await boss.work(QUEUES.autopilotLoop, async () => {
     await autopilotLoop();

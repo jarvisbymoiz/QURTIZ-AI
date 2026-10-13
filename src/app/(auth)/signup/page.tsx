@@ -1,5 +1,6 @@
 "use client";
 
+import { signupOutcome } from "@/lib/supabase/signup-result";
 import { useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -15,30 +16,36 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
+  const [signupError, setSignupError] = useState<{ message: string; existing: boolean } | null>(null);
 
   async function handleSignup(e: React.FormEvent) {
     e.preventDefault();
     if (busy) return;
     setBusy(true);
+    setSignupError(null);
     try {
       const supabase = createClient();
       const origin = getPublicAppUrl();
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: email.trim(),
         password,
         options: { emailRedirectTo: `${origin}/auth/callback` },
       });
-      if (error) {
-        toast.error(error.message);
+      const outcome = signupOutcome({ data, error });
+      if (outcome.kind === "error" || outcome.kind === "existing") {
+        setSignupError({ message: outcome.message, existing: outcome.kind === "existing" });
+        toast.error(outcome.message);
         return;
       }
-      if (data.session) {
+      if (outcome.kind === "signed-in") {
         window.location.href = "/dashboard";
         return;
       }
       setEmailSent(true);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Signup failed.");
+      const message = err instanceof Error ? err.message : "Signup failed.";
+      setSignupError({ message, existing: false });
+      toast.error(message);
     } finally {
       setBusy(false);
     }
@@ -50,8 +57,8 @@ export default function SignupPage() {
         <CardHeader>
           <CardTitle className="text-xl">Check your inbox</CardTitle>
           <CardDescription>
-            We sent a confirmation link to <strong>{email}</strong>. Click it to
-            activate your account, then sign in.
+            Check <strong>{email.trim()}</strong> for a confirmation link, including
+            your spam folder. If you already have an account, sign in instead.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -77,7 +84,7 @@ export default function SignupPage() {
               autoComplete="email"
               required
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); setSignupError(null); }}
               placeholder="you@example.com"
             />
           </div>
@@ -90,10 +97,16 @@ export default function SignupPage() {
               required
               minLength={8}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => { setPassword(e.target.value); setSignupError(null); }}
               placeholder="At least 8 characters"
             />
           </div>
+          {signupError && (
+            <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+              <p>{signupError.message}</p>
+              {signupError.existing && <Link href="/login" className="mt-2 inline-block font-medium underline underline-offset-4">Sign in to your account</Link>}
+            </div>
+          )}
           <Button type="submit" className="w-full" disabled={busy}>
             {busy ? "Creating account…" : "Create account"}
           </Button>

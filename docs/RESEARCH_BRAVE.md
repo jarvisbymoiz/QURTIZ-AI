@@ -52,10 +52,10 @@ signals), `news` (past week), and `community` (Reddit) — URL-deduplicated,
 partial-success tolerant, and failures are named per source class.
 
 **Diagnostics.** Development logs emit one structured `[research]` line
-per event: tool selected, public query (truncated), strategy, region,
+per event: tool selected, strategy, region,
 freshness, HTTP status, result count, `cache hit` / `dedupe join`,
 blocked reasons (workspace rate limit, global QPS, monthly plan cap),
-provider error message, and fallback attempts (including the Gemini
+controlled provider error reason, and fallback attempts (including the Gemini
 grounding fallback in the Research Lab path). No API key, headers, or
 tenant-private context are ever logged. `/api/health` additionally
 reports `BRAVE_SEARCH_API_KEY` as a presence boolean (value never
@@ -81,7 +81,7 @@ returned), so env loading is verifiable at runtime.
   recorded against them (`research_usage_events`, cascades with the
   workspace, server-only grants).
 - The shared result cache stores **only normalized public web results**,
-  keyed by `strategy + normalized query + region + language + freshness`.
+  keyed by `strategy + normalized query + region + language + freshness + count`.
   It never keys on or contains Brand Brain, memory, niche context, or any
   tenant identity. Different workspaces asking the same public question
   may share the anonymous cached answer — that is deliberate cost control.
@@ -111,3 +111,34 @@ quotas). Unknown plans degrade to `free` — the most conservative tier.
   dropped (logged warning) and monthly caps fail open.
 - Missing/invalid `BRAVE_SEARCH_API_KEY` = honest `provider_unavailable`
   results; never a crash.
+
+
+## Agent search request contract (October 2026)
+
+The existing tool registry owns execution: `web_search` calls ResearchService and Brave, independently of the selected LLM. Each chat step derives its attached schemas and authoritative availability instructions from the same active tool names. Search stays attached on every step, including creation, edits, greetings and after unrelated discovery. Compact search schema descriptions preserve the small-model budget; no intent regex decides search availability. Missing capabilities require discovery before invocation. Brand Brain, persistent memory and chat history remain unchanged.
+
+Brave uses GET `https://api.search.brave.com/res/v1/web/search`, URLSearchParams, no body, and a server-only `X-Subscription-Token` header. Validate queries (600 characters/75 words maximum), integer count 1–20, supported search languages and freshness before networking. Normalize supported countries; valid countries without a localized Brave index (including PK) use `ALL`, which means worldwide rather than localized results. Do not use UI locales such as en-US as search_lang.
+
+Reproduced production usage record: query `ChatGPT 6.1 Sol Astra level model low cost`, country PK, language en, freshness pw, HTTP 422. Brave's validation response rejects unsupported search-country values. HTTP 400/422 yields invalid_request with whitelisted validation field names only; no automatic retry, raw response, private arguments or credentials. Bounded retries remain for 5xx/transport failures.
+
+Run opt-in real provider verification with RUN_LIVE_TESTS=true and RUN_LIVE_SEARCH=true: `npx vitest run src/lib/ai/__tests__/web-search-provider.live.test.ts`. This reads configured providers, makes real LLM/Brave calls and records normal research usage; it does not create posts or publish. It verifies each distinct configured provider without changing workspace configuration.
+
+## Search hardening and verification — October 5, 2026
+
+Chat search is read-only (`brand:read`), and awaits normalization of the actual tool output. Cancellation ends the caller's run without aborting a shared anonymous Brave request needed by another workspace. Every provider request still has its own bounded timeout. Malformed HTTP-200 payloads fail as response errors, without transient retries. Logs omit queries and arbitrary provider messages; registry, execution, result count and continuation stage are recorded with controlled reasons.
+
+Explicit native-tool incompatibility enables a validated JSON decision through the same configured LLM, then the existing Qurtiz search tool and model continuation. Authentication, quota, missing registry tools and transport errors do not activate that protocol. No alternate model is hard-coded. Daily token/request quota and billing exhaustion are non-retryable; ordinary transient throttling and server errors retain SDK retries.
+
+BRAVE_SEARCH_API_KEY is configured server-side in local, Preview and Production. Preview was missing the key and was provisioned as a sensitive Vercel environment variable. No client variable or workspace credential setting was added.
+
+Verification: the configured model completed a real streamed search with ten Brave sources. Current-news and niche research also completed with real source links. A broader multiple-source answer omitted an exact source URL; this remains an unsuccessful citation verification, not a claimed pass. The rerun and the actual localhost Chat run reached Brave HTTP 200/ten results, then model continuation hit the configured provider's daily TPD quota. Production and Preview builds succeeded, but authenticated deployed Chat verification is pending Production sign-in and sufficient provider quota. Unsupported-native-tool protocol, cancellation isolation, schemas, output normalization and malformed responses are covered by regression tests; other providers are not claimed live-verified without configured credentials.
+
+Opt-in multi-turn test (real provider charges/usage): set RUN_LIVE_TESTS=true and RUN_LIVE_SEARCH_JOURNEY=true, then run `npx vitest run src/lib/ai/__tests__/search-journey.live.test.ts`. It performs public read-only research and a follow-up/non-search conversation, without publishing or modifying content.
+
+### Files changed in this Web Search pass
+
+Runtime: `src/app/api/chat/route.ts`, `src/lib/ai/agent.ts`, `src/lib/ai/chat-tools.ts`, `src/lib/ai/openai-compatible.ts`, `src/lib/ai/search-compatible-model.ts` (new), `src/lib/ai/search-tool.ts`, `src/lib/ai/tools.ts`, `src/lib/research/brave.ts`, `src/lib/research/service.ts`.
+
+Verification: `src/lib/ai/__tests__/openai-compatible.test.ts`, `src/lib/ai/__tests__/search-compatible-model.test.ts` (new), `src/lib/ai/__tests__/search-journey.live.test.ts` (new), `src/lib/research/__tests__/brave.test.ts`, `src/lib/research/__tests__/service.test.ts`. This document records the outcomes; unrelated pre-existing working-tree changes were preserved.
+
+Final hermetic validation: TypeScript passed; 956 tests passed, one skipped. Preview and Production builds passed. These checks do not replace the pending authenticated deployed Chat and follow-up/citation verification.

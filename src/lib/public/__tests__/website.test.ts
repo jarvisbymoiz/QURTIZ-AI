@@ -5,10 +5,13 @@ import {
   safeAuthDestination,
   PUBLIC_PAGE_PATHS,
 } from "../routes";
-import { getArticles, getRelatedArticles, readingMinutes } from "../articles";
+import { getArticles, getArticle, getRelatedArticles, readingMinutes, isPublishedArticle } from "../articles";
+import { publicPages } from "../pages";
+import { publicMetadata, siteUrl } from "../site";
 import { articleFeed, escapeXml } from "../feed";
 import sitemap from "@/app/sitemap";
 import { updateSession } from "@/lib/supabase/middleware";
+import { middleware } from "@/middleware";
 
 const auth = vi.hoisted(() => ({ getUser: vi.fn(), create: vi.fn() }));
 vi.mock("@supabase/ssr", () => ({ createServerClient: auth.create }));
@@ -21,6 +24,13 @@ beforeEach(() => {
   auth.getUser.mockResolvedValue({ data: { user: null } });
 });
 describe("public routing and authentication regression", () => {
+  it("adds noindex to service responses without changing public page indexing", async () => {
+    for (const path of ["/api/cron/publish", "/api/meta/callback", "/auth/callback"]) {
+      const response = await middleware(new NextRequest(`https://qurtiz.test${path}`));
+      expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    }
+    expect((await middleware(new NextRequest("https://qurtiz.test/features"))).headers.get("x-robots-tag")).toBeNull();
+  });
   it("serves marketing and discovery without calling the auth provider", async () => {
     for (const path of [
       ...PUBLIC_PAGE_PATHS,
@@ -86,6 +96,37 @@ describe("public routing and authentication regression", () => {
   });
 });
 describe("article discovery integrity", () => {
+  it("excludes draft articles from the public publication predicate", () => {
+    const article = getArticles()[0];
+    expect(isPublishedArticle({ ...article, status: "draft" })).toBe(false);
+    expect(isPublishedArticle({ ...article, status: "published" })).toBe(true);
+    expect(getArticle(article.slug)).toEqual(article);
+  });
+  it("keeps canonical discovery on production even with local configuration", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "http://localhost:3000");
+    expect(siteUrl()).toBe("https://qurtiz-ai.vercel.app");
+    expect(sitemap().every(entry => entry.url.startsWith(`${siteUrl()}/`))).toBe(true);
+    expect(articleFeed()).not.toContain("localhost");
+  });
+  it("requires unique editorial metadata, existing local links and article images", async () => {
+    const { existsSync } = await import("node:fs");
+    const published = getArticles();
+    const titles = [...Object.values(publicPages).map(p => p.title), ...published.map(a => a.seoTitle)];
+    const descriptions = [...Object.values(publicPages).map(p => p.description), ...published.map(a => a.seoDescription)];
+    expect(new Set(titles).size).toBe(titles.length);
+    expect(new Set(descriptions).size).toBe(descriptions.length);
+    const valid = new Set([...PUBLIC_PAGE_PATHS, "/signup", "/login", ...published.map(a => `/articles/${a.slug}`)]);
+    const links = [...Object.values(publicPages).flatMap(p => p.sections.flatMap(s => s.links ?? [])), ...published.flatMap(a => a.sections.flatMap(s => s.link ? [s.link] : []))];
+    for (const link of links.filter(l => l.href.startsWith("/"))) expect(valid.has(link.href.split("#")[0])).toBe(true);
+    for (const article of published) {
+      expect(existsSync(`public${article.image}`)).toBe(true);
+      const path = `/articles/${article.slug}`;
+      const meta = publicMetadata(article.seoTitle, article.seoDescription, path);
+      expect(meta.alternates?.canonical).toBe(`${siteUrl()}${path}`);
+      expect(meta.openGraph).toBeTruthy();
+      expect(article.sections.every(s => s.title && s.paragraphs.length)).toBe(true);
+    }
+  });
   it("selects a bounded set of relevant related articles without the current article", () => {
     for (const article of getArticles()) {
       const related = getRelatedArticles(article);

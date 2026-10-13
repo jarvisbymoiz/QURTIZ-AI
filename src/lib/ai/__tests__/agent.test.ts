@@ -250,7 +250,7 @@ describe("short chat with real agent instructions and schemas", () => {
     expect(calls).toHaveLength(5); expect(summaries).not.toHaveBeenCalled();
     for (const d of diagnostics.filter(d => d.phase === "ready")) {
       expect(d.contributions.total).toBeLessThan(d.usableInputTokens); expect(d.systemMessages).toBe(1);
-      expect(d.toolCount).toBe(5); expect(d.contributions.attachments).toBe(0); expect(d.contributions.summary).toBe(0);
+      expect(d.toolCount).toBe(6); expect(d.contributions.attachments).toBe(0); expect(d.contributions.summary).toBe(0);
     }
     expect(calls.map(call => call.prompt.filter(message => message.role === "user").length)).toEqual([1, 2, 3, 4, 5]);
     // Reproduce the old fixed-context overhead using all real schemas and a

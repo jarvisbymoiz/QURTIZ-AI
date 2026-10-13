@@ -1,3 +1,4 @@
+import { permitsAgentApproval } from "@/lib/security/agent-intent";
 import { editContent, agentEditContentSchema } from "@/lib/content/edit";
 import { findPosts, readContent } from "@/lib/content/query";
 import { unscheduleContent } from "@/lib/scheduling/unschedule";
@@ -100,8 +101,8 @@ function withNormalizedOutput(t: Tool): Tool {
   const execute = t.execute;
   if (!execute) return t;
   const original = execute.bind(t);
-  t.execute = (input: unknown, options: ToolCallOptions) =>
-    normalizeToolOutput(original(input, options));
+  t.execute = async (input: unknown, options: ToolCallOptions) =>
+    normalizeToolOutput(await original(input, options));
   return t;
 }
 
@@ -110,6 +111,8 @@ function withNormalizedOutput(t: Tool): Tool {
  * publishing and other external actions do not exist at this milestone.
  */
 export function buildAgentTools(ctx: AgentToolContext) {
+  // Scoped to this authenticated run; never shared across users/workspaces.
+  let recentWebResearch = "";
   const db = getDb();
   let stepCounter = 0;
 
@@ -186,7 +189,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
 
   const createContent = tool({
     description:
-      "Generate one complete social media post (copy + platform-adapted variants + hashtags + CTA) for this workspace. Use when the user asks to create a post or content about a topic. The post goes to Content Studio as Ready for Review — it is NOT published.",
+      "Generate one complete social media post (copy + platform-adapted variants + hashtags + CTA) for this workspace. For researched posts, complete web_search first so its real references reach generation. Use when the user asks to create a post or content about a topic. The post goes to Content Studio as Ready for Review — it is NOT published.",
     inputSchema: z.object({
       topic: z.string().min(4).max(500).describe("What the post is about"),
       platforms: z.array(z.enum(["facebook", "instagram"])).min(1).describe("Target platforms"),
@@ -208,6 +211,8 @@ export function buildAgentTools(ctx: AgentToolContext) {
             platforms: input.platforms,
             preferredFormat: input.preferredFormat ?? null,
             toneOverride: input.toneOverride ?? null,
+            requestBrief: ctx.currentTask,
+            researchContext: recentWebResearch || undefined,
           },
         });
         await refreshContent();
@@ -270,6 +275,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
           niche: input.niche,
+          signal: ctx.abortSignal,
           notes: input.notes ?? null,
         });
         await logStep("research_niche", input, { ok: result.ok, count: result.ok ? result.count : undefined });
@@ -426,6 +432,7 @@ export function buildAgentTools(ctx: AgentToolContext) {
           userId: ctx.userId,
           count: input.count,
           niche: input.niche,
+
         });
         await logStep("bulk_plan", input, { ok: result.ok, jobId: result.ok ? result.jobId : undefined });
         if (!result.ok) return { queued: false, message: result.error };
@@ -640,7 +647,8 @@ export function buildAgentTools(ctx: AgentToolContext) {
     research_niche: researchNiche,
     create_content: createContent,
     schedule_content: scheduleContent,
-    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId, userId: ctx.userId }),
+    web_search: makeWebSearchTool({ logStep, workspaceId: ctx.workspaceId, userId: ctx.userId, abortSignal: ctx.abortSignal,
+      onResearch: reference => { recentWebResearch = reference.slice(0, 6000); } }),
     search_content_library: searchContentLibrary,
     get_analytics: getAnalytics,
     generate_visual: generateVisualTool,
@@ -661,8 +669,11 @@ export function buildAgentTools(ctx: AgentToolContext) {
         try {
           ctx.abortSignal?.throwIfAborted();
           options.abortSignal?.throwIfAborted();
+          if (name === "approve_content" && !permitsAgentApproval(ctx.currentTask, (input as { itemId?: unknown }).itemId)) {
+            throw new Error("Approval requires an explicit approve request with this post ID in your current message. Please approve in Content Studio or confirm the exact post ID.");
+          }
           const membership = await getMembership(ctx.userId, ctx.workspaceId);
-          const readOnly = ["find_posts", "retrieve_agent_memory", "get_brand_brain", "list_workspace_facts", "search_content_library", "get_analytics", "get_content", "get_research", "get_competitors", "get_bulk_status"].includes(name);
+          const readOnly = ["web_search", "find_posts", "retrieve_agent_memory", "get_brand_brain", "list_workspace_facts", "search_content_library", "get_analytics", "get_content", "get_research", "get_competitors", "get_bulk_status"].includes(name);
           if (!membership || !can(membership.role, readOnly ? "brand:read" : "brand:write")) throw new Error("Permission to use this tool was revoked.");
           const [run] = await db.select({ status: agentRuns.status }).from(agentRuns)
             .where(and(eq(agentRuns.id, ctx.runId), eq(agentRuns.userId, ctx.userId), eq(agentRuns.workspaceId, ctx.workspaceId)));

@@ -84,16 +84,26 @@ export function startCloudWorker({ statePath, port, origins }) {
       let path = "/v1/images/generations";
       const payload = { prompt: job.prompt, n: 1, size: job.size,
         quality: job.quality === "low" ? "low" : "high", response_format: "b64_json" };
-      const reference = job.references?.[0];
-      if (reference) {
+      const references = job.references ?? [];
+      let referenceBytes = 0;
+      const images = [];
+      for (const reference of references) {
         const url = safeHttpsUrl(reference.url);
         const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(20_000) });
         if (!response.ok) throw new Error("image_unavailable");
         const bytes = await boundedResponse(response, MAX_REFERENCE_BYTES);
+        referenceBytes += bytes.length;
+        if (referenceBytes > MAX_REFERENCE_BYTES) throw new Error("image_unavailable");
         const mimeType = imageMime(bytes);
-        payload.images = [{ image_url: `data:${mimeType};base64,${bytes.toString("base64")}` }];
-        path = "/v1/images/edits";
+        images.push({ image_url: `data:${mimeType};base64,${bytes.toString("base64")}` });
       }
+      if (images.length) { payload.images = images; path = "/v1/images/edits"; }
+      if (process.env.NODE_ENV === "development") console.info("[image-request]", {
+        mode: "chatgpt-account", logo: references.filter(ref => ref.role === "logo").length,
+        profileAvatar: references.filter(ref => ref.role === "profileAvatar").length,
+        designReferences: references.filter(ref => ref.role === "designReference").length,
+        references: images.length,
+      });
       const generated = await local(pairing, path, payload, 250_000);
       const base64 = generated?.data?.[0]?.b64_json;
       if (typeof base64 !== "string" || !base64 || base64.length > 9_500_000 ||

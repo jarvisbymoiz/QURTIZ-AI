@@ -7,6 +7,7 @@ export type MetricsRow = {
   platform: "facebook" | "instagram";
   contentItemId: string | null;
   metrics: {
+    views?: number;
     reach?: number;
     impressions?: number;
     likes?: number;
@@ -23,6 +24,7 @@ export type MetricsRow = {
 
 export type Totals = {
   posts: number;
+  views?: number;
   reach: number;
   impressions: number;
   engagement: number;
@@ -30,20 +32,22 @@ export type Totals = {
 };
 
 export function sumTotals(rows: MetricsRow[]): Totals {
-  let reach = 0, impressions = 0, engagement = 0, withReach = 0;
+  let reach = 0, views = 0, impressions = 0, engagement = 0, engagementWithReach = 0, withReach = 0;
   for (const r of rows) {
     const m = r.metrics ?? {};
     reach += m.reach ?? 0;
+    views += m.views ?? 0;
     impressions += m.impressions ?? 0;
     engagement += (m.likes ?? 0) + (m.comments ?? 0) + (m.shares ?? 0) + (m.saves ?? 0);
-    if ((m.reach ?? 0) > 0) withReach++;
+    if ((m.reach ?? 0) > 0) { withReach++; engagementWithReach += (m.likes ?? 0) + (m.comments ?? 0) + (m.shares ?? 0) + (m.saves ?? 0); }
   }
   return {
     posts: rows.length,
+    views,
     reach,
     impressions,
     engagement,
-    engagementRate: withReach > 0 ? Math.round((engagement / reach) * 1000) / 10 : 0,
+    engagementRate: withReach > 0 ? Math.round((engagementWithReach / reach) * 1000) / 10 : 0,
   };
 }
 

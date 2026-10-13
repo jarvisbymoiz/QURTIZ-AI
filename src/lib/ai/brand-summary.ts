@@ -31,7 +31,7 @@ export function summarizeBrandBrain(brand: BrandBrainRow | null): string {
   if (brand.voicePresets.length > 0) parts.push("Brand voice: " + brand.voicePresets.join(", "));
   add("Voice instructions", brand.voiceCustom);
   add("Visual identity", JSON.stringify(brand.visualIdentity ?? {}));
-  parts.push("Logo policy: use the workspace's saved logo asset where Qurtiz can composite it; image models must leave clean logo space and never invent or redraw a logo.");
+  parts.push("Logo policy: use the actual supplied logo reference within the generated design, preserve its identity, and choose placement to fit the composition. No automatic logo overlay is applied. Do not invent a logo without its reference image.");
   add("Content rules", JSON.stringify(brand.contentRules ?? {}));
   return parts.length > 0 ? parts.join("\n") : "Brand Brain is empty - ask the user to fill it in.";
 }

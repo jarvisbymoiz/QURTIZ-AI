@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { features } from "@/lib/public/product";
 import { publicMetadata } from "@/lib/public/site";
-import { Breadcrumbs } from "@/components/public/schema";
+import { Breadcrumbs, PageSchema } from "@/components/public/schema";
 import { PublicCTA } from "@/components/public/shell";
 export const metadata = publicMetadata(
   "Features — One connected social content workflow",
@@ -12,6 +12,8 @@ export const metadata = publicMetadata(
 export default function FeaturesPage() {
   return (
     <>
+      <PageSchema name="Qurtiz AI Features" description="Brand-aware research, content creation, review, scheduling and supported social publishing."
+        path="/features" />
       <Breadcrumbs
         items={[
           { name: "Home", path: "/" },
@@ -21,7 +23,7 @@ export default function FeaturesPage() {
       <header className="public-container page-hero">
         <span className="eyebrow">THE QURTIZ TOOLKIT</span>
         <h1>
-          More than a caption.
+          Qurtiz AI features.
           <br />
           <span>A connected workflow.</span>
         </h1>

@@ -32,7 +32,7 @@ function CopyCode({ code }: { code: string }) {
 
 export const Markdown = memo(function Markdown({ content }: { content: string }) {
   return (
-    <div className="text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+    <div className="min-w-0 max-w-full [overflow-wrap:anywhere] text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -54,7 +54,7 @@ export const Markdown = memo(function Markdown({ content }: { content: string })
             <a className="text-primary underline underline-offset-4 hover:underline" target="_blank" rel="noopener noreferrer nofollow" {...p} />
           ),
           table: (p) => (
-            <div className="my-3 overflow-x-auto rounded-lg border scroll-thin">
+            <div className="my-3 max-w-full overflow-x-auto rounded-lg border scroll-thin">
               <table className="w-full border-collapse text-xs" {...p} />
             </div>
           ),
@@ -68,7 +68,7 @@ export const Markdown = memo(function Markdown({ content }: { content: string })
               return <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.8em]" {...p} />;
             }
             return (
-              <div className="relative my-3">
+              <div className="relative my-3 min-w-0 max-w-full">
                 <pre className="overflow-x-auto rounded-lg border bg-muted/50 p-3 font-mono text-xs leading-relaxed scroll-thin">
                   <code className={className}>{children}</code>
                 </pre>

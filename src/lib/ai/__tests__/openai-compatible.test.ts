@@ -48,6 +48,27 @@ afterEach(() => {
 });
 
 describe("openai-compatible doStream", () => {
+  it("does not retry daily token exhaustion, while preserving transient throttling", async () => {
+    const model = createOpenAICompatibleModel({modelId:"configured-model",apiKey:"test-only",baseUrl:null});
+    for (const [message, retryable] of [["Tokens per day (TPD) limit reached",false],["insufficient_quota",false],["Tokens per minute (TPM) limit reached",true]] as const) {
+      globalThis.fetch = (async () => new Response(JSON.stringify({error:{message}}),{status:429})) as typeof fetch;
+      await expect(model.doStream({prompt:[{role:"user",content:[{type:"text",text:"test"}]}]})).rejects.toMatchObject({statusCode:429,isRetryable:retryable});
+    }
+  });
+  it("sends the attached Qurtiz search schema and preserves explicit tool choice", async () => {
+    const sent: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return sseResponse(["data: [DONE]\n\n"]);
+    }) as typeof fetch;
+    const model = createOpenAICompatibleModel({modelId:"configured-model",apiKey:"test-only",baseUrl:null});
+    for (const type of ["auto","none","required"] as const) {
+      await model.doStream({prompt:[{role:"user",content:[{type:"text",text:"test"}]}],tools:[{type:"function",name:"web_search",inputSchema:{type:"object",properties:{query:{type:"string"}},required:["query"]}}],toolChoice:{type}});
+    }
+    expect(sent.map(body=>body.tool_choice)).toEqual(["auto","none","required"]);
+    expect(sent.every(body=>JSON.stringify(body.tools).includes('"name":"web_search"'))).toBe(true);
+    expect(sent.every(body=>body.model==="configured-model")).toBe(true);
+  });
   it("sends every parallel tool result on the next model request", async () => {
     let sent: Record<string, unknown> | undefined;
     globalThis.fetch = (async (_url, init) => {

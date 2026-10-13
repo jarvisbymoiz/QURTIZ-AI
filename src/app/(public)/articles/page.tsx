@@ -1,7 +1,7 @@
 import { getArticles } from "@/lib/public/articles";
 import { ArticleCard } from "@/components/public/article-card";
 import { publicMetadata } from "@/lib/public/site";
-import { Breadcrumbs } from "@/components/public/schema";
+import { Breadcrumbs, PageSchema } from "@/components/public/schema";
 export const metadata = publicMetadata(
   "Articles — The Qurtiz Journal",
   "Practical guides to AI social media agents, brand-aware content creation, human review, automation and connected publishing workflows.",
@@ -13,6 +13,8 @@ export default function ArticlesPage() {
   const categories = [...new Set(articles.map((a) => a.category))];
   return (
     <>
+      <PageSchema name="Qurtiz AI Journal" description="Practical guides to AI social media agents and connected content workflows."
+        path="/articles" type="CollectionPage" items={articles.map(a => ({ name: a.title, path: `/articles/${a.slug}` }))} />
       <Breadcrumbs
         items={[
           { name: "Home", path: "/" },
@@ -23,7 +25,7 @@ export default function ArticlesPage() {
         <header className="page-hero">
           <span className="eyebrow">THE QURTIZ JOURNAL</span>
           <h1>
-            Better context.
+            Qurtiz AI articles.
             <br />
             <span>Better creative decisions.</span>
           </h1>

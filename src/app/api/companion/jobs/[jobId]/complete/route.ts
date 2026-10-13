@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { getDb } from "@/db";
-import { companionImageJobs } from "@/db/schema";
+import { companionDevices, companionImageJobs } from "@/db/schema";
 import { authenticateJobClaim } from "@/lib/companion/job-claim";
 import { matchesMediaHeader } from "@/lib/security/media-file";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -50,13 +50,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ job
     if (bytes.length !== sizeBytes || !matchesMediaHeader(bytes.subarray(0, 32), mimeType)) {
       throw new Error("Uploaded image contents are invalid.");
     }
-    const visualId = claim.job.contentItemId ? await persistExternalVisual({ workspaceId: claim.device.workspaceId,
-      contentItemId: claim.job.contentItemId, slideIndex: claim.job.slideIndex ?? undefined,
-      model: "chatgpt-companion", imageBuffer: bytes, storage,
-      targetWidth: claim.job.targetWidth ?? undefined, targetHeight: claim.job.targetHeight ?? undefined }) : null;
-    await getDb().update(companionImageJobs).set({ status: "completed", visualAssetId: visualId,
-      error: null, updatedAt: new Date() }).where(and(eq(companionImageJobs.id, jobId),
-        eq(companionImageJobs.deviceId, claim.device.id), eq(companionImageJobs.status, "uploading")));
+    const visualId = await getDb().transaction(async tx => {
+      // Shared device-row lock orders completion against both revocation paths.
+      const [device] = await tx.select().from(companionDevices).where(eq(companionDevices.id, claim.device.id)).for("update");
+      if (!device || device.revokedAt || device.credentialHash !== claim.device.credentialHash) throw new Error("Companion was disconnected before completion.");
+      const [job] = await tx.select().from(companionImageJobs).where(eq(companionImageJobs.id, jobId)).for("update");
+      if (!job || job.status !== "uploading" || job.deviceId !== device.id || !job.leaseExpiresAt || job.leaseExpiresAt <= new Date()) throw new Error("Image claim is no longer active.");
+      const id = job.contentItemId ? await persistExternalVisual({ workspaceId: device.workspaceId,
+        contentItemId: job.contentItemId, slideIndex: job.slideIndex ?? undefined,
+        model: "chatgpt-companion", imageBuffer: bytes, storage, db: tx,
+        targetWidth: job.targetWidth ?? undefined, targetHeight: job.targetHeight ?? undefined }) : null;
+      await tx.update(companionImageJobs).set({ status: "completed", visualAssetId: id,
+        error: null, updatedAt: new Date() }).where(eq(companionImageJobs.id, jobId));
+      return id;
+    });
     await bucket.remove([expectedPath]).catch(() => undefined);
     revalidatePath("/content-studio");
     return NextResponse.json({ status: "completed", visualAssetId: visualId },

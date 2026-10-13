@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { withDbRetry } from "@/db";
 import { workspaceMembers, workspaces } from "@/db/schema";
 import { can, type Capability, type WorkspaceRole } from "@/lib/permissions";
@@ -53,7 +53,7 @@ export async function getUserWorkspacesWithRoles(userId: string): Promise<UserWo
       })
       .from(workspaceMembers)
       .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-      .where(eq(workspaceMembers.userId, userId));
+      .where(and(eq(workspaceMembers.userId, userId), isNull(workspaces.deletedAt)));
 
     return rows.map((r) => ({
       workspace: r.workspace,
@@ -124,10 +124,12 @@ export async function getMembership(
     const rows = await db
       .select({ role: workspaceMembers.role })
       .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
       .where(
         and(
           eq(workspaceMembers.userId, userId),
           eq(workspaceMembers.workspaceId, workspaceId),
+          isNull(workspaces.deletedAt),
         ),
       );
     return rows[0] ? { role: rows[0].role as WorkspaceRole } : null;

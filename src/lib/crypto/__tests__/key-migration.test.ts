@@ -186,8 +186,8 @@ describe("legacy credential migration", () => {
     expect(summary.alreadyCurrent).toBe(2);
     expect(summary.unrecoverable).toBe(1);
     const lines = logSpy.mock.calls
-      .map((c) => String(c[0]))
-      .filter((s) => s.includes("[qurtiz] encryption:"));
+      .map((c: unknown[]) => String(c[0]))
+      .filter((s: string) => s.includes("[qurtiz] encryption:"));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/migrated 2 legacy credential\(s\), 2 already current, 1 unrecoverable/);
   });

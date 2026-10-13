@@ -8,9 +8,8 @@ import { getAppCookieOptions } from "./cookie-options";
 // expire mid-flow while the user grants access on the provider site), and the
 // route itself re-verifies the session and workspace membership before
 // persisting anything.
-// /auth/workspace-delete must be reachable without a session: the emailed
-// delete-confirmation link lands here before the code exchange creates one;
-// the route re-verifies the session and workspace membership itself.
+// The retired workspace-deletion email URL only redirects to Settings; it
+// never exchanges an email code or grants deletion authority.
 const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback", "/auth/signout", "/api/meta/callback", "/api/buffer/callback", "/auth/workspace-delete"];
 
 function isPublic(pathname: string): boolean {
@@ -27,7 +26,7 @@ export async function updateSession(request: NextRequest) {
   // Machine endpoints authenticate their bearer credentials in their routes.
   // The companion has no browser cookie; redirecting it to /login would turn
   // every claim, heartbeat and upload completion into an HTML response.
-  if (["/api/cron/publish", "/api/cron/maintenance"].includes(request.nextUrl.pathname) ||
+  if (["/api/cron/publish", "/api/cron/maintenance", "/api/cron/insights"].includes(request.nextUrl.pathname) ||
       request.nextUrl.pathname.startsWith("/api/companion/")) return NextResponse.next({ request });
   let supabaseResponse = NextResponse.next({ request });
 

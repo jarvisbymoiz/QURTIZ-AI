@@ -153,7 +153,7 @@ export function buildMasterPromptInstruction(args: {
   lines.push("- Specific to this post: quote the exact hook, CTA, offer and pricing where they belong; name the brand's real products/services, not generic category nouns.");
   lines.push("- Creative direction reads like it came from a Creative Director: ONE strong visual metaphor, deliberate composition, exact text hierarchy (headline ≤8 words), precise typography direction, palette anchored to brand colors.");
   lines.push("- Contact details section: include the WhatsApp/phone/website/CTA from Brand Brain with placement guidance; write \"none provided — do not invent\" only when the Brand Brain has none.");
-  lines.push("- Logo: reserve a clean corner space for the real logo (it is composited later) — never instruct the tool to draw or invent a logo.");
+  lines.push("- Logo: use the supplied original brand logo reference within the generated composition, preserving identity and proportions; choose a suitable position and do not invent a replacement.");
   lines.push("- Strict avoid rules: no garbled/placeholder text, no watermarks, no logos drawn, no clutter, no style drift, no text outside safe areas, never render the full caption inside the design.");
   lines.push("- Output requirement: state the exact deliverable — dimensions, file/quality expectations, and the quality bar (top-tier agency design, not a stock template).");
   lines.push("- Length: a complete, dense brief (roughly 350-650 words of direction). Markdown headings only — no preamble, no commentary, no closing remarks.");

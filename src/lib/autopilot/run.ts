@@ -44,7 +44,7 @@ export async function scanAutoRuns(options: { dispatch?: "boss" | "serverless" }
         const parsed = autopilotSettingsSchema.safeParse(saved?.value);
         if (!parsed.success || !parsed.data.enabled) return;
         const [workspace] = await tx.select().from(workspaces).where(eq(workspaces.id, row.workspaceId));
-        if (!workspace) return;
+        if (!workspace || workspace.deletedAt) return;
         const runtime = saved.value as { lastRunKey?: string; enabledSince?: string };
         const prior = runtime.lastRunKey;
         const occurrence = dueOccurrence(parsed.data.runTimes, parsed.data.runDays, workspace.timezone, new Date(), { afterKey: prior ?? "", enabledSince: runtime.enabledSince ? new Date(runtime.enabledSince) : undefined });

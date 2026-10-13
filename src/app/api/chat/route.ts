@@ -36,6 +36,7 @@ import {
 import { createBudgetedChatModel, resolveChatBudget, type ConversationContext } from "@/lib/ai/chat-budget";
 
 import { createLazyChatTools } from "@/lib/ai/chat-tools";
+import { createSearchCompatibleModel } from "@/lib/ai/search-compatible-model";
 
 export const dynamic = "force-dynamic";
 
@@ -208,7 +209,8 @@ export async function POST(request: NextRequest) {
     // as an honest failure below instead of a silent truncated stream.
     let streamError: string | null = null;
     const compressionUsage = { inputTokens: 0, outputTokens: 0 };
-    const model = createBudgetedChatModel({ model: textModel.model, scope: `${textModel.provider}/${textModel.modelId}`,
+    const model = createBudgetedChatModel({ model: createSearchCompatibleModel(textModel.model, reason =>
+      console.info("[chat:search]", { runId: run.id, stage: "tool_protocol", reason })), scope: `${textModel.provider}/${textModel.modelId}`,
       budget,
       onCompressionDiagnostic: event => {
         if (process.env.NODE_ENV !== "production" || process.env.QURTIZ_CHAT_BUDGET_DEBUG === "1") {
@@ -234,7 +236,9 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    const lazyTools = createLazyChatTools(buildAgentTools({ workspaceId, userId: user.id, runId: run.id, abortSignal: runSignal, currentTask: textOf(sanitized[sanitized.length - 1]) }), textOf(sanitized[sanitized.length - 1]));
+    let searchCompleted = false;
+    const lazyTools = createLazyChatTools(buildAgentTools({ workspaceId, userId: user.id, runId: run.id, abortSignal: runSignal, currentTask: textOf(sanitized[sanitized.length - 1]) }), textOf(sanitized[sanitized.length - 1]), system,
+      names => console.info("[chat:search]", { runId: run.id, stage: "tool_registry", searchAttached: names.includes("web_search"), toolCount: names.length }));
     const result = streamText({
       model,
       system,
@@ -291,6 +295,16 @@ export async function POST(request: NextRequest) {
       // row, the finish-part metadata and the persisted assistant message.
       onError: ({ error }) => {
         streamError = describeStreamError(error);
+        console.warn("[chat:search]", { runId: run.id, stage: searchCompleted ? "model_continuation" : "model_request",
+          reason: /not in request.tools/i.test(streamError) ? "tool_not_selected" : /tool.choice.*none/i.test(streamError) ? "tool_choice_blocked" : searchCompleted ? "stream_resume_failed" : "provider_error" });
+      },
+      onStepFinish: ({ toolResults, finishReason }) => {
+        const search = toolResults.find(result => result.toolName === "web_search");
+        if (!search) return;
+        const output = search.output as { searched?: boolean; found?: boolean; reason?: string; sources?: unknown[] };
+        searchCompleted = output.searched === true;
+        console.info("[chat:search]", { runId: run.id, stage: "tool_result", searched: searchCompleted,
+          sourceCount: output.sources?.length ?? 0, reason: output.reason ?? (output.found === false ? "empty_results" : "ok"), finishReason });
       },
       onFinish: async ({ usage }) => {
         clearInterval(cancellationTimer);

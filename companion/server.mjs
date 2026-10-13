@@ -189,6 +189,18 @@ export function createCompanionServer(config) {
         }
         const requestedOwner = `${body.userId}:${body.workspaceId}`;
         if (owner && owner !== requestedOwner) return sendJson(res, 409, { error: { message: "This companion is connected to another Qurtiz account or workspace." } });
+        if (typeof body.challenge !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.challenge)) {
+          return sendJson(res, 403, { error: { message: "A Qurtiz ownership proof is required. Update Qurtiz and pair again." } });
+        }
+        const proofResponse = await fetch(`${origin}/api/companion/pair/verify`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: body.userId, workspaceId: body.workspaceId, challenge: body.challenge }),
+          redirect: "error", signal: AbortSignal.timeout(8000),
+        });
+        if (!proofResponse.ok || (await proofResponse.json()).ok !== true) {
+          return sendJson(res, 403, { error: { message: "Qurtiz ownership could not be verified." } });
+        }
+        if (owner && owner !== requestedOwner) return sendJson(res, 409, { error: { message: "This companion is connected to another Qurtiz account or workspace." } });
         owner = requestedOwner;
         savePairing();
         return sendJson(res, 200, { pairingKey: pairingSecret });

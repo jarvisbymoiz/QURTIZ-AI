@@ -14,7 +14,7 @@ vi.mock("@/db", () => ({ getDb: () => ({
         slides: [{ index: 0, visualPrompt: "First visual" }, { index: 1, visualPrompt: "Second visual" }] }]
       : table === brands || table === brandAssets ? [] : [];
     return { where: () => ({ then: (resolve: (value: unknown[]) => void) => resolve(rows),
-      limit: async () => rows.slice(0, 1), orderBy: () => ({ limit: async () => rows.slice(0, 1) }) }) };
+      limit: async () => rows.slice(0, 1), orderBy: () => ({ then: (resolve: (value: unknown[]) => void) => resolve(rows), limit: async () => rows.slice(0, 1) }) }) };
   } }),
   insert: (table: unknown) => ({ values: (values: Record<string, unknown>) => ({ returning: async () => {
     if (table === visualAssets) { state.visuals.push(values); return [{ id: `visual-${state.visuals.length}` }]; }

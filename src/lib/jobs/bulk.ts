@@ -289,7 +289,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
             const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, job.workspaceId));
             const identity = (brand?.visualIdentity ?? {}) as Record<string, string | undefined>;
             const [visualItem] = await db.select().from(contentItems).where(eq(contentItems.id, finalItemId));
-            const logo = await fetchLogoDataUrl(job.workspaceId);
+
             const png = await renderTemplateVisual({
               primaryColor: identity.primaryColor ?? "#6366f1",
               secondaryColor: identity.secondaryColor ?? "#0ea5e9",
@@ -297,7 +297,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
               subline: (visualItem?.mainCopy ?? "").slice(0, 160),
               cta: visualItem?.cta ?? "",
               brandName: brand?.businessName ?? "",
-              logoDataUrl: logo,
+              logoDataUrl: null,
               layout: planItem.format === "carousel" ? "promo" : "promo",
             });
             await storeVisual(job.workspaceId, finalItemId, png, job.userId);
@@ -409,27 +409,6 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       link: "/content-studio",
       meta: { type: "bulk_plan", runId: run.id, publishStatus: "failed" },
     });
-  }
-}
-
-async function fetchLogoDataUrl(workspaceId: string): Promise<string | null> {
-  try {
-    const db = getDb();
-    const { brandAssets } = await import("@/db/schema");
-    const [asset] = await db
-      .select()
-      .from(brandAssets)
-      .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, "logo")))
-      .orderBy(desc(brandAssets.createdAt))
-      .limit(1);
-    if (!asset) return null;
-    const supabase = createServiceClient();
-    const { data } = await supabase.storage.from("brand-assets").download(asset.storagePath);
-    if (!data) return null;
-    const buf = Buffer.from(await data.arrayBuffer());
-    return `data:${asset.mimeType};base64,${buf.toString("base64")}`;
-  } catch {
-    return null;
   }
 }
 

@@ -1,5 +1,6 @@
 ﻿import "server-only";
 
+import { readBoundedJson } from "@/lib/security/bounded-response";
 import sharp from "sharp";
 import type { ImageProviderId } from "@/lib/ai/provider";
 import { catalogEntry, resolvedBaseUrl } from "@/lib/ai/provider-catalog";
@@ -22,10 +23,8 @@ import { inspectImageRequest, type ImageDebugContext } from "@/lib/ai/image-debu
  *   (stored ?? catalog default); a `custom` provider without an endpoint
  *   fails honestly instead of silently targeting a default host.
  */
-export type ImageReference = {
-  mimeType: string;
-  base64: string;
-};
+export type { ImageReference } from "@/lib/ai/image-references";
+import type { ImageReference } from "@/lib/ai/image-references";
 
 export type ImageGenerationOptions = {
   width?: number;
@@ -90,7 +89,7 @@ async function geminiGenerate(args: {
       const generationConfig = { responseModalities: ["IMAGE"],
         ...(args.options?.aspectRatio ? { imageConfig: { aspectRatio: args.options.aspectRatio } } : {}) };
       const request = async (config: Record<string, unknown>) => {
-        inspectImageRequest({ provider: "gemini", model, prompt: args.prompt, referenceCount: args.references?.length ?? 0,
+        inspectImageRequest({ provider: "gemini", model, prompt: args.prompt, referenceCount: args.references?.length ?? 0, references: args.references,
           parameters: config, context: args.debug });
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
@@ -98,7 +97,7 @@ async function geminiGenerate(args: {
           body: JSON.stringify({ contents: [{ parts }], generationConfig: config }),
           signal: AbortSignal.timeout(120_000),
         });
-        const json = (await res.json().catch(() => null)) as
+        const json = (await readBoundedJson(res)) as
         | { candidates?: { content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] } }[] }
         | { error?: { message?: string; status?: string } }
         | null;
@@ -160,26 +159,48 @@ async function openaiCompatibleGenerate(args: {
     ? "1024x1536" : args.options?.height && args.options?.width && args.options.width > args.options.height ? "1536x1024" : "1024x1024";
   try {
     let res: Response | undefined;
-    if (args.references?.length) {
-      const reference = args.references[0];
+    if (args.provider === "openrouter") {
+      // OpenRouter's native Images API is not the OpenAI edits endpoint.
+      // Discover per-endpoint reference limits rather than infer them from a model name.
+      const discovery = await fetchPublicAiEndpoint(`${baseUrl}/images/models/${model.split("/").map(encodeURIComponent).join("/")}/endpoints`, {
+        redirect: "error", headers: { Authorization: `Bearer ${args.apiKey}` }, signal: AbortSignal.timeout(20_000),
+      });
+      const capabilities = await readBoundedJson(discovery) as { endpoints?: { provider_tag?: string; supported_parameters?: Record<string, { type?: string; max?: number; values?: string[] }> }[] } | null;
+      const count = args.references?.length ?? 0;
+      const eligible = (capabilities?.endpoints ?? []).filter(endpoint => count === 0 ||
+        (endpoint.supported_parameters?.input_references?.type === "range" && (endpoint.supported_parameters.input_references.max ?? 0) >= count));
+      if (!discovery.ok || !eligible.length) return { ok: false, reason: "api_error",
+        message: `The configured OpenRouter model has no image endpoint supporting ${count} references. Select an image-generation model that supports your complete reference set.` };
+      const endpoint = eligible[0];
+      const parameters: Record<string, unknown> = { model, prompt: args.prompt,
+        ...(endpoint.provider_tag ? { provider: { only: [endpoint.provider_tag], allow_fallbacks: false } } : {}),
+        ...(count ? { input_references: args.references!.map(reference => ({ type: "image_url", image_url: { url: `data:${reference.mimeType};base64,${reference.base64}` } })) } : {}) };
+      const aspect = args.options?.aspectRatio;
+      if (aspect && endpoint.supported_parameters?.aspect_ratio?.values?.includes(aspect)) parameters.aspect_ratio = aspect;
+      inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: count, references: args.references,
+        parameters: { operation: "images", aspectRatio: parameters.aspect_ratio }, context: args.debug });
+      res = await fetchPublicAiEndpoint(`${baseUrl}/images`, { redirect: "error", method: "POST",
+        headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(parameters), signal: AbortSignal.timeout(120_000) });
+    } else if (args.references?.length) {
       const edit = new FormData();
       edit.set("model", model);
       edit.set("prompt", args.prompt);
       edit.set("size", size);
-      edit.set("image", new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), "reference-image");
-      inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: 1,
+      args.references.forEach((reference, index) => edit.append(args.references!.length > 1 ? "image[]" : "image",
+        new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), `reference-${index + 1}.${reference.mimeType === "image/jpeg" ? "jpg" : reference.mimeType.split("/")[1]}`));
+      inspectImageRequest({ provider: args.provider, model, prompt: args.prompt, referenceCount: args.references.length, references: args.references,
         parameters: { operation: "images/edits", size }, context: args.debug });
       const editResponse = await fetchPublicAiEndpoint(`${baseUrl}/images/edits`, {
         redirect: "error", method: "POST", headers: { Authorization: `Bearer ${args.apiKey}` },
         body: edit, signal: AbortSignal.timeout(120_000),
       });
       if (editResponse.ok) res = editResponse;
-      else if (![404, 405, 501].includes(editResponse.status)) {
-        const error = await editResponse.json().catch(() => null) as { error?: { message?: string } } | null;
-        if (!/image edits? (?:is |are )?(?:not )?supported|unsupported (?:image )?edits?|model.*(?:not support|only support).*edit/i.test(error?.error?.message ?? "")) {
-          const message = error?.error?.message ?? `HTTP ${editResponse.status}`;
-          return { ok: false, reason: editResponse.status === 429 ? "quota_or_billing" : "api_error", message: `${model}: ${message.replaceAll(args.apiKey, "[redacted]")}` };
-        }
+      else {
+        const error = await readBoundedJson(editResponse) as { error?: { message?: string } } | null;
+        const message = error?.error?.message ?? `HTTP ${editResponse.status}`;
+        return { ok: false, reason: editResponse.status === 429 ? "quota_or_billing" : "api_error",
+          message: `${model}: could not generate with all ${args.references.length} image references: ${message.replaceAll(args.apiKey, "[redacted]")}. No references were silently discarded.` };
       }
     }
     if (!res) {
@@ -192,7 +213,7 @@ async function openaiCompatibleGenerate(args: {
         signal: AbortSignal.timeout(120_000),
       });
     }
-    const json = (await res.json().catch(() => null)) as
+    const json = (await readBoundedJson(res)) as
       | { data?: { b64_json?: string }[]; error?: { message?: string } }
       | null;
     if (!res.ok) {

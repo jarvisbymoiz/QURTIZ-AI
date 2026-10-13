@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, jobs, visualAssets } from "@/db/schema";
@@ -312,7 +312,7 @@ export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> 
   const [job] = await db
     .select({ id: jobs.id, status: jobs.status })
     .from(jobs)
-    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
   if (!job) return { ok: false, error: "Job not found." };
   // Only non-terminal jobs can be cancelled — flipping a completed/failed job
   // to "cancelled" would rewrite real history.
@@ -322,7 +322,7 @@ export async function cancelBulkJobAction(jobId: string): Promise<ActionResult> 
   await db
     .update(jobs)
     .set({ status: "cancelled", updatedAt: new Date() })
-    .where(eq(jobs.id, jobId));
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan"), inArray(jobs.status, ["queued", "running"])));
   revalidatePath("/content-studio");
   return { ok: true };
 }
@@ -334,7 +334,7 @@ export async function retryBulkFailedAction(jobId: string): Promise<ActionResult
   const [prev] = await db
     .select()
     .from(jobs)
-    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
   if (!prev) return { ok: false, error: "Job not found." };
   const result = (prev.result ?? {}) as { createdCount?: number; failures?: string[] };
   const failedCount = (prev.total ?? 0) - (result.createdCount ?? 0);
@@ -357,7 +357,7 @@ export async function getJobStatusAction(jobId: string): Promise<{
   const [job] = await db
     .select({ status: jobs.status, progress: jobs.progress, total: jobs.total, error: jobs.error, result: jobs.result })
     .from(jobs)
-    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId)));
+    .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
   if (!job) return { ok: false };
   const stage = (job.result as { stage?: string } | null)?.stage ?? null;
   return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined };

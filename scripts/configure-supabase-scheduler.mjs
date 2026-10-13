@@ -34,7 +34,7 @@ try {
     if (existing.rows.length > 1) throw new Error("Duplicate scheduler vault records");
     if (existing.rows.length) await db.query("select vault.update_secret($1, $2)", [existing.rows[0].id, secret]);
     else await db.query("select vault.create_secret($1, $2, $3)", [secret, "qurtiz_cron_secret", "Qurtiz Production scheduler credential; no ChatGPT credentials"]);
-    for (const endpoint of ["maintenance", "publish"]) {
+    for (const endpoint of ["maintenance", "publish", "insights"]) {
       // Only an endpoint-scoped 60-second signature enters pg_net's queue.
       // Never enqueue the permanent Vault credential in HTTP headers.
       const command = `with tick as (select floor(extract(epoch from now()))::bigint::text as ts) select net.http_get(url := '${origin.origin}/api/cron/${endpoint}', headers := jsonb_build_object('Authorization', 'Bearer v1:' || tick.ts || ':' || encode(extensions.hmac('${endpoint}:' || tick.ts, (select decrypted_secret from vault.decrypted_secrets where name = 'qurtiz_cron_secret'), 'sha256'), 'hex')), timeout_milliseconds := 295000) from tick;`;
@@ -42,14 +42,14 @@ try {
     }
     await db.query("commit");
   } else if (mode === "--disable") {
-    await db.query("select cron.unschedule(jobid) from cron.job where jobname in ('qurtiz-maintenance','qurtiz-publish')");
+    await db.query("select cron.unschedule(jobid) from cron.job where jobname in ('qurtiz-maintenance','qurtiz-publish','qurtiz-insights')");
   }
   const installed = await db.query("select extname from pg_extension where extname = 'pg_cron'");
   if (!installed.rows.length) console.log(JSON.stringify({ configured: false }));
   else {
     // Never print job commands, queued request headers or decrypted vault values.
-    const jobs = await db.query("select jobid, jobname, schedule, active from cron.job where jobname in ('qurtiz-maintenance','qurtiz-publish') order by jobname");
-    console.log(JSON.stringify({ configured: jobs.rows.length === 2, jobs: jobs.rows }));
+    const jobs = await db.query("select jobid, jobname, schedule, active from cron.job where jobname in ('qurtiz-maintenance','qurtiz-publish','qurtiz-insights') order by jobname");
+    console.log(JSON.stringify({ configured: jobs.rows.length === 3, jobs: jobs.rows }));
   }
 } catch (error) {
   await db.query("rollback").catch(() => {});

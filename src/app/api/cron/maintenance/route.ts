@@ -1,6 +1,7 @@
+import { workspaceDeletionTick } from "@/lib/workspace-deletion";
 import { NextRequest, NextResponse } from "next/server";
 import { validCronAuthorization } from "@/lib/jobs/cron-auth";
-import { autopilotLoop, refreshPendingDeliveryNotifications } from "@/lib/jobs/workflows";
+import { autopilotLoop, refreshPendingDeliveryNotifications, runQueuedCampaign } from "@/lib/jobs/workflows";
 import { reconcileBufferDeliveries } from "@/lib/publishing/service";
 import { mediaCleanupTick } from "@/lib/media/cleanup-worker";
 import { and, eq, lt } from "drizzle-orm";
@@ -19,6 +20,7 @@ export async function GET(req: NextRequest) {
   const results = await Promise.allSettled([
     reconcileBufferDeliveries().then(() => refreshPendingDeliveryNotifications()),
     expireCompanionImageJobs().then(() => autopilotLoop()), cleanupCompanionStaging(), mediaCleanupTick(),
+    runQueuedCampaign(), workspaceDeletionTick(),
     getDb().update(jobs).set({ status: "failed", error: "Local image request expired before completion.", updatedAt: new Date() })
       .where(and(eq(jobs.type, "local_image"), eq(jobs.status, "queued"),
         lt(jobs.createdAt, new Date(Date.now() - 10 * 60_000)))),
@@ -27,8 +29,12 @@ export async function GET(req: NextRequest) {
         lt(jobs.updatedAt, new Date(Date.now() - 30 * 60_000)))),
   ]);
   const names = ["delivery_recovery", "autopilot_scan", "companion_staging_cleanup", "media_cleanup",
-    "legacy_queue_expiry", "legacy_save_expiry"];
-  const failedTasks = results.flatMap((result, index) => result.status === "rejected" ? [names[index]] : []);
+    "campaign_generation", "workspace_cleanup", "legacy_queue_expiry", "legacy_save_expiry"];
+  const failedTasks = results.flatMap((result, index) => {
+    if (result.status === "rejected") return [names[index]];
+    if (names[index] === "workspace_cleanup" && Number((result.value as { failed?: number } | undefined)?.failed ?? 0) > 0) return [names[index]];
+    return [];
+  });
   if (failedTasks.length) console.error("[cron/maintenance]", { failedTasks });
   return NextResponse.json({ ok: failedTasks.length === 0, failedTasks },
     { status: failedTasks.length ? 500 : 200 });

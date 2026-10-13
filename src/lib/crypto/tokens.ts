@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 
 /**
  * Shared key accessor for everything derived from ENCRYPTION_KEY (AES-GCM
- * here, HMAC signing in lib/workspace-delete). Same rules everywhere:
+ * here, HMAC signing in lib/buffer/client). Same rules everywhere:
  * throws on a missing/invalid key in every environment — set a 64-char hex
  * ENCRYPTION_KEY.
  */

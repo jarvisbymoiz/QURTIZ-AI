@@ -226,7 +226,7 @@ export const publicPages: Record<string, PublicPage> = {
       {
         heading: "Cookies and local storage",
         paragraphs: [
-          "Authentication uses cookies and browser client session storage to maintain sign-in. Workspace selection and interface preferences may also be stored. This public website does not add advertising trackers or a marketing analytics script. Operators must update this policy and apply applicable consent requirements if they add tracking.",
+          "Authentication uses cookies and browser client session storage to maintain sign-in. Workspace selection and interface preferences may also be stored. Vercel Web Analytics measures public page views and aggregate traffic; Speed Insights measures real-user performance on public pages and login/signup. Qurtiz excludes private application paths and removes URL query strings and hashes before sending these measurements. Optional acquisition events use fixed labels without form values, prompts or workspace content. Traffic reports are restricted to configured Qurtiz operators. Operators must apply applicable privacy and consent requirements for their deployment.",
         ],
       },
       {
@@ -373,7 +373,7 @@ export const publicPages: Record<string, PublicPage> = {
       {
         heading: "4. Delete workspace data",
         paragraphs: [
-          "Workspace owners can open Settings and use the Delete workspace danger zone. The flow verifies ownership with password or email confirmation and requires the exact workspace name before deletion. It deletes the workspace and its associated application data through the existing server deletion service and signs the user out.",
+          "Workspace owners can open Settings and use the Delete workspace danger zone. The flow verifies the owner's account password and removes access to the selected workspace. Its database records and media are deleted by a durable background cleanup job. The account stays signed in and other workspaces remain available.",
           "This is workspace deletion, not a promise that the authentication account, operational logs, backups or third-party copies are immediately erased. Published social posts remain on their platform until removed there.",
         ],
       },

@@ -38,6 +38,7 @@ export async function generateMetadata({
       type: "article",
       publishedTime: a.publishedAt,
       modifiedTime: a.updatedAt,
+      section: a.category,
       authors: [a.author],
       tags: a.tags,
       images: [
@@ -78,6 +79,11 @@ export default async function ArticlePage({
           image: [absoluteUrl(a.image)],
           datePublished: a.publishedAt,
           dateModified: a.updatedAt,
+          articleSection: a.category,
+          keywords: a.tags.join(", "),
+          inLanguage: "en",
+          timeRequired: `PT${readingMinutes(a)}M`,
+          url: absoluteUrl(`/articles/${slug}`),
           author: {
             "@type": "Organization",
             name: a.author,

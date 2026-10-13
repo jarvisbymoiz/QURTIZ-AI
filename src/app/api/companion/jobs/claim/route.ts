@@ -39,18 +39,18 @@ export async function POST(request: Request) {
   });
   if (!claim) return NextResponse.json({ job: null }, { headers: { "Cache-Control": "no-store" } });
 
-  const references: { mimeType: string; url: string }[] = [];
-  const requested = Array.isArray(claim.job.referenceAssets) ? claim.job.referenceAssets.slice(0, 1) : [];
+  const references: { mimeType: string; url: string; role: string }[] = [];
+  const requested = Array.isArray(claim.job.referenceAssets) ? claim.job.referenceAssets : [];
   for (const ref of requested) {
     const id = typeof ref === "object" && ref !== null ? (ref as { id?: unknown }).id : null;
     if (typeof id !== "string") break;
-    const [asset] = await db.select({ storagePath: brandAssets.storagePath, mimeType: brandAssets.mimeType })
+    const [asset] = await db.select({ storagePath: brandAssets.storagePath, mimeType: brandAssets.mimeType, kind: brandAssets.kind })
       .from(brandAssets).where(and(eq(brandAssets.id, id), eq(brandAssets.workspaceId, device.workspaceId),
         eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0))).limit(1);
     if (!asset || !asset.storagePath.startsWith(`${device.workspaceId}/`)) break;
     const signed = await createServiceClient().storage.from("brand-assets").createSignedUrl(asset.storagePath, 120);
     if (!signed.data?.signedUrl) break;
-    references.push({ mimeType: asset.mimeType, url: signed.data.signedUrl });
+    references.push({ mimeType: asset.mimeType, url: signed.data.signedUrl, role: asset.kind === "avatar" ? "profileAvatar" : asset.kind === "reference" ? "designReference" : "logo" });
   }
   if (requested.length !== references.length) {
     await db.update(companionImageJobs).set({ status: "failed", error: "Brand reference could not be loaded.",

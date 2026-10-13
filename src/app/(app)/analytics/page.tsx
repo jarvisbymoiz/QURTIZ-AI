@@ -8,6 +8,7 @@ import { requireWorkspace } from "@/lib/workspace";
 import { PageHeader } from "@/components/layout/page-header";
 import { AnalyticsClient } from "@/components/analytics/analytics-client";
 
+export const maxDuration = 300;
 export const metadata = { title: "Analytics" };
 
 async function AnalyticsPage() {

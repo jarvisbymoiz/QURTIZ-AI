@@ -178,8 +178,8 @@
   display: grid;
   grid-template-columns: 1.02fr 1fr;
   align-items: center;
-  min-height: 760px;
-  padding-block: 92px 100px;
+  min-height: 0;
+  padding-block: 32px 48px;
   gap: 24px;
 }
 .hero-badge {
@@ -1003,13 +1003,13 @@
   color: #e0e3d7;
   margin-bottom: 18px;
 }
-.footer-grid > div > a:not(.brand-lockup) {
+.footer-grid > :is(div, nav) > a:not(.brand-lockup) {
   display: block;
   font-size: 11px;
   color: #929985;
   margin-block: 9px;
 }
-.footer-grid > div > a:hover {
+.footer-grid > :is(div, nav) > a:hover {
   color: var(--signal);
 }
 .footer-bottom {
@@ -1307,9 +1307,6 @@
   }
 }
 @media (min-width: 1500px) {
-  .hero {
-    min-height: 800px;
-  }
   .hero-system {
     scale: 1.05;
   }
@@ -1331,8 +1328,7 @@
     gap: 14px;
   }
   .hero {
-    min-height: 660px;
-    padding-block: 70px;
+    padding-block: 32px 40px;
   }
   .hero h1 {
     font-size: 64px;
@@ -1496,7 +1492,7 @@
   }
   .hero {
     grid-template-columns: 1fr;
-    padding-block: 50px 25px;
+    padding-block: 28px 25px;
     gap: 0;
     min-height: 0;
   }

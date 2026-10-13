@@ -5,6 +5,8 @@ import { z } from "zod";
 import { getDb } from "@/db";
 import { companionDevices, companionPairingChallenges } from "@/db/schema";
 import { hashCompanionSecret, hashPairingChallenge } from "@/lib/companion/device-auth";
+import { getMembership } from "@/lib/workspace";
+import { can } from "@/lib/permissions";
 import { readSmallJson } from "@/lib/companion/request-body";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +18,8 @@ export async function POST(request: Request) {
   const body = await readSmallJson(request);
   const parsed = input.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "Invalid pairing request." }, { status: 400 });
+  const membership = await getMembership(parsed.data.userId, parsed.data.workspaceId);
+  if (!membership || !can(membership.role, "brand:write")) return NextResponse.json({ error: "Pairing permission was revoked." }, { status: 403 });
   const challengeHash = hashPairingChallenge(parsed.data.challenge);
   const result = await getDb().transaction(async tx => {
     const [challenge] = await tx.select().from(companionPairingChallenges)

@@ -549,7 +549,7 @@ function reelSection(script: MasterPromptScript): string {
     out.push(
       "Outro: " +
         script.outro.trim() +
-        " — end frame holds the CTA and leaves clean space for the logo (composited later).",
+        " — end frame holds the CTA and integrates the supplied original logo in a suitable position.",
     );
   }
   out.push(
@@ -564,7 +564,7 @@ const AVOID_LIST = [
   "Rendering the full caption inside the image — only the specified headline, label and CTA appear.",
   "Unwanted objects, extra subjects or props beyond this brief.",
   "Watermarks, signatures, stock-photo marks or source-credits.",
-  "Logos — the real brand logo is composited onto the final visual afterwards; leave the clean space specified and never draw a logo yourself.",
+  "Logos — use only the supplied original brand logo reference, preserving its identity; never draw a logo from imagination or replace it with an unrelated mark. Choose placement to fit the composition; no later overlay is added.",
   "Added frames, borders, rounded-corner masks or device mockups around the artwork.",
   "Text clipped or bleeding outside the safe areas listed above.",
   "Color drift away from the specified palette, or oversaturated/over-filtered looks.",

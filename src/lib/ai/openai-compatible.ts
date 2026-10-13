@@ -240,6 +240,7 @@ function buildRequestBody(args: {
   }
   if (o.toolChoice) {
     if (o.toolChoice.type === "auto") body.tool_choice = "auto";
+    else if (o.toolChoice.type === "required") body.tool_choice = "required";
     else if (o.toolChoice.type === "none") body.tool_choice = "none";
     else if (o.toolChoice.type === "tool") {
       body.tool_choice = { type: "function", function: { name: o.toolChoice.toolName } };
@@ -283,7 +284,9 @@ async function throwForHttpError(
     statusCode: res.status,
     responseBody,
     responseHeaders: Object.fromEntries(res.headers.entries()),
-    isRetryable: res.status === 429 || res.status >= 500,
+    // Daily quotas/billing cannot recover during the SDK's seconds-long
+    // retry window. Preserve retries for short-window throttling and 5xx.
+    isRetryable: (res.status === 429 && !/tokens?\s+per\s+day|requests?\s+per\s+day|\bTPD\b|\bRPD\b|insufficient[_ ]quota|credits?\s+(?:exhausted|balance)|billing/i.test(message)) || res.status >= 500,
   });
 }
 

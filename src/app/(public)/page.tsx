@@ -12,11 +12,12 @@ import { JsonLd } from "@/components/public/schema";
 import { ArticleCard } from "@/components/public/article-card";
 import { getArticles } from "@/lib/public/articles";
 
-export const metadata = publicMetadata(
+const homepageMetadata = publicMetadata(
   "Qurtiz AI — Your AI Social Media Operating System",
   "Research, create, design, review, schedule, publish and analyze in one brand-aware AI workspace. Free software with public source and configurable providers.",
   "/",
 );
+export const metadata = { ...homepageMetadata, title: { absolute: "Qurtiz AI — Your AI Social Media Operating System" } };
 export default function HomePage() {
   return (
     <>
@@ -29,10 +30,10 @@ export default function HomePage() {
               "@id": absoluteUrl("/#organization"),
               name: "Qurtiz AI",
               url: absoluteUrl("/"),
-              logo: absoluteUrl("/brand/symbol.svg"),
+              logo: { "@type": "ImageObject", url: absoluteUrl("/brand/icon-512.png"), contentUrl: absoluteUrl("/brand/icon-512.png"), width: 512, height: 512, caption: "Qurtiz AI logo" },
               sameAs: [repositoryUrl],
             },
-            { "@type": "WebSite", name: "Qurtiz AI", url: absoluteUrl("/") },
+            { "@type": "WebSite", "@id": absoluteUrl("/#website"), name: "Qurtiz AI", alternateName: ["Qurtiz", new URL(absoluteUrl("/")).hostname], url: absoluteUrl("/"), publisher: { "@id": absoluteUrl("/#organization") }, inLanguage: "en" },
             {
               "@type": "WebApplication",
               name: "Qurtiz AI",

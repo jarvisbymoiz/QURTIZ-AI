@@ -44,12 +44,12 @@ function extractJson(text: string): unknown {
  * AI-knowledge topics and say so (never presenting them as live results).
  */
 async function groundedSources(
-  ctx: { workspaceId: string; userId: string },
+  ctx: { workspaceId: string; userId: string; signal?: AbortSignal },
   query: string,
   resolved: ResolvedTextModel,
 ): Promise<{ url: string; title: string }[]> {
   try {
-    const bundle = await trendSourceBundle(ctx, query, { strategies: ["trends", "news", "community"] });
+    const bundle = await trendSourceBundle(ctx, query, { strategies: ["trends", "news", "community"], signal: ctx.signal });
     if (bundle.ok) {
       return bundle.sources.slice(0, 10).map((s) => ({ url: s.url, title: s.title }));
     }
@@ -57,6 +57,7 @@ async function groundedSources(
       `[research] brave trend bundle produced no sources (failures: ${bundle.failures.map((f) => `${f.strategy}:${f.reason}`).join(", ") || "none"}) — evaluating fallback`,
     );
   } catch (error) {
+    ctx.signal?.throwIfAborted();
     console.warn("[research] brave trend bundle errored:", error instanceof Error ? error.message : error);
   }
   if (resolved.provider !== "gemini") {
@@ -71,10 +72,10 @@ async function groundedSources(
         method: "POST",
         headers: { "x-goog-api-key": resolved.apiKey, "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
+          contents: [{ parts: [{ text: query }] }],
           tools: [{ google_search: {} }],
         }),
-        signal: AbortSignal.timeout(90_000),
+        signal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
       },
     );
     if (!res.ok) return [];
@@ -85,6 +86,7 @@ async function groundedSources(
       .map((c) => ({ url: c.web?.uri ?? "", title: c.web?.title ?? "" }))
       .filter((s) => s.url);
   } catch {
+    ctx.signal?.throwIfAborted();
     return [];
   }
 }
@@ -108,6 +110,7 @@ export async function researchTopics(ctx: {
    *  Defaults to none — other callers are unaffected. */
   context?: string | null;
   workspaceOnlyMemory?: boolean;
+  signal?: AbortSignal;
 }): Promise<ResearchResult> {
   // Workspace-isolated: resolves THIS workspace's text model (AIConfigError
   // when unset → honest "config" result, never another tenant's key).
@@ -154,7 +157,7 @@ Research content opportunities: trending angles, audience questions, content gap
 
   try {
     const grounded = await groundedSources(
-      { workspaceId: ctx.workspaceId, userId: ctx.userId },
+      { workspaceId: ctx.workspaceId, userId: ctx.userId, signal: ctx.signal },
       `${ctx.niche}${ctx.notes ? ` ${ctx.notes}` : ""}`.slice(0, 300),
       resolved,
     );
@@ -167,10 +170,11 @@ Research content opportunities: trending angles, audience questions, content gap
       maxOutputTokens: 4096,
       // Bounded: a stalled provider request aborts instead of hanging the
       // caller forever; SDK-internal retries capped at 1 on top.
-      abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+      abortSignal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS)]) : AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
       maxRetries: 1,
     });
 
+    ctx.signal?.throwIfAborted();
     try {
       await db
         .update(agentRuns)
@@ -225,6 +229,7 @@ Research content opportunities: trending angles, audience questions, content gap
 
   if (rawTopics.length === 0) return { ok: false, reason: "empty", message: "No topics were produced — try a more specific niche." };
 
+  ctx.signal?.throwIfAborted();
   const inserted = await db
     .insert(researchItems)
     .values(

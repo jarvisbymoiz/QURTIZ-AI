@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useRouter } from "next/navigation";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { Info, Loader2, Plug, RefreshCw, Sparkles } from "lucide-react";
 import { runPerformanceAnalysisAction, syncInsightsAction } from "@/server/actions/analytics";
@@ -36,6 +36,7 @@ export function AnalyticsClient({
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
+  const [syncReport, setSyncReport] = useState<string | null>(null);
   const hasData = totals.posts > 0;
 
   // Honest data-path notices. Analytics come exclusively from Meta-connected
@@ -54,8 +55,10 @@ export function AnalyticsClient({
     start(async () => {
       const r = await syncInsightsAction();
       if (r.ok) {
-        toast.success(`Synced ${r.synced ?? 0} posts${r.errors ? ` (${r.errors.length} warnings)` : ""}`);
-        if (r.errors) console.warn(r.errors);
+        const summary = r.busy ? "Sync is already running or not due." : `Checked ${r.checked ?? 0} · Synced ${r.synced ?? 0} · Skipped ${r.skipped ?? 0} · Failed ${r.failed ?? 0}${r.remaining ? ` · ${r.remaining} remaining (background sync will continue)` : ""}`;
+        const reasons = Object.entries(r.warnings ?? {}).map(([reason, count]) => `${reason}: ${count}`).join(" · ");
+        setSyncReport(`${summary}${reasons ? ` — ${reasons}` : ""}`);
+        if (r.failed || r.skipped) toast.warning(summary); else toast.success(summary);
         router.refresh();
       } else toast.error(r.error);
     });
@@ -85,6 +88,8 @@ export function AnalyticsClient({
         <span className="text-xs text-muted-foreground">Sync also runs automatically every 4 hours.</span>
       </div>
 
+      {syncReport ? <p role="status" className="rounded-lg border p-3 text-sm text-muted-foreground [overflow-wrap:anywhere]">{syncReport}</p> : null}
+
       {showBufferRouteNotice ? (
         <Alert>
           <Info className="size-4" aria-hidden />
@@ -109,9 +114,10 @@ export function AnalyticsClient({
 
       {hasData ? (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             {[
               { label: "Posts measured", value: totals.posts },
+              { label: "Views", value: (totals.views ?? 0).toLocaleString() },
               { label: "Reach", value: totals.reach.toLocaleString() },
               { label: "Engagement", value: totals.engagement.toLocaleString() },
               { label: "Engagement rate", value: `${totals.engagementRate}%` },

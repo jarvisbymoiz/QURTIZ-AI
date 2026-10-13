@@ -8,24 +8,24 @@ import { aiInsights, contentItems, postMetrics } from "@/db/schema";
 import { AIConfigError } from "@/lib/ai/provider";
 import { getWorkspaceTextModel } from "@/lib/ai/config";
 import { AI_GENERATION_TIMEOUT_MS } from "@/lib/ai/content";
-import { syncInsightsForWorkspace } from "@/lib/analytics/sync";
+import { syncInsightsForWorkspace, type SyncResult } from "@/lib/analytics/sync";
 import { bestPostingHours, groupPerformance, sumTotals, type MetricsRow } from "@/lib/analytics/compute";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
-export async function syncInsightsAction(): Promise<ActionResult & { synced?: number; errors?: string[] }> {
+export async function syncInsightsAction(): Promise<ActionResult & Partial<SyncResult>> {
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
   try {
     const result = await syncInsightsForWorkspace(ctx.workspaceId);
     revalidatePath("/analytics");
+    revalidatePath("/dashboard");
     return {
       ok: true,
-      synced: result.synced,
-      errors: result.errors.length > 0 ? result.errors : undefined,
+      ...result,
     };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Sync failed" };

@@ -195,6 +195,18 @@ function reviewableDb() {
 }
 
 describe("scheduleItem", () => {
+  it("limits campaign scheduling to selected platforms without changing the default", async () => {
+    const {db,calls}=makeDb({item:{id:'item-1',status:'approved'},variants:[
+      {id:'v-fb',contentItemId:'item-1',workspaceId:'ws-1',platform:'facebook',status:'approved'},
+      {id:'v-ig',contentItemId:'item-1',workspaceId:'ws-1',platform:'instagram',status:'approved'},
+    ]});
+    mockedGetDb.mockReturnValue(db as unknown as ReturnType<typeof getDb>);
+    const result=await scheduleItem({workspaceId:'ws-1',itemId:'item-1',dateIso:FUTURE,timezone:TZ,platforms:['facebook']});
+    expect(result.ok).toBe(true);
+    const inserts=calls.filter(c=>c.kind==='insert');
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].values?.contentVariantId).toBe('v-fb');
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });

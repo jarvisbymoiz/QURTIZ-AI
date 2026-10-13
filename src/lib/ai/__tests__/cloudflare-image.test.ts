@@ -127,7 +127,7 @@ describe("Cloudflare Workers AI native image adapter", () => {
     vi.stubGlobal("fetch", fetchMock);
     const reference = { mimeType: "image/jpeg", base64: source.toString("base64") };
     const result = await generateImage({ provider: "cloudflare", modelId, baseUrl, apiKey: token,
-      prompt: "Use both references", references: [reference, reference, reference] });
+      prompt: "Use both references", references: [reference, reference] });
     expect(result.ok).toBe(true);
     const form = runCalls(fetchMock)[0][1].body as FormData;
     expect(form.get("input_image_0")).toBeInstanceOf(File);
@@ -146,13 +146,13 @@ describe("Cloudflare Workers AI native image adapter", () => {
     if (result.ok) expect((await sharp(result.png).metadata()).format).toBe("png");
   });
 
-  it("continues with textual reference context when a model schema has no image input", async () => {
+  it("fails clearly when a model schema has no image input", async () => {
     const source = await jpeg();
     const fetchMock = vi.fn(async (url: string) => url.includes("/models/schema") ? schemaResponse() : new Response(JSON.stringify({ result: { image: source.toString("base64") } }), { headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const result = await generateImage({ provider: "cloudflare", modelId: flux, baseUrl, apiKey: token,
       prompt: "Portrait", references: [{ mimeType: "image/png", base64: "AA==" }] });
-    expect(result.ok).toBe(true);
-    expect(JSON.parse(String(runCalls(fetchMock)[0][1].body))).toEqual({ prompt: "Portrait" });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("accepts 0 image references") });
+    expect(runCalls(fetchMock)).toHaveLength(0);
   });
 });

@@ -52,6 +52,7 @@ export async function scheduleItem(args: {
   dateIso: string;
   timeStr?: string; // "HH:mm" — defaults to 18:30 in the workspace timezone
   timezone: string;
+  platforms?: ContentPlatform[];
 }): Promise<ScheduleOutcome> {
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(args.dateIso);
   if (!isValidTimezone(args.timezone)) return { ok: false, reason: "invalid_timezone", message: "Choose a valid workspace timezone." };
@@ -128,10 +129,11 @@ export async function scheduleItem(args: {
     };
   }
 
-  const variants = await db
+  const allVariants = await db
     .select({ id: contentVariants.id, platform: contentVariants.platform, status: contentVariants.status })
     .from(contentVariants)
     .where(and(eq(contentVariants.contentItemId, item.id), eq(contentVariants.workspaceId, args.workspaceId)));
+  const variants = args.platforms ? allVariants.filter(v => args.platforms!.includes(v.platform)) : allVariants;
   if (variants.length === 0) {
     return { ok: false, reason: "no_variants", message: "This item has no platform variants to schedule." };
   }

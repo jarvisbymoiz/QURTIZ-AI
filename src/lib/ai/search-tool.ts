@@ -25,27 +25,31 @@ function agentFacingFailure(userMessage: string): string {
     `${userMessage} ` +
     "This came from the built-in Qurtiz research service (Brave Search, platform-level) — " +
     "it is independent of the selected AI model, so do NOT attribute it to the AI provider or model. " +
-    "Tell the user the real reason briefly and do NOT present model-knowledge lists as current/live data."
+    "Do not describe invalid_request or HTTP 422 as temporary; correct arguments/configuration before retrying. Tell the user the real reason briefly and do NOT present model-knowledge lists as current/live data."
   );
 }
 
-export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; userId: string }) {
+export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; userId: string; abortSignal?: AbortSignal; onResearch?: (reference: string) => void }) {
   return tool({
     description:
-      "Search the live web right now through Qurtiz's built-in research service (works with ANY selected AI model — no provider-native search needed). Use for anything current or external to the brand: trends in the workspace niche, latest news, prices, recent events, what communities and creators are saying. Returns sourced results for you to analyze.",
+      "Search live web via Qurtiz ResearchService/Brave. Returns sourced results; independent of the LLM provider.",
     inputSchema: z.object({
-      query: z.string().min(3).max(300).describe("What to search for"),
+      query: z.string().trim().min(3).max(300).describe("What to search for"),
       strategy: z
         .enum(RESEARCH_STRATEGY_IDS as [ResearchStrategy, ...ResearchStrategy[]])
         .optional()
         .describe(
-          "Source focus: trends (Google Trends/search interest), official (official sources), news (current news), announcements (product/company news), community (Reddit), creators (YouTube), or web (broad fallback, the default).",
+          "Optional source focus; default web.",
         ),
-      region: z.string().max(10).optional().describe("2-letter region code, e.g. US. Defaults to the platform default."),
-      freshness: z.enum(["pd", "pw", "pm", "py"]).optional().describe("Recency window: pd=past day, pw=past week, pm=past month, py=past year."),
+      region: z.string().regex(/^(?:[A-Za-z]{2}|ALL)$/).optional().describe("Country code or ALL. Unsupported country indexes use worldwide search."),
+      freshness: z.enum(["pd", "pw", "pm", "py"]).optional().describe("Recency: day, week, month, year."),
     }),
-    execute: async (input) => {
+    execute: async (input, options) => {
+      ctx.onResearch?.("");
+      const signals = [ctx.abortSignal, options.abortSignal].filter((signal): signal is AbortSignal => !!signal);
+      const signal = signals.length ? AbortSignal.any(signals) : undefined;
       try {
+        signal?.throwIfAborted();
         const result = await searchResearch({
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
@@ -53,18 +57,19 @@ export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; us
           strategy: input.strategy ?? null,
           region: input.region ?? null,
           freshness: input.freshness ?? null,
+          signal,
         });
 
         if (!result.ok) {
           console.info(
-            `[research] web_search failed reason=${result.reason} query="${input.query.slice(0, 120)}"${result.retryAfterSeconds !== undefined ? ` retryAfterSeconds=${result.retryAfterSeconds}` : ""}`,
+            `[research] web_search failed reason=${result.reason}${result.retryAfterSeconds !== undefined ? ` retryAfterSeconds=${result.retryAfterSeconds}` : ""}`,
           );
           await ctx.logStep("web_search", input, { ok: false, reason: result.reason });
           return { searched: false, reason: result.reason, message: agentFacingFailure(result.message) };
         }
 
         if (result.count === 0) {
-          console.info(`[research] web_search no_results query="${input.query.slice(0, 120)}" strategy=${result.strategy}`);
+          console.info(`[research] web_search reason=empty_results strategy=${result.strategy}`);
           await ctx.logStep("web_search", input, { ok: true, count: 0 });
           return {
             searched: true,
@@ -82,8 +87,9 @@ export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; us
           4000,
         );
         console.info(
-          `[research] web_search ok results=${result.count} strategy=${result.strategy} fromCache=${result.fromCache} deduped=${result.deduped} query="${input.query.slice(0, 120)}"`,
+          `[research] web_search ok results=${result.count} strategy=${result.strategy} fromCache=${result.fromCache} deduped=${result.deduped}`,
         );
+        ctx.onResearch?.(summary + "\nSource URLs:\n" + result.results.map(r => r.url).join("\n"));
         await ctx.logStep("web_search", input, { ok: true, count: result.count, fromCache: result.fromCache });
         return {
           searched: true,
@@ -94,10 +100,11 @@ export function makeWebSearchTool(ctx: { logStep: LogFn; workspaceId: string; us
           sources: result.results.map((r) => ({ title: r.title, url: r.url })),
         };
       } catch (error) {
+        if (signal?.aborted) throw error;
         // Absolute safety net: a research failure must surface as a tool
         // result the agent can explain — never a broken agent stream.
-        const message = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
-        console.warn(`[research] web_search internal error: ${message}`);
+        const message = "The research service encountered an internal error.";
+        console.warn("[research] web_search reason=provider_error");
         await ctx.logStep("web_search", input, { ok: false });
         return {
           searched: false,

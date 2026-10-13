@@ -1,6 +1,7 @@
+vi.mock("@/lib/workspace-deletion", () => ({ workspaceDeletionTick: vi.fn(async () => ({})) }));
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-vi.mock("@/lib/jobs/workflows", () => ({ publishDueScan: vi.fn(async () => ({ checked: 0, interrupted: 0 })), autopilotLoop: vi.fn(), refreshPendingDeliveryNotifications: vi.fn() }));
+vi.mock("@/lib/jobs/workflows", () => ({ publishDueScan: vi.fn(async () => ({ checked: 0, interrupted: 0 })), autopilotLoop: vi.fn(), refreshPendingDeliveryNotifications: vi.fn(), runQueuedCampaign: vi.fn() }));
 vi.mock("@/lib/publishing/service", () => ({ reconcileBufferDeliveries: vi.fn(async () => undefined) }));
 vi.mock("@/lib/media/cleanup-worker", () => ({ mediaCleanupTick: vi.fn() }));
 vi.mock("@/lib/companion/image-jobs", () => ({
@@ -9,9 +10,10 @@ vi.mock("@/lib/companion/image-jobs", () => ({
 }));
 vi.mock("@/db", () => ({ getDb: () => ({ update: () => ({ set: () => ({ where: async () => [] }) }) }) }));
 vi.mock("@supabase/ssr", () => ({ createServerClient: vi.fn(() => { throw Error("Cron must not require a browser session"); }) }));
+import { workspaceDeletionTick } from "@/lib/workspace-deletion";
 import { GET as publish } from "@/app/api/cron/publish/route";
 import { GET as maintenance } from "@/app/api/cron/maintenance/route";
-import { publishDueScan, refreshPendingDeliveryNotifications } from "../workflows";
+import { publishDueScan, refreshPendingDeliveryNotifications, runQueuedCampaign } from "../workflows";
 import { reconcileBufferDeliveries } from "@/lib/publishing/service";
 import { updateSession } from "@/lib/supabase/middleware";
 
@@ -24,7 +26,7 @@ describe("machine cron endpoints", () => {
     expect((await handler(new NextRequest("https://example.test/api/cron/publish"))).status).toBe(401);
     expect(publishDueScan).not.toHaveBeenCalled();
   });
-  it.each(["publish", "maintenance"])("allows %s through session middleware; the route authenticates it", async path => {
+  it.each(["publish", "maintenance", "insights"])("allows %s through session middleware; the route authenticates it", async path => {
     const response = await updateSession(new NextRequest(`https://example.test/api/cron/${path}`));
     expect(response.headers.get("location")).toBeNull();
     expect(response.status).toBe(200);
@@ -48,6 +50,15 @@ describe("machine cron endpoints", () => {
     expect(response.status).toBe(200);
     expect(reconcileBufferDeliveries).toHaveBeenCalledOnce();
     expect(refreshPendingDeliveryNotifications).toHaveBeenCalledOnce();
+    expect(runQueuedCampaign).toHaveBeenCalledOnce();
     expect(publishDueScan).not.toHaveBeenCalled();
   });
+});
+
+
+it("reports workspace cleanup row failures as a failed maintenance task", async () => {
+  vi.stubEnv("CRON_SECRET", "test-cron-secret");
+  vi.mocked(workspaceDeletionTick).mockResolvedValueOnce({ checked: 1, completed: 0, pending: 0, failed: 1 });
+  const response = await maintenance(new NextRequest("https://example.test/api/cron/maintenance", { headers: { authorization: "Bearer test-cron-secret" } }));
+  expect(response.status).toBe(500); expect(await response.json()).toMatchObject({ ok: false, failedTasks: ["workspace_cleanup"] });
 });

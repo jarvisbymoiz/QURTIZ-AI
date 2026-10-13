@@ -28,11 +28,13 @@ export type BraveResult = {
 };
 
 export type BraveErrorKind =
+  | "invalid_request"
   | "disabled" // BRAVE_SEARCH_API_KEY missing/empty
   | "unauthorized" // Brave rejected the key (401/403)
   | "quota" // 429 (rate/quota) — retry-after surfaced when Brave provides it
   | "http" // other non-2xx after bounded retry
   | "network" // fetch threw a transport error after bounded retry
+  | "response" // malformed provider JSON; not a transport failure
   | "timeout"; // aborted by our own timeout signal
 
 export class BraveSearchError extends Error {
@@ -91,14 +93,18 @@ function stripMarkup(value: string): string {
 
 /** Normalize Brave web results into the public, cache-safe shape. */
 function normalizeResults(json: BraveWebResponse): BraveResult[] {
+  if (!json || typeof json !== "object" || (json.web?.results !== undefined && !Array.isArray(json.web.results))) {
+    throw new BraveSearchError("response", "Brave Search returned an invalid results payload.");
+  }
   const out: BraveResult[] = [];
-  for (const raw of json.web?.results ?? []) {
-    if (!raw.url || typeof raw.url !== "string" || !raw.url.startsWith("http")) continue;
+  for (const raw of (json.web?.results ?? []).slice(0, 20)) {
+    if (!raw || typeof raw.url !== "string") continue;
+    try { if (!["https:", "http:"].includes(new URL(raw.url).protocol)) continue; } catch { continue; }
     out.push({
-      title: stripMarkup(raw.title ?? ""),
+      title: stripMarkup(typeof raw.title === "string" ? raw.title : "").slice(0, 300),
       url: raw.url,
-      description: stripMarkup(raw.description ?? ""),
-      age: raw.age ?? null,
+      description: stripMarkup(typeof raw.description === "string" ? raw.description : "").slice(0, 1600),
+      age: typeof raw.age === "string" ? raw.age.slice(0, 100) : null,
     });
   }
   return out;
@@ -119,6 +125,44 @@ export type BraveSearchInput = {
   fetchImpl?: typeof fetch;
 };
 
+// Brave's supported search enums differ from the complete ISO country/language lists.
+export const BRAVE_REGIONS = "AR AU AT BE BR CA CL DK FI FR DE GR HK IN ID IT JP KR MY MX NL NZ NO CN PL PT PH RU SA ZA ES SE CH TW TR GB US ALL".split(" ");
+export const BRAVE_LANGUAGES = "ar eu bn bg ca zh-hans zh-hant hr cs da nl en en-gb et fi fr gl de el gu he hi hu is it ja jp kn ko lv lt ms ml mr nb pl pt-br pt-pt pa ro ru sr sk sl es sv ta te th tr uk vi".split(" ");
+export function normalizeBraveRegion(value: string): string {
+  const region = value.trim().toUpperCase();
+  if (BRAVE_REGIONS.includes(region)) return region;
+  // Valid countries without a Brave localized index (e.g. PK) use worldwide search.
+  if (/^[A-Z]{2}$/.test(region) && new Intl.DisplayNames(["en"], { type: "region" }).of(region) !== region) return "ALL";
+  throw new BraveSearchError("invalid_request", "Invalid search country. Use a supported country code or ALL.");
+}
+export function validateBraveInput(input: BraveSearchInput) {
+  const invalid = (message: string): never => { throw new BraveSearchError("invalid_request", message); };
+  const query = typeof input.query === "string" ? input.query.trim().replace(/\s+/g, " ") : "";
+  if (!query || query.length > 600 || query.split(" ").length > 75) invalid("Search query must contain 1–600 characters and at most 75 words.");
+  const region = input.region ? normalizeBraveRegion(input.region) : undefined;
+  const language = input.language?.trim().toLowerCase();
+  if (region && !BRAVE_REGIONS.includes(region)) invalid("Unsupported Brave country. Use a supported search region or ALL for worldwide results.");
+  if (language && !BRAVE_LANGUAGES.includes(language)) invalid("Unsupported Brave search language. Use a supported search language such as en, not a UI locale such as en-US.");
+  const count = input.count ?? 10;
+  if (!Number.isInteger(count) || count < 1 || count > 20) invalid("Search result count must be an integer between 1 and 20.");
+  const freshness = input.freshness?.trim();
+  if (freshness && !["pd", "pw", "pm", "py"].includes(freshness)) {
+    const range = /^(\d{4}-\d{2}-\d{2})to(\d{4}-\d{2}-\d{2})$/.exec(freshness);
+    if (!range || range[1] > range[2] || range.slice(1).some(date => !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date)) invalid("Invalid search freshness. Use pd, pw, pm, py or a valid ordered YYYY-MM-DDtoYYYY-MM-DD range.");
+  }
+  return { query, region, language, count, freshness };
+}
+
+/** Never surface upstream input values, headers, tokens or arbitrary response text. */
+async function validationFields(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const fields = (body?.error?.meta?.errors ?? []).slice(0, 8).flatMap((error: { loc?: unknown[] }) =>
+      (error.loc ?? []).filter((field): field is string => typeof field === "string" && ["q", "count", "country", "search_lang", "freshness"].includes(field)));
+    return fields.length ? ` Invalid fields: ${[...new Set(fields)].join(", ")}.` : "";
+  } catch { return ""; }
+}
+
 /**
  * Perform one Brave web search with the shared project key.
  * Throws BraveSearchError (typed) — never raw fetch/provider errors.
@@ -133,16 +177,13 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
   }
 
   const fetchImpl = input.fetchImpl ?? fetch;
-  const params = new URLSearchParams({
-    q: input.query.slice(0, 400),
-    count: String(Math.max(1, Math.min(input.count ?? 10, 20))),
-  });
-  if (input.region) params.set("country", input.region.slice(0, 20));
-  if (input.language) params.set("search_lang", input.language.slice(0, 20));
-  if (input.freshness) params.set("freshness", input.freshness.slice(0, 20));
+  const validated = validateBraveInput(input);
+  const params = new URLSearchParams({ q: validated.query, count: String(validated.count) });
+  if (validated.region) params.set("country", validated.region);
+  if (validated.language) params.set("search_lang", validated.language);
+  if (validated.freshness) params.set("freshness", validated.freshness);
 
   const url = `${ENDPOINT}?${params.toString()}`;
-  let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -153,9 +194,12 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
           "Accept-Encoding": "gzip",
           "X-Subscription-Token": apiKey,
         },
-        signal: input.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+        signal: AbortSignal.any([AbortSignal.timeout(DEFAULT_TIMEOUT_MS), ...(input.signal ? [input.signal] : [])]),
       });
 
+      if (res.status === 400 || res.status === 422) {
+        throw new BraveSearchError("invalid_request", `Brave Search rejected the request (HTTP ${res.status}).${await validationFields(res)} Correct the search arguments/configuration before retrying; this is not a temporary outage.`, { httpStatus: res.status });
+      }
       if (res.status === 401 || res.status === 403) {
         // Bad/revoked shared key — a platform configuration problem, never
         // retried (retries would just burn quota against a bad key).
@@ -175,9 +219,6 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
       if (!res.ok) {
         // Transient upstream failure: one bounded retry, then give up.
         if (res.status >= 500 && attempt < MAX_ATTEMPTS) {
-          lastError = new BraveSearchError("http", "Brave Search upstream error (HTTP " + res.status + ").", {
-            httpStatus: res.status,
-          });
           await sleep(backoffMs(attempt));
           continue;
         }
@@ -186,7 +227,9 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
         });
       }
 
-      const json = (await res.json()) as BraveWebResponse;
+      let json: BraveWebResponse;
+      try { json = await res.json() as BraveWebResponse; }
+      catch { throw new BraveSearchError("response", "Brave Search returned invalid JSON."); }
       return normalizeResults(json);
     } catch (error) {
       if (error instanceof BraveSearchError) throw error;
@@ -195,7 +238,6 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
       }
       if (error instanceof DOMException && error.name === "AbortError") throw error; // caller-initiated abort: rethrow as-is
       // Transport-level failure (DNS, TLS, connection reset): one bounded retry.
-      lastError = error;
       if (attempt < MAX_ATTEMPTS) {
         await sleep(backoffMs(attempt));
         continue;
@@ -203,6 +245,5 @@ export async function braveWebSearch(input: BraveSearchInput): Promise<BraveResu
     }
   }
 
-  const detail = lastError instanceof Error ? lastError.message : "unknown transport error";
-  throw new BraveSearchError("network", `Brave Search transport failure: ${detail.slice(0, 120)}`);
+  throw new BraveSearchError("network", "Brave Search transport failure.");
 }

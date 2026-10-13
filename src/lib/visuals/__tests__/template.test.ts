@@ -17,7 +17,7 @@ describe("renderTemplateVisual", () => {
     expect(png.slice(1, 4).toString("ascii")).toBe("PNG");
   });
 
-  it("renders the statement layout with a logo data URL", { timeout: 60_000 }, async () => {
+  it("does not insert a logo even when a legacy caller supplies its data URL", { timeout: 60_000 }, async () => {
     const tinyLogo =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const png = await renderTemplateVisual({
@@ -32,5 +32,10 @@ describe("renderTemplateVisual", () => {
     });
     expect(png.length).toBeGreaterThan(15_000);
     expect(png.slice(1, 4).toString("ascii")).toBe("PNG");
+    const withoutLogo = await renderTemplateVisual({
+      primaryColor: "#111827", secondaryColor: "#374151", headline: "Why consistency beats virality",
+      subline: "", cta: "", brandName: "Test Brand", logoDataUrl: null, layout: "statement",
+    });
+    expect(png.equals(withoutLogo)).toBe(true);
   });
 });

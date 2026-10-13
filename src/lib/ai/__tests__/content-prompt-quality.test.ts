@@ -39,6 +39,17 @@ describe("content generation system prompt — caption craft", () => {
 });
 
 describe("content generation system prompt — visual direction bar", () => {
+  it("provides exact carousel and reel field names required by validation", () => {
+    expect(system).toContain("index (integer starting at 1), headline");
+    expect(system).toContain("visualPrompt (up to 1200 characters)");
+    expect(system).toContain("durationSeconds and totalDuration");
+  });
+  it("requires concept selection and creative latitude rather than generic decoration", () => {
+    expect(system).toContain("consider distinct concept approaches");
+    expect(system).toContain("Return only the selected executable brief");
+    expect(system).toContain("Give the image model creative latitude");
+    expect(system).toContain("A longer prompt full of adjectives is not a better design brief");
+  });
   it("demands a designer-executable creative brief, not a one-liner", () => {
     expect(system).toMatch(/Visual creative direction/i);
     expect(system).toContain("aspect ratio");
@@ -54,7 +65,8 @@ describe("content generation system prompt — visual direction bar", () => {
   });
 
   it("pins the logo rule and promotional contact/trust elements", () => {
-    expect(system).toMatch(/never ask an image model to draw, approximate, or render the brand logo/i);
+    expect(system).toMatch(/integrate the supplied original logo reference/i);
+    expect(system).toMatch(/no automatic post-generation logo overlay/i);
     expect(system).toMatch(/product or offer treatment, contact placement/i);
   });
 });

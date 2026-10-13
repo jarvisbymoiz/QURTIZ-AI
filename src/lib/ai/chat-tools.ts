@@ -3,7 +3,7 @@ import { z } from "zod";
 
 /** Keep all existing implementations/permission wrappers, expose only the
  * schemas the agent needs for this step. Discovery is metadata-only. */
-export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
+export function createLazyChatTools(existing: ToolSet, currentRequest = "", system?: string, onRegistry?: (names: string[]) => void) {
   // Expose one obvious requested action immediately, avoiding a discovery-only
   // step. This changes schemas, never permissions or automatic execution.
   // Unrecognized/ambiguous requests still use model-directed discovery.
@@ -43,7 +43,9 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
     : editing ? "edit_content"
     : /\b(create|generate|write|make|turn|convert)\b/i.test(currentRequest) && /\b(post|content|carousel|reel|version)\b/i.test(currentRequest) ? "create_content"
     : null;
+  const research = /\b(search|research|latest|current|today|news|trends?|look\s*up|find\s+out)\b/i.test(currentRequest);
   const initial = direct && direct in existing ? [direct, ...(direct === "edit_content" && "find_posts" in existing ? ["find_posts"] : [])] : [];
+  if (research && "web_search" in existing) initial.push("web_search");
   const names = Object.keys(existing) as [string, ...string[]];
   const tools: ToolSet = { ...existing, discover_tools: tool({
     description: "Enable tools needed for the next step. Choose up to four exact names: content/library/visual/approval/scheduling, research/web/competitors, analytics, or bulk status/plans. All names are listed in the input enum. Do not enable unrelated tools.",
@@ -53,6 +55,15 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
   // Editing has its own read/patch workflow. Brand and memory writes remain
   // discoverable, avoiding unrelated schema overhead on small-model edits.
   const core = (direct ? ["discover_tools", "get_content", ...(direct === "create_content" ? ["get_brand_brain"] : [])] : ["discover_tools", "get_brand_brain", "get_content", "list_workspace_facts", "update_brand_memory"]).filter(name => name in tools);
+  const stepConfig = (names: string[]) => {
+    // Search is a read-only backend capability: never gate it on intent heuristics.
+    const activeTools = [...new Set([...names, ...("web_search" in tools ? ["web_search"] : [])])].filter(name => name in tools);
+    onRegistry?.(activeTools);
+    return { activeTools, ...(system === undefined ? {} : { system: `${system}
+
+## Current request tool registry (authoritative)
+Attached callable tools for this step: ${activeTools.join(", ")}. Only call these exact names. Other workflow references describe possible capabilities, not attached tools. For an absent capability, call discover_tools first and wait for its result; never invoke a model-native search tool. Research uses the attached Qurtiz web_search implementation. Prior conversation tool availability does not apply to this request.` }) };
+  };
   const prepareStep: PrepareStepFunction<ToolSet> = ({ steps }) => {
     // Only the latest discovery in THIS run controls availability. Old
     // conversations/tool results never reactivate schemas on a new turn.
@@ -60,10 +71,10 @@ export function createLazyChatTools(existing: ToolSet, currentRequest = "") {
       const discovery = [...step.toolResults].reverse().find(result => result.toolName === "discover_tools");
       if (discovery) {
         const output = discovery.output as { enabledTools?: string[] };
-        return { activeTools: [...new Set(["discover_tools", ...("get_content" in tools ? ["get_content"] : []), ...(output.enabledTools ?? []).filter(name => name in existing)])] };
+        return stepConfig(["discover_tools", ...("web_search" in tools ? ["web_search"] : []), ...("get_content" in tools ? ["get_content"] : []), ...(output.enabledTools ?? []).filter(name => name in existing)]);
       }
     }
-    return { activeTools: [...core, ...initial] };
+    return stepConfig([...core, ...initial, ...("web_search" in tools ? ["web_search"] : [])]);
   };
   return { tools, prepareStep };
 }

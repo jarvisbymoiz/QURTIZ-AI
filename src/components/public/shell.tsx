@@ -32,7 +32,7 @@ export function PublicNavbar() {
         </nav>
         <div className="nav-actions">
           <Link href="/login" className="login-link">
-            Log in
+            Login
           </Link>
           <Link className="public-button small" href="/signup">
             Get started <ArrowUpRight size={14} />
@@ -92,22 +92,22 @@ export function PublicFooter() {
           </a>
         </div>
         {groups.map((group) => (
-          <div key={group.title}>
+          <nav key={group.title} aria-label={`${group.title} links`}>
             <h2>{group.title}</h2>
             {group.links.map(([label, href]) => (
               <Link href={href} key={label}>
                 {label}
               </Link>
             ))}
-          </div>
+          </nav>
         ))}
       </div>
       <div className="footer-bottom">
         <span>© {new Date().getUTCFullYear()} Qurtiz AI</span>
         <span>Free software. Provider costs may apply.</span>
         <div>
-          <Link href="/login">Log in</Link>
-          <Link href="/signup">Sign up</Link>
+          <Link href="/login">Login</Link>
+          <Link href="/signup">Get started</Link>
           <Link href="/rss.xml">RSS</Link>
         </div>
       </div>

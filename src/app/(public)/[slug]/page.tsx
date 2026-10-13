@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { publicPages } from "@/lib/public/pages";
 import { publicMetadata } from "@/lib/public/site";
-import { Breadcrumbs } from "@/components/public/schema";
+import { Breadcrumbs, PageSchema } from "@/components/public/schema";
 export const dynamicParams = false;
 export function generateStaticParams() {
   return Object.keys(publicPages).map((slug) => ({ slug }));
@@ -27,6 +27,8 @@ export default async function PublicInfoPage({
   if (!page) notFound();
   return (
     <>
+      <PageSchema name={page.title} description={page.description} path={`/${slug}`}
+        type={slug === "about" ? "AboutPage" : slug === "contact" ? "ContactPage" : "WebPage"} />
       <Breadcrumbs
         items={[
           { name: "Home", path: "/" },

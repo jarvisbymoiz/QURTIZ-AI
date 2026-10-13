@@ -13,6 +13,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { CampaignControls, CampaignDayControls } from "./controls";
+import type { campaignReport } from "@/lib/campaigns/manage";
 
 type Campaign = typeof campaigns.$inferSelect;
 type CampaignItem = typeof campaignItems.$inferSelect;
@@ -28,8 +30,11 @@ const STATUS_STYLE: Record<string, string> = {
 function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; aiConfigured: boolean }) {
   const router = useRouter();
   const [pending, start] = useTransition();
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
+  const [cta, setCta] = useState("");
+  const [generateContent, setGenerateContent] = useState(true);
   const [offer, setOffer] = useState("");
   const [audience, setAudience] = useState("");
   const [durationDays, setDurationDays] = useState(7);
@@ -48,6 +53,8 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
         goal: goal || undefined,
         offer: offer || undefined,
         audience: audience || undefined,
+        cta: cta || undefined,
+        generateContent,
         durationDays,
         platforms: platforms as ("facebook" | "instagram")[],
       });
@@ -55,15 +62,15 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
         // The server returns an honest note when the AI arc generation failed
         // and the standard default arc was used instead.
         toast.success(r.note ?? "Campaign queued — content generates in the background");
-        setName(""); setGoal(""); setOffer(""); setAudience("");
+        setName(""); setGoal(""); setOffer(""); setAudience(""); setCta(""); setOpen(false);
         router.refresh();
       } else toast.error(r.error);
     });
   }
 
   return (
-    <Dialog>
-      <DialogTrigger render={<Button disabled={!editable || !aiConfigured} />}>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button disabled={!editable} />}>
         <Sparkles className="size-4" aria-hidden /> New campaign
       </DialogTrigger>
       <DialogContent className="max-w-lg">
@@ -75,6 +82,7 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-3">
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={generateContent} onChange={e=>setGenerateContent(e.target.checked)} /> Generate campaign posts with AI (uncheck to select existing posts)</label>
           <div className="space-y-2">
             <Label htmlFor="c-name">Campaign name</Label>
             <Input id="c-name" value={name} onChange={(e) => setName(e.target.value)} required minLength={2} maxLength={120}
@@ -106,7 +114,7 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
           </div>
           <div className="space-y-2">
             <Label htmlFor="c-cta">CTA</Label>
-            <Input id="c-cta" value={undefined} onChange={(e) => setGoal(e.target.value)} maxLength={300}
+            <Input id="c-cta" value={cta} onChange={(e) => setCta(e.target.value)} maxLength={300}
               placeholder="e.g. DM 'EID' on WhatsApp" />
           </div>
           <div className="space-y-2">
@@ -124,7 +132,7 @@ function CreateCampaignDialog({ editable, aiConfigured }: { editable: boolean; a
               ))}
             </div>
           </div>
-          <Button type="submit" className="w-full" disabled={pending || platforms.length === 0 || name.trim().length < 2}>
+          <Button type="submit" className="w-full" disabled={pending || (generateContent && !aiConfigured) || platforms.length === 0 || name.trim().length < 2}>
             {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
             {pending ? "Creating…" : "Create campaign"}
           </Button>
@@ -141,6 +149,7 @@ export function CampaignsClient({
   jobs,
   aiConfigured,
   editable,
+  reports,
 }: {
   campaigns: Campaign[];
   items: CampaignItem[];
@@ -148,6 +157,7 @@ export function CampaignsClient({
   jobs: { id: string; status: string; progress: number; total: number; error?: string | null }[];
   aiConfigured: boolean;
   editable: boolean;
+  reports: Record<string,Awaited<ReturnType<typeof campaignReport>>>;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -161,7 +171,8 @@ export function CampaignsClient({
         </div>
       ) : null}
       <div className="flex justify-end">
-        <CreateCampaignDialog editable={editable && aiConfigured} aiConfigured={aiConfigured} />
+        <Button variant="outline" size="sm" onClick={()=>router.refresh()}>Refresh status</Button>
+        <CreateCampaignDialog editable={editable} aiConfigured={aiConfigured} />
       </div>
 
       {campaigns.length === 0 ? (
@@ -192,6 +203,9 @@ export function CampaignsClient({
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-2">
+                  <CampaignControls campaign={c} editable={editable} canRetry={job?.status === "failed"} />
+                  <p className="text-xs text-muted-foreground">Linked {reports[c.id]?.linked ?? 0}/{days.length} · Published deliveries {reports[c.id]?.published ?? 0} · Scheduled {reports[c.id]?.scheduled ?? 0} · Failed {reports[c.id]?.failed ?? 0} · Measured views {reports[c.id]?.totals.views ?? 0}</p>
+                  {job?.status === 'queued' && c.status==='generating' ? <p className="text-xs text-muted-foreground">Queued — generation resumes on the next background scheduler tick.</p> : null}
                   {job && job.status === "running" ? (
                     <div className="space-y-1 rounded-lg border p-2">
                       <div className="flex items-center gap-2 text-xs">
@@ -203,14 +217,14 @@ export function CampaignsClient({
                       </div>
                     </div>
                   ) : null}
-                  {job?.status === "failed" ? (
+                  {job?.status === "failed" || job?.error ? (
                     <p className="text-xs text-destructive">{job.error ?? "Generation failed"}</p>
                   ) : null}
                   <div className="space-y-1.5">
                     {days.map((d) => {
                       const linked = d.contentItemId ? contentById.get(d.contentItemId) : undefined;
                       return (
-                        <div key={d.id} className="flex items-center gap-2 rounded-md border p-2 text-xs">
+                        <div key={d.id} className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs">
                           <span className="w-10 shrink-0 font-medium text-muted-foreground">Day {d.dayIndex}</span>
                           <span className="min-w-0 flex-1 truncate">{linked?.topic ?? d.theme}</span>
                           {linked ? (
@@ -218,6 +232,7 @@ export function CampaignsClient({
                           ) : (
                             <Badge variant="secondary">pending</Badge>
                           )}
+                          <CampaignDayControls campaign={c} day={d} content={content} editable={editable} />
                         </div>
                       );
                     })}

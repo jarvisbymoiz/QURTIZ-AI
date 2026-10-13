@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkLocalCompanion, generateLocalCompanionImage, pairLocalCompanion } from "@/lib/ai/local-companion";
 
+vi.mock("@/server/actions/companion-pairing", () => ({ beginCompanionPairingAction: async () => ({ ok: true, challenge: "c".repeat(43) }) }));
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("browser local companion adapter", () => {
@@ -67,5 +69,17 @@ describe("browser local companion adapter", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: [] }), { status: 200 })));
     await expect(generateLocalCompanionImage({ pairingKey: "pair", modelId: "model", prompt: "A tree" }))
       .rejects.toThrow(/malformed/);
+  });
+  it("sends logo and profile reference pixels together without dropping the second file", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ b64_json: "aGVsbG8=" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await generateLocalCompanionImage({ pairingKey: "pair", prompt: "Brand design", references: [
+      { role: "logo", mimeType: "image/png", base64: "aGVsbG8=" }, { role: "profileAvatar", mimeType: "image/jpeg", base64: "d29ybGQ=" },
+      ...[0,1,2].map(index => ({ role: "designReference" as const, mimeType: "image/png", base64: `ZGVzaWdu${index}` })),
+    ] });
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.images).toHaveLength(5);
+    expect(body.images[1].image_url).toBe("data:image/jpeg;base64,d29ybGQ=");
   });
 });

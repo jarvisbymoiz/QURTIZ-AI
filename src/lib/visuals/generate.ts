@@ -1,9 +1,12 @@
 import "server-only";
+import { isWorkspaceStorageKey } from "@/lib/security/storage-key";
+import sharp from "sharp";
 
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getDb } from "@/db";
 import { agentRuns, brandAssets, brands, contentItems, contentVariants, visualAssets } from "@/db/schema";
+import { referenceRole, type ImageReference } from "@/lib/ai/image-references";
 import { generateImage } from "@/lib/ai/image";
 import { getWorkspaceImageTarget } from "@/lib/ai/config";
 import { renderTemplateVisual } from "@/lib/visuals/template";
@@ -13,6 +16,36 @@ import { createClient } from "@/lib/supabase/server";
 export type VisualMode = "template" | "ai";
 
 const BUCKET = "brand-assets";
+
+async function downloadReference(supabase: SupabaseClient, workspaceId: string, asset: { storagePath: string; kind: string }): Promise<Buffer> {
+  if (!isWorkspaceStorageKey(asset.storagePath, workspaceId)) throw new Error("Invalid brand reference storage location.");
+  // Retry only a failed read, never generation or an invalid/missing file.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
+      if (error) throw error;
+      if (!data) throw new Error("missing_reference");
+      if (data.size > 5 * 1024 * 1024) throw new Error("oversized_reference");
+      return Buffer.from(await data.arrayBuffer());
+    } catch (error) {
+      const failure = error as { status?: number; statusCode?: string; cause?: { code?: string }; originalError?: { cause?: { code?: string } } };
+      const status = Number(failure?.status ?? failure?.statusCode);
+      const code = failure?.cause?.code ?? failure?.originalError?.cause?.code;
+      const transient = status === 408 || status === 429 || status >= 500 ||
+        ["UND_ERR_SOCKET", "ECONNRESET", "ETIMEDOUT"].includes(code ?? "");
+      if (!transient || attempt === 1) throw new Error(`The saved brand ${asset.kind} reference could not be loaded. Retry the visual or check Storage access.`);
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+  }
+  throw new Error("Brand reference download failed.");
+}
+
+async function referenceMime(data: Buffer): Promise<string> {
+  const metadata = await sharp(data, { limitInputPixels: 16_000_000 }).metadata();
+  const mime = metadata.format === "jpeg" ? "image/jpeg" : metadata.format === "png" ? "image/png" : metadata.format === "webp" ? "image/webp" : null;
+  if (!mime) throw new Error("A saved brand reference is not a valid PNG, JPEG or WebP image. Please upload it again.");
+  return mime;
+}
 
 export type VisualGenResult =
   | { ok: true; visualId: string; mode: VisualMode; model?: string }
@@ -32,31 +65,33 @@ async function fetchAsset(
     .orderBy(desc(brandAssets.createdAt))
     .limit(1);
   if (!asset) return null;
-
-  const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
-  if (error || !data) {
-    if (kind === "logo") throw new Error("The saved brand logo could not be loaded. The logo is still attached; retry the visual or check Storage access.");
-    return null;
-  }
+  const bytes = await downloadReference(supabase, workspaceId, asset);
   return { assetId: asset.id,
-    data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType, label: asset.label };
+    data: bytes, mimeType: await referenceMime(bytes), label: asset.label };
 }
 
-async function fetchGenerationReferences(supabase: SupabaseClient, workspaceId: string): Promise<
+export async function fetchGenerationReferences(supabase: SupabaseClient, workspaceId: string): Promise<
   { assetId: string; data: Buffer; mimeType: string; label: string | null; kind: string }[]
 > {
   const db = getDb();
+  const logo = await fetchAsset(supabase, workspaceId, "logo");
   const avatar = await fetchAsset(supabase, workspaceId, "avatar");
   const rows = await db.select().from(brandAssets)
     .where(and(eq(brandAssets.workspaceId, workspaceId), eq(brandAssets.kind, "reference"),
       eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0)))
-    .orderBy(desc(brandAssets.createdAt)).limit(3);
-  const downloads = await Promise.all(rows.map(async asset => {
-    const { data, error } = await supabase.storage.from(BUCKET).download(asset.storagePath);
-    return error || !data ? null : { assetId: asset.id,
-      data: Buffer.from(await data.arrayBuffer()), mimeType: asset.mimeType, label: asset.label, kind: asset.kind };
-  }));
+    .orderBy(asc(brandAssets.createdAt), asc(brandAssets.id)).limit(17);
+  if (rows.length > 16) throw new Error("Too many saved design references. Keep at most 16 active references before generating; none were silently discarded.");
+  const downloads: { assetId: string; data: Buffer; mimeType: string; label: string | null; kind: string }[] = [];
+  let totalBytes = (logo?.data.length ?? 0) + (avatar?.data.length ?? 0);
+  for (const asset of rows) {
+    const bytes = await downloadReference(supabase, workspaceId, asset);
+    totalBytes += bytes.length;
+    if (totalBytes > 32 * 1024 * 1024) throw new Error("The complete reference set exceeds 32MB. Reduce the saved references; none were silently discarded.");
+    downloads.push({ assetId: asset.id,
+      data: bytes, mimeType: await referenceMime(bytes), label: asset.label, kind: asset.kind });
+  }
   return [
+    ...(logo ? [{ ...logo, kind: "logo" }] : []),
     ...(avatar ? [{ ...avatar, kind: "avatar" }] : []),
     ...downloads.filter((value): value is NonNullable<typeof value> => value !== null),
   ];
@@ -78,7 +113,7 @@ async function uploadVisual(
  * Generate a visual for a content item.
  * - template: deterministic brand graphic (satori) with the real logo embedded. Free.
  * - ai: photographic generation; avatar/reference images are passed to the model so
- *   people keep the same face/body; the real logo is composited on top afterwards.
+ *   people keep the same face/body; logo references are integrated by the model.
  *   API Mode uses the configured workspace image provider.
  *
  * `storage` is optional and defaults to the request-scoped client (server
@@ -137,12 +172,12 @@ export async function generateVisual(args: {
       // workspace's AI config. Throws AIConfigError when unset.
       const target = await getWorkspaceImageTarget(args.workspaceId);
 
-      const refs: { mimeType: string; base64: string }[] = [];
+      const refs: ImageReference[] = [];
       const referenceLabels: string[] = [];
       const generationRefs = await fetchGenerationReferences(supabase, args.workspaceId);
       for (const reference of generationRefs) {
-        refs.push({ mimeType: reference.mimeType, base64: reference.data.toString("base64") });
-        referenceLabels.push(reference.label || (reference.kind === "avatar" ? "Brand avatar" : "Brand visual reference"));
+        refs.push({ role: referenceRole(reference.kind), mimeType: reference.mimeType, base64: reference.data.toString("base64") });
+        referenceLabels.push(`${reference.kind}: ${reference.label || (reference.kind === "avatar" ? "Brand profile picture" : reference.kind === "logo" ? "Original brand logo for placement in the generated design" : "Brand visual reference")}`);
       }
       let memoryPreferences: string[] = [];
       try {
@@ -176,10 +211,7 @@ export async function generateVisual(args: {
       }
       png = result.png;
       usedModel = result.model;
-
-      png = await compositeBrandLogo(supabase, args.workspaceId, png);
     } else {
-      const logo = await fetchAsset(supabase, args.workspaceId, "logo");
       png = await renderTemplateVisual({
         primaryColor: identity.primaryColor ?? "#6366f1",
         secondaryColor: identity.secondaryColor ?? "#0ea5e9",
@@ -187,7 +219,7 @@ export async function generateVisual(args: {
         subline: (item.mainCopy ?? "").slice(0, 160),
         cta: item.cta ?? "",
         brandName: brand?.businessName ?? "",
-        logoDataUrl: logo ? `data:${logo.mimeType};base64,${logo.data.toString("base64")}` : null,
+        logoDataUrl: null,
         layout: item.format === "text_post" ? "statement" : "promo",
       });
       usedModel = "satori-template";
@@ -209,21 +241,9 @@ export async function generateVisual(args: {
   }
 }
 
-async function compositeBrandLogo(supabase: SupabaseClient, workspaceId: string, png: Buffer): Promise<Buffer> {
-  const logo = await fetchAsset(supabase, workspaceId, "logo");
-  if (!logo) return png;
-  const sharp = (await import("sharp")).default;
-  const base = await sharp(png).metadata();
-  const targetW = Math.round((base.width ?? 1080) * 0.22);
-  const logoResized = await sharp(logo.data).resize({ width: targetW }).png().toBuffer();
-  const logoMeta = await sharp(logoResized).metadata();
-  return sharp(png).composite([{ input: logoResized, left: 36,
-    top: (base.height ?? 1350) - (logoMeta.height ?? 100) - 36 }]).png().toBuffer();
-}
-
 async function persistVisual(args: { supabase: SupabaseClient; workspaceId: string; contentItemId: string;
-  slideIndex?: number; mode: VisualMode; png: Buffer; model: string }) {
-  const db = getDb();
+  slideIndex?: number; mode: VisualMode; png: Buffer; model: string; db?: Pick<ReturnType<typeof getDb>, "select" | "insert" | "update"> }) {
+  const db = args.db ?? getDb();
   const storagePath = await uploadVisual(args.supabase, args.workspaceId, args.contentItemId, args.png);
   const [savedVisual] = await db.insert(visualAssets).values({
     workspaceId: args.workspaceId, contentItemId: args.contentItemId, kind: args.mode,
@@ -254,12 +274,12 @@ export async function prepareExternalVisual(args: { workspaceId: string; userId:
   if (args.variantId && !variant) throw new Error("Content variant not found.");
   const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, args.workspaceId));
   const supabase = args.storage ?? await createClient();
-  const generationRefs = (await fetchGenerationReferences(supabase, args.workspaceId)).slice(0, 1);
-  if (generationRefs[0] && (generationRefs[0].data.length > 4 * 1024 * 1024 ||
-      !/^image\/(png|jpeg|webp)$/.test(generationRefs[0].mimeType))) {
-    throw new Error("The brand reference must be a PNG, JPEG or WebP under 4MB for local generation.");
+  const generationRefs = await fetchGenerationReferences(supabase, args.workspaceId);
+  if (generationRefs.some(ref => !/^image\/(png|jpeg|webp)$/.test(ref.mimeType)) ||
+      generationRefs.reduce((bytes, ref) => bytes + ref.data.length, 0) > 4 * 1024 * 1024) {
+    throw new Error("Brand reference images must be PNG, JPEG or WebP and total at most 4MB for local generation.");
   }
-  const referenceLabels = generationRefs.map(ref => ref.label || (ref.kind === "avatar" ? "Brand avatar" : "Brand visual reference"));
+  const referenceLabels = generationRefs.map(ref => `${ref.kind}: ${ref.label || (ref.kind === "avatar" ? "Brand profile picture" : ref.kind === "logo" ? "Original brand logo for placement in the generated design" : "Brand visual reference")}`);
   let memoryPreferences: string[] = [];
   try {
     const { retrieveAgentMemory } = await import("@/lib/ai/persistent-memory");
@@ -278,15 +298,15 @@ export async function prepareExternalVisual(args: { workspaceId: string; userId:
     slideIndex: args.slideIndex, memoryPreferences, referenceLabels,
   });
   return { brief,
-    references: generationRefs.map(ref => ({ mimeType: ref.mimeType, base64: ref.data.toString("base64") })),
-    referenceAssets: generationRefs.map(ref => ({ id: ref.assetId })) };
+    references: generationRefs.map(ref => ({ role: referenceRole(ref.kind), mimeType: ref.mimeType, base64: ref.data.toString("base64") })),
+    referenceAssets: generationRefs.map(ref => ({ id: ref.assetId, role: referenceRole(ref.kind) })) };
 }
 
 /** Save an image generated by a local companion through the ordinary visual asset lifecycle. */
 export async function persistExternalVisual(args: { workspaceId: string; contentItemId: string;
   slideIndex?: number; model: string; imageBase64?: string; imageBuffer?: Buffer;
-  targetWidth?: number; targetHeight?: number; storage?: SupabaseClient }): Promise<string> {
-  const [item] = await getDb().select({ id: contentItems.id }).from(contentItems)
+  targetWidth?: number; targetHeight?: number; storage?: SupabaseClient; db?: Pick<ReturnType<typeof getDb>, "select" | "insert" | "update"> }): Promise<string> {
+  const [item] = await (args.db ?? getDb()).select({ id: contentItems.id }).from(contentItems)
     .where(and(eq(contentItems.id, args.contentItemId), eq(contentItems.workspaceId, args.workspaceId)));
   if (!item) throw new Error("Content item was removed before the image completed.");
   const sharp = (await import("sharp")).default;
@@ -306,8 +326,7 @@ export async function persistExternalVisual(args: { workspaceId: string; content
     if (png.length > 16 * 1024 * 1024) throw new Error("oversized");
   } catch { throw new Error("Local companion returned malformed or oversized image data."); }
   const supabase = args.storage ?? await createClient();
-  png = await compositeBrandLogo(supabase, args.workspaceId, png);
   const saved = await persistVisual({ supabase, workspaceId: args.workspaceId, contentItemId: args.contentItemId,
-    slideIndex: args.slideIndex, mode: "ai", png, model: args.model });
+    slideIndex: args.slideIndex, mode: "ai", png, model: args.model, db: args.db });
   return saved.id;
 }

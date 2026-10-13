@@ -417,7 +417,6 @@ export function PostWorkspace({
           <Button size="sm" variant="outline" disabled={pending} onClick={() => { void openMasterPrompt(); }}>
             <Wand2 className="size-3.5" aria-hidden /> Copy Master AI Prompt
           </Button>
-          <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
         </div>
       </div>
 
@@ -457,7 +456,7 @@ export function PostWorkspace({
           <FieldCard
             label="Caption"
             copy={caption}
-            bodyClassName="max-h-40 scroll-thin overflow-y-auto"
+            bodyClassName="max-h-[200px] scroll-thin overflow-y-auto"
             actions={canEditReview ? (
               editingCaption ? null : (
                 <button type="button" aria-label="Edit caption" className="rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground" onClick={() => setEditingCaption(true)}>
@@ -468,7 +467,7 @@ export function PostWorkspace({
           >
             {editingCaption ? (
               <div className="space-y-2">
-                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={4} className="scroll-thin resize-none" disabled={!editable} />
+                <Textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={5} className="scroll-thin resize-none" disabled={!editable} />
                 <div className="flex justify-end gap-2">
                   <Button size="sm" variant="ghost" onClick={() => { setCaption(variant?.caption ?? ""); setEditingCaption(false); }}>Cancel</Button>
                   <Button size="sm" disabled={pending} onClick={() => { if (variant) { start(async () => { const r = await updateVariantCaptionAction(variant.id, caption); if (r.ok) { toast.success("Caption saved"); router.refresh(); setEditingCaption(false); } else toast.error(r.error); }); } }}>

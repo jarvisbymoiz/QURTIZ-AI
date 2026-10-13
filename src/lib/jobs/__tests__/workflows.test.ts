@@ -29,7 +29,7 @@ vi.mock("@/lib/jobs/boss", () => ({
     autopilotLoop: "autopilot-loop",
   },
 }));
-vi.mock("@/lib/analytics/sync", () => ({ syncInsightsForWorkspace: vi.fn() }));
+vi.mock("@/lib/analytics/sync", () => ({ syncInsightsForWorkspace: vi.fn(), syncDueInsights: vi.fn() }));
 vi.mock("@/lib/ai/config", () => ({ hasWorkspaceAIConfig: vi.fn() }));
 vi.mock("@/lib/ai/research", () => ({ researchTopics: vi.fn() }));
 vi.mock("@/lib/ai/content", () => ({ generateAndPersistContent: vi.fn() }));

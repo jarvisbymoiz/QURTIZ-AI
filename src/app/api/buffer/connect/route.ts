@@ -9,8 +9,10 @@ import {
   logBufferOAuthDiagnostic,
   signBufferOAuthState,
 } from "@/lib/buffer/client";
-import { getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
+import { getMembership, getSessionUser, resolveActionWorkspace } from "@/lib/workspace";
 import { getPublicAppUrl } from "@/lib/app-url";
+
+import { can } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +35,11 @@ export async function GET(request: NextRequest) {
   if (!user) return NextResponse.redirect(`${origin}/login`);
   const workspaceId = await resolveActionWorkspace(user.id);
   if (!workspaceId) return NextResponse.redirect(`${origin}/connections?buffer=error&reason=no_workspace`);
+  const membership = await getMembership(user.id, workspaceId);
+  if (!membership || !can(membership.role, "workspace:manage")) {
+    return NextResponse.json({ error: "Only workspace administrators can connect accounts." }, { status: 403 });
+  }
+
 
   const { codeVerifier, codeChallenge } = generatePkcePair();
   const state = signBufferOAuthState({ workspaceId, userId: user.id, codeVerifier });

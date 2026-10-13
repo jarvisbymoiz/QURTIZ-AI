@@ -92,6 +92,10 @@ export async function generateCloudflareImage(args: {
   const schema = await getCloudflareInputSchema(args.baseUrl, args.modelId, args.apiKey);
   const properties = schema?.properties ?? {};
   const multipart = Boolean(properties.multipart || schema?.required?.includes("multipart") || Object.keys(properties).some(key => /^input_image_\d+$/.test(key)));
+  const slots = Object.keys(properties).filter(key => /^input_image_\d+$/.test(key)).sort((a, b) => Number(a.split("_").at(-1)) - Number(b.split("_").at(-1)));
+  const capacity = multipart ? slots.length : properties.image_b64 ? 1 : 0;
+  if (references.length > capacity) return { ok: false, reason: "api_error",
+    message: `The configured Cloudflare model accepts ${capacity} image references, but this visual has ${references.length}. Choose a reference-capable model or explicitly reduce your saved references. No images were discarded.` };
   const body: Record<string, string | number> = { prompt: args.prompt };
   const numeric: [string, number | undefined][] = [
     ["width", args.options?.width], ["height", args.options?.height],
@@ -108,16 +112,15 @@ export async function generateCloudflareImage(args: {
   const form = new FormData();
   if (multipart) {
     for (const [key, value] of Object.entries(body)) form.set(key, String(value));
-    references.slice(0, 4).forEach((reference, index) => {
-      if (!properties[`input_image_${index}`]) return;
-      form.set(`input_image_${index}`, new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), `reference-${index}`);
+    references.forEach((reference, index) => {
+      form.set(slots[index], new Blob([Buffer.from(reference.base64, "base64")], { type: reference.mimeType }), `reference-${index}`);
     });
   }
-  const sentReferences = multipart ? references.slice(0, 4).filter((_, index) => Boolean(properties[`input_image_${index}`])).length : Number(Boolean(body.image_b64));
+  const sentReferences = multipart ? references.length : Number(Boolean(body.image_b64));
   const { image_b64: _reference, prompt: _prompt, ...loggedParameters } = body;
   void _reference; void _prompt;
   inspectImageRequest({ provider: "cloudflare", model: args.modelId, prompt: args.prompt,
-    referenceCount: sentReferences, parameters: { transport: multipart ? "multipart" : "json", ...loggedParameters }, context: args.debug });
+    referenceCount: sentReferences, references, parameters: { transport: multipart ? "multipart" : "json", ...loggedParameters }, context: args.debug });
   const endpoint = `${args.baseUrl.replace(/\/+$/, "")}/run/${args.modelId}`;
   try {
     const res = await fetch(endpoint, {

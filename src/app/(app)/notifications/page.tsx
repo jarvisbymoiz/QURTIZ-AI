@@ -25,6 +25,7 @@ import {
   platformLabel,
   resolveNotificationDestinations,
   statusLabel,
+  summarizePlatforms,
   type NotificationMeta,
 } from "@/lib/notifications/payload";
 
@@ -88,8 +89,9 @@ async function NotificationsPage() {
   const unread = list.filter((n) => !n.read).length;
 
   return (
-    <div className="space-y-6">
+    <div className="notifications-page space-y-6">
       <PageHeader
+        className="notifications-header"
         title="Notifications"
         description="Publishing results, Auto Runs, scheduling and account events for this workspace."
       >
@@ -118,16 +120,30 @@ async function NotificationsPage() {
               ? [meta.platform]
               : (meta.platforms ?? singlePost?.platforms ?? []);
             const status = meta.publishStatus ?? (meta.posts && meta.posts.length > 1 ? meta.status : (singlePost?.status ?? meta.status));
+            // Hide only the exact metadata summary already rendered as chips.
+            // Preserve scheduled times, warnings and all other message content.
+            const repeatedSummary = singlePost
+              ? `${summarizePlatforms(singlePost.platforms)} · ${formatLabel(singlePost.format)} · ${statusLabel(singlePost.status)}`
+              : null;
+            const displayBody = meta.type === "auto_run" && repeatedSummary
+              ? n.body?.split("\n").flatMap(line => line === repeatedSummary ? []
+                : line.startsWith(`${repeatedSummary} · Scheduled `) ? [line.slice(repeatedSummary.length + 3)] : [line]).join("\n")
+              : n.body;
             return (
-              <Card key={n.id} className={cn(!n.read && "border-primary/40 bg-accent/30")}>
-                <CardContent className="flex items-start gap-3 p-4">
+              <Card key={n.id} className={cn("notification-card", !n.read && "border-primary/40 bg-accent/30")}>
+                <CardContent className="notification-card-content flex items-start gap-3 p-4">
                   <span className={cn("mt-1 size-2 shrink-0 rounded-full", n.read ? "bg-muted-foreground/40" : "bg-primary")} />
                   <div className="mt-0.5 shrink-0">
                     <KindIcon kind={n.kind} publishStatus={meta.publishStatus} />
                   </div>
-                  <div className="min-w-0 flex-1 space-y-1.5">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-sm font-medium">{n.title}</span>
+                  <div className="notification-details min-w-0 flex-1">
+                    <div className="notification-heading">
+                      <h2 className="text-sm font-medium">{n.title}</h2>
+                      <time className="notification-time" dateTime={new Date(n.createdAt).toISOString()}>
+                        {new Intl.DateTimeFormat("en-CA", { timeZone: ctx.workspace.timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(n.createdAt))}
+                      </time>
+                    </div>
+                    <div className="notification-meta" aria-label="Notification details">
                       <Badge variant="secondary" className="text-[10px] uppercase">{n.kind.replaceAll("_", " ")}</Badge>
                       {format ? (
                         <Badge variant="outline" className="text-[10px] uppercase">{formatLabel(format)}</Badge>
@@ -140,13 +156,10 @@ async function NotificationsPage() {
                           {statusLabel(status)}
                         </Badge>
                       ) : null}
-                      <span className="text-xs text-muted-foreground">
-                        {new Intl.DateTimeFormat("en-CA", { timeZone: ctx.workspace.timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(n.createdAt))}
-                      </span>
                     </div>
-                    {n.body ? <p className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{n.body}</p> : null}
+                    {n.body ? <p className="notification-body whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{displayBody}</p> : null}
                     {external.length > 0 || internal ? (
-                      <div className="flex flex-wrap gap-2 pt-1">
+                      <div className="notification-actions flex flex-wrap gap-2">
                         {external.map((d) => (
                           <Button
                             key={`${d.platform}:${d.permalink}`}

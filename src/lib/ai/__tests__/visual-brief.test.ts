@@ -10,6 +10,36 @@ const post: MasterPromptInput = {
 };
 
 describe("shared image-generation brief", () => {
+  it("keeps all five numbered attachment roles in a Carousel slide brief", () => {
+    const brief = buildVisualGenerationBrief({ ...post, contentType: "carousel", slideIndex: 0,
+      referenceLabels: ["logo: Brand mark", "avatar: Identity", "reference: Palette", "reference: Composition", "reference: Typography"] });
+    expect(brief.prompt).toContain("Image 5: reference: Typography");
+    expect(brief.prompt).toContain("Image 2: avatar: Identity");
+  });
+  it("provides brand description, caption and reference roles with creative improvement instructions", () => {
+    const brief = buildVisualGenerationBrief({ ...post, visualConcept: "Make a nice post",
+      caption: "x".repeat(1900) + " Actual final post detail.",
+      referenceLabels: ["logo: Original brand logo", "avatar: Brand profile picture"],
+      brand: { businessName: "Luma Skin", description: "A botanical skincare studio", voicePresets: [],
+        contentRules: { avoidClaims: ["guaranteed cure"] } } as unknown as NonNullable<MasterPromptInput["brand"]> });
+    expect(brief.prompt).toContain("A botanical skincare studio");
+    expect(brief.prompt).toContain("Actual final post detail.");
+    expect(brief.prompt).toContain("guaranteed cure");
+    expect(brief.prompt).toContain("If the saved visual prompt is vague");
+    expect(brief.prompt).toContain("in attachment order");
+    expect(brief.prompt).toContain("Preserve its identity, proportions");
+    expect(brief.prompt).toContain("There is no fixed corner or post-generation logo overlay");
+  });
+  it("passes later post details into the actual image brief without requesting a caption dump", () => {
+    const brief = buildVisualGenerationBrief({ ...post,
+      caption: "A better routine starts here. Pick your basics. Step three: apply sunscreen before leaving home.",
+      visualConcept: "Design an educational skincare poster." });
+    expect(brief.prompt).toContain("Step three: apply sunscreen");
+    expect(brief.sources).toContain("detailedPostContext");
+    expect(brief.prompt).toContain("not a text block to paste onto the image");
+    expect(brief.prompt).toContain("kerning, word spacing");
+    expect(brief.prompt).toContain("If the authored concept is text-free, keep it text-free");
+  });
   it("keeps Visual Prompt first while using verified brand, offer, pricing and contact facts", () => {
     const brief = buildVisualGenerationBrief({ ...post, brand: {
       businessName: "Luma Skin", products: "Botanical serums", pricing: "Consultation $25", offers: "20% off first consultation",

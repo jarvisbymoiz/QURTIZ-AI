@@ -56,12 +56,8 @@ function buildTree(s: TemplateStyle) {
   const secondary = normalizeHex(s.secondaryColor, "#0ea5e9");
   const dark = "#0b0d12";
 
-  const logoBlock = s.logoDataUrl
-    ? el({ display: "flex", alignItems: "center", gap: 12 }, [
-        { type: "img", props: { src: s.logoDataUrl, width: 72, height: 72, style: { objectFit: "contain" } } },
-        txt(s.brandName, { fontSize: 30, fontWeight: 600, color: "rgba(255,255,255,0.9)" }),
-      ])
-    : txt(s.brandName, { fontSize: 30, fontWeight: 600, color: "rgba(255,255,255,0.9)" });
+  // Keep the compatibility input, but never stamp a supplied logo onto output.
+  const logoBlock = txt(s.brandName, { fontSize: 30, fontWeight: 600, color: "rgba(255,255,255,0.9)" });
 
   const headline = txt(s.headline.slice(0, 90), {
     display: "flex",

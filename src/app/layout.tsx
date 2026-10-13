@@ -1,8 +1,9 @@
 ﻿import type { Metadata } from "next";
-import { getPublicAppUrl } from "@/lib/app-url";
+import { siteUrl } from "@/lib/public/site";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { VercelTelemetry } from "@/components/analytics/vercel-telemetry";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -16,11 +17,17 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(getPublicAppUrl()),
+  verification: {
+    google: "uNRhRaNFcUyNF5E9fRHijDH2IX4RYdz54P2oTjE-dko",
+  },
+  referrer: "strict-origin",
+  metadataBase: new URL(siteUrl()),
   manifest: "/manifest.webmanifest",
+  applicationName: "Qurtiz AI",
+  openGraph: { siteName: "Qurtiz AI" },
   title: {
-    default: "QURTIZ AI — Social Media Agent",
-    template: "%s · QURTIZ AI",
+    default: "Qurtiz AI — Social Media Agent",
+    template: "%s · Qurtiz AI",
   },
   description:
     "An agent-first social media operating system: research, strategy, content, visuals, scheduling, publishing and analytics for every brand you manage.",
@@ -38,6 +45,7 @@ export default function RootLayout({
       >
         <TooltipProvider delay={200}>{children}</TooltipProvider>
         <Toaster richColors position="top-right" />
+        {process.env.VERCEL === "1" && <VercelTelemetry />}
       </body>
     </html>
   );

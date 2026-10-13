@@ -1,5 +1,7 @@
 import { withSchemaGuard } from "@/components/system/schema-guard";
 import { AgentMemoryCard } from "@/components/settings/agent-memory-card";
+import Link from "next/link";
+import { canViewWebsiteAnalytics } from "@/lib/website-analytics/access";
 import { listAgentMemory } from "@/lib/ai/persistent-memory";
 ﻿import { can } from "@/lib/permissions";
 import { requireWorkspace } from "@/lib/workspace";
@@ -34,6 +36,7 @@ async function SettingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader title="Settings" description="Workspace, profile, and integration status." />
+      {canViewWebsiteAnalytics(ctx.user.id) && <Card><CardHeader><CardTitle className="text-base">Website traffic</CardTitle><CardDescription>Private Production visitor and page-view reports from Vercel.</CardDescription></CardHeader><CardContent><Link className="text-sm underline underline-offset-4" href="/settings/visitors">Open website visitor dashboard</Link></CardContent></Card>}
 
       <WorkspaceSettingsForm
         initialName={ctx.workspace.name}

@@ -39,7 +39,7 @@ import "server-only";
  *     Meta routing).
  */
 
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { contentItems, contentVariants, platformConnections, publishingJobs } from "@/db/schema";
 import { choosePostingSlot, type TimingPolicy } from "@/lib/autopilot/timing";
@@ -741,7 +741,7 @@ async function loadPublishContext(args: {
   const [visual] = await db
     .select({ storagePath: visualAssets.storagePath })
     .from(visualAssets)
-    .where(eq(visualAssets.contentItemId, variant.contentItemId))
+    .where(and(eq(visualAssets.contentItemId, variant.contentItemId), eq(visualAssets.workspaceId, args.workspaceId), eq(visualAssets.cleanupStatus, "permanent"), gt(visualAssets.refCount, 0)))
     .orderBy(desc(visualAssets.createdAt))
     .limit(1);
 
@@ -874,6 +874,7 @@ export async function selectItemMedia(args: { workspaceId: string; contentItemId
       and(
         eq(visualAssets.workspaceId, args.workspaceId),
         eq(visualAssets.contentItemId, args.contentItemId),
+        eq(visualAssets.cleanupStatus, "permanent"), gt(visualAssets.refCount, 0),
       ),
     );
 

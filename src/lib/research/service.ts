@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import { rateLimit } from "@/lib/security/rate-limit";
-import { BraveSearchError, braveWebSearch, isBraveConfigured, type BraveResult } from "./brave";
+import { BraveSearchError, braveWebSearch, isBraveConfigured, validateBraveInput, normalizeBraveRegion, type BraveResult } from "./brave";
 import { asResearchStrategy, RESEARCH_STRATEGIES, type ResearchStrategy } from "./strategies";
 import { braveCacheTtlSeconds, braveGlobalMaxQps, researchPlanLimits } from "./limits";
 import {
@@ -92,6 +92,19 @@ type CacheEntry = {
   results: BraveResult[];
 };
 
+async function waitForResearch<T>(job: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return job;
+  signal.throwIfAborted();
+  let onAbort: () => void = () => {};
+  try {
+    return await Promise.race([job, new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new DOMException("Search cancelled", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    })]);
+  } finally { signal.removeEventListener("abort", onAbort); }
+}
+
 const CACHE_MAX_ENTRIES = 500;
 const cache = new Map<string, CacheEntry>();
 /** cacheKey → in-flight live job; concurrent identical requests join it. */
@@ -122,9 +135,10 @@ function cacheKeyFor(parts: {
   region: string | null;
   language: string | null;
   freshness: string | null;
+  count: number;
 }): string {
   return sha256(
-    ["v1", parts.strategy, parts.preparedQuery.toLowerCase(), parts.region ?? "", parts.language ?? "", parts.freshness ?? ""].join(
+    ["v2", parts.strategy, parts.preparedQuery.toLowerCase(), parts.region ?? "", parts.language ?? "", parts.freshness ?? "", parts.count].join(
       "\u001f",
     ),
   );
@@ -168,7 +182,7 @@ function defaultLanguage(): string {
  */
 function diag(event: string, fields: Record<string, string | number | boolean | null | undefined>): void {
   const details = Object.entries(fields)
-    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .filter(([key, v]) => !["query", "providerError"].includes(key) && v !== undefined && v !== null && v !== "")
     .map(([k, v]) => `${k}=${v}`)
     .join(" ");
   console.info(`[research] ${event}${details ? " " + details : ""}`);
@@ -194,6 +208,8 @@ class ResearchSharedError extends Error {
 
 function failureFromBraveError(error: BraveSearchError): TrackedFailure {
   switch (error.kind) {
+    case "invalid_request":
+      return { status: "error", reason: "invalid_request", message: error.message, httpStatus: error.httpStatus };
     case "disabled":
       return {
         status: "provider_unavailable",
@@ -220,11 +236,13 @@ function failureFromBraveError(error: BraveSearchError): TrackedFailure {
         retryAfterSeconds: error.retryAfterSeconds,
         httpStatus: error.httpStatus,
       };
+    case "response":
+      return { status: "error", reason: "error", message: error.message + " No usable search results were received; do not claim this was a successful search.", httpStatus: error.httpStatus };
     default:
       return {
         status: error.kind === "network" || error.kind === "timeout" ? "network_error" : "error",
         reason: "error",
-        message: `Live research failed (${error.message.slice(0, 160)}). Try again or continue with AI knowledge.`,
+        message: `Live research failed (${error.message.slice(0, 160)}). ${error.httpStatus && error.httpStatus < 500 ? "A platform admin must check the request/configuration; do not retry unchanged arguments." : "This may be transient; try again later."} Do not present AI knowledge as live search results.`,
         httpStatus: error.httpStatus,
       };
   }
@@ -249,11 +267,13 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
     const strategy = asResearchStrategy(request.strategy) ?? "web";
     const definition = RESEARCH_STRATEGIES[strategy];
     const preparedQuery = definition.buildQuery(query);
-    const region = request.region?.trim() || defaultRegion();
-    const language = request.language?.trim() || defaultLanguage();
+    const region = normalizeBraveRegion(request.region?.trim() || defaultRegion());
+    const language = (request.language?.trim() || defaultLanguage()).toLowerCase();
     const freshness = request.freshness?.trim() || definition.freshness || null;
     const count = request.count ?? 10;
-    const cacheKey = cacheKeyFor({ strategy, preparedQuery, region, language, freshness });
+    validateBraveInput({ query: preparedQuery, region, language, freshness: freshness ?? undefined, count });
+    request.signal?.throwIfAborted();
+    const cacheKey = cacheKeyFor({ strategy, preparedQuery, region, language, freshness, count });
     const queryHash = sha256(normalizeQuery(preparedQuery).toLowerCase());
 
     /** Telemetry for this request, capped + attributed to the tenant. */
@@ -285,7 +305,6 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
 
     diag("selected", {
       strategy,
-      query: query.slice(0, 120),
       region,
       language,
       freshness: freshness ?? "-",
@@ -295,7 +314,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
     // 1. Short-term anonymous cache of normalized PUBLIC results.
     const cached = cacheGet(cacheKey);
     if (cached) {
-      diag("cache hit", { strategy, query: query.slice(0, 120), results: cached.results.length });
+      diag("cache hit", { strategy, results: cached.results.length });
       void track("ok", { cacheHit: true });
       return {
         ok: true,
@@ -375,31 +394,37 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
           language,
           freshness: freshness ?? undefined,
           count,
-          signal: request.signal,
+          // The bounded shared call is independent of any one caller's cancel.
+          // Each caller stops waiting separately; cancelling one workspace must
+          // not abort another workspace's concurrent public-results request.
         });
       })();
     if (isInitiator) {
       inflight.set(cacheKey, job);
+      void job.then(async results => {
+        await track("ok", { cacheHit: false });
+        const ttlSeconds = braveCacheTtlSeconds();
+        if (ttlSeconds > 0 && results.length > 0) cacheSet(cacheKey, { expiresAt: Date.now() + ttlSeconds * 1000, results });
+      }).catch(() => undefined).finally(() => inflight.delete(cacheKey));
       // The shared promise rejects for EVERY awaiter; this pre-emptive
       // catch only silences the "unhandled rejection" noise path.
       void job.catch(() => undefined);
     }
 
     if (!isInitiator) {
-      diag("dedupe join", { strategy, query: query.slice(0, 120) });
+      diag("dedupe join", { strategy });
     }
 
     try {
-      const results = await job;
+      const results = await waitForResearch(job, request.signal);
       if (isInitiator) {
-        inflight.delete(cacheKey);
         diag("live result", { strategy, http: 200, results: results.length, ms: Date.now() - startedAt });
         const ttlSeconds = braveCacheTtlSeconds();
         if (ttlSeconds > 0 && results.length > 0) {
           cacheSet(cacheKey, { expiresAt: Date.now() + ttlSeconds * 1_000, results });
         }
       }
-      void track("ok", { cacheHit: !isInitiator });
+      if (!isInitiator) void track("ok", { cacheHit: true });
       return {
         ok: true,
         provider: "brave",
@@ -412,7 +437,7 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
         deduped: !isInitiator,
       };
     } catch (error) {
-      if (isInitiator) inflight.delete(cacheKey);
+      if (request.signal?.aborted) throw error;
       if (error instanceof ResearchSharedError) {
         diag("live failure", { strategy, reason: error.failure.reason, http: error.failure.httpStatus ?? "-" });
         return fail(error.failure);
@@ -430,8 +455,13 @@ export async function searchResearch(request: ResearchRequest): Promise<Research
       return fail({ status: "error", reason: "error", message: "Live research failed unexpectedly. Try again shortly." });
     }
   } catch (error) {
+    if (request.signal?.aborted) throw error;
+    if (error instanceof BraveSearchError) {
+      const failure = failureFromBraveError(error);
+      return { ok: false, reason: failure.reason, message: failure.message };
+    }
     // Absolute last line of defense: research must never crash a request.
-    console.warn("[research] unexpected failure:", error instanceof Error ? error.message : error);
+    console.warn("[research] reason=provider_error stage=service");
     return { ok: false, reason: "error", message: "Live research failed unexpectedly. Try again shortly." };
   }
 }

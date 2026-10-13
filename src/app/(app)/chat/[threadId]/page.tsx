@@ -66,9 +66,9 @@ async function ThreadPage({
 
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6">
       <PageHeader title={thread.title} description="Conversation with your workspace agent." />
-      <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="hidden h-[calc(100vh-10rem)] lg:block">
           <ThreadList activeThreadId={thread.id} />
         </aside>

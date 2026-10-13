@@ -1,6 +1,6 @@
 import { withSchemaGuard } from "@/components/system/schema-guard";
 ﻿import Link from "next/link";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import {
   CalendarClock,
   CheckCircle2,
@@ -9,8 +9,12 @@ import {
   MessageSquare,
   PenSquare,
   Share2,
-  Sparkles,
   TrendingUp,
+  ArrowUpRight,
+  FileText,
+  BarChart3,
+  Settings2,
+  Bell,
 } from "lucide-react";
 import { getDb } from "@/db";
 import { aiInsights } from "@/db/schema";
@@ -52,7 +56,7 @@ async function DashboardPage() {
   const recentThreads = await db
     .select({ id: chatThreads.id, title: chatThreads.title, updatedAt: chatThreads.updatedAt })
     .from(chatThreads)
-    .where(eq(chatThreads.workspaceId, ctx.workspace.id))
+    .where(and(eq(chatThreads.workspaceId, ctx.workspace.id), eq(chatThreads.userId, ctx.user.id), isNull(chatThreads.deletedAt)))
     .orderBy(desc(chatThreads.updatedAt))
     .limit(3);
 
@@ -74,25 +78,47 @@ async function DashboardPage() {
   const aiModel = await getWorkspaceAIModelLabel(ctx.workspace.id);
 
   return (
-    <div className="space-y-8">
+    <div className="qurtiz-dashboard">
+      <div className="dashboard-context">
+        <span>WORKSPACE OVERVIEW</span>
+        <span>{ctx.workspace.timezone}</span>
+      </div>
       <PageHeader
+        className="dashboard-header"
         title={`Good to see you, ${ctx.workspace.name}`}
-        description="Your AI social media operating system — content generation, approval, scheduling and publishing are live."
-      />
+        description="Your brand, content and publishing. One connected workspace."
+      >
+        <Button nativeButton={false} render={<Link href="/content-studio" />}>
+          <PenSquare className="size-4" aria-hidden />Open Content Studio
+        </Button>
+      </PageHeader>
+
+      <nav className="dashboard-quick-actions" aria-label="Dashboard quick actions">
+        {[
+          { href: "/chat", label: "Open AI Chat", detail: "Plan your next idea", icon: MessageSquare },
+          { href: "/calendar", label: "Content Calendar", detail: "Review your schedule", icon: CalendarClock },
+          { href: "/analytics", label: "Analytics", detail: "Explore real results", icon: BarChart3 },
+          { href: "/notifications", label: "Notifications", detail: "Workspace updates", icon: Bell },
+        ].map(item => <Link key={item.href} href={item.href}>
+          <item.icon className="size-4" aria-hidden />
+          <span><strong>{item.label}</strong><small>{item.detail}</small></span>
+          <ArrowUpRight className="size-3.5" aria-hidden />
+        </Link>)}
+      </nav>
 
       {/* Today&apos;s activity */}
-      <section className="space-y-3">
+      <section className="dashboard-overview space-y-3">
         <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-          Today&apos;s activity
+          Content overview
         </h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
-            { label: "Posts generated", value: generatedCount, icon: Sparkles },
+            { label: "Posts generated", value: generatedCount, icon: FileText },
             { label: "Posts approved", value: approvedCount, icon: CheckCircle2 },
             { label: "Posts scheduled", value: scheduledCount, icon: CalendarClock },
             { label: "Posts published", value: publishedCount, icon: TrendingUp },
           ].map((s) => (
-            <Card key={s.label}>
+            <Card key={s.label} className="dashboard-stat">
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground">
                   {s.label}
@@ -100,7 +126,7 @@ async function DashboardPage() {
                 <s.icon className="size-4 text-muted-foreground" aria-hidden />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold">{s.value}</div>
+                <div className="dashboard-stat-value text-2xl font-semibold">{s.value}</div>
                 <p className="text-xs text-muted-foreground">
                   Live counts from this workspace&apos;s content library.
                 </p>
@@ -110,11 +136,11 @@ async function DashboardPage() {
         </div>
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="dashboard-status-grid grid gap-6 lg:grid-cols-2">
         {/* Platform status */}
-          <Card>
+          <Card className="dashboard-platforms">
             <CardHeader>
-              <CardTitle className="text-base">Platform status</CardTitle>
+              <CardTitle role="heading" aria-level={2} className="text-base">Platform status</CardTitle>
               <CardDescription>
                 Direct Meta API and Buffer connections for Facebook and Instagram publishing.
               </CardDescription>
@@ -176,9 +202,9 @@ async function DashboardPage() {
         </Card>
 
         {/* AI status */}
-        <Card>
+        <Card className="dashboard-agent">
           <CardHeader>
-            <CardTitle className="text-base">AI agent</CardTitle>
+            <CardTitle role="heading" aria-level={2} className="text-base">AI agent</CardTitle>
             <CardDescription>Provider status and getting started.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -217,24 +243,14 @@ async function DashboardPage() {
             )}
             <Button nativeButton={false} className="w-full" render={<Link href="/chat" />}><MessageSquare className="size-4" aria-hidden />
                 Open AI Chat</Button>
-            {latestInsight ? (
-              <div className="rounded-lg border p-3">
-                <div className="mb-1 flex items-center gap-1.5 text-xs font-medium">
-                  <Sparkles className="size-3.5 text-primary" aria-hidden /> Latest AI analysis
-                </div>
-                <div className="line-clamp-4 whitespace-pre-wrap text-xs text-muted-foreground">
-                  {latestInsight.content}
-                </div>
-              </div>
-            ) : null}
           </CardContent>
         </Card>
       </div>
 
       {/* Upcoming content */}
-      <Card>
+      <Card className="dashboard-upcoming">
         <CardHeader>
-          <CardTitle className="text-base">Upcoming content</CardTitle>
+          <CardTitle role="heading" aria-level={2} className="text-base">Upcoming content</CardTitle>
           <CardDescription>Scheduled posts publish automatically via the background worker.</CardDescription>
         </CardHeader>
         <CardContent>
@@ -264,30 +280,46 @@ async function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Recent agent runs (observability) */}
-      {recentRuns.length > 0 ? (
-        <Card>
+      <div className="dashboard-library-grid grid gap-5 lg:grid-cols-2">
+        <Card className="dashboard-published">
           <CardHeader>
-            <CardTitle className="text-base">Recent agent runs</CardTitle>
-            <CardDescription>Every AI run is logged with tokens and cost.</CardDescription>
+            <CardTitle role="heading" aria-level={2}>Published content</CardTitle>
+            <CardDescription>Published entries from your workspace content library.</CardDescription>
           </CardHeader>
           <CardContent>
-            <ul className="space-y-2 text-sm">
-              {recentRuns.map((r) => (
-                <li key={r.id} className="flex items-center justify-between rounded-md border p-2">
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {r.id.slice(0, 8)}
-                  </span>
-                  <span className="text-xs text-muted-foreground">{r.model}</span>
-                  <Badge variant={r.status === "completed" ? "secondary" : "destructive"}>
-                    {r.status}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
+            {contentRows.some(r => r.status === "published") ? (
+              <ul className="dashboard-content-list">
+                {contentRows.filter(r => r.status === "published").slice(0, 5).map(r => (
+                  <li key={r.id}>
+                    <Link href="/content-studio"><FileText className="size-4" aria-hidden /><span>{r.topic}</span><ArrowUpRight className="size-3.5" aria-hidden /></Link>
+                    <Badge variant="secondary">Published</Badge>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="dashboard-empty-copy">No published content yet. Approved posts will appear here after publishing succeeds.</p>}
           </CardContent>
         </Card>
-      ) : null}
+        <Card className="dashboard-insights">
+          <CardHeader>
+            <CardTitle role="heading" aria-level={2}>Latest AI analysis</CardTitle>
+            <CardDescription>Saved analysis from this workspace.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {latestInsight ? <p className="line-clamp-6 whitespace-pre-wrap text-sm text-muted-foreground">{latestInsight.content}</p>
+              : <div className="dashboard-empty-copy"><BarChart3 className="size-6" aria-hidden /><p>No saved analysis yet. Explore Analytics to review the performance data available from your connected accounts.</p></div>}
+            <Link className="dashboard-panel-link" href="/analytics">Open Analytics <ArrowUpRight className="size-3.5" aria-hidden /></Link>
+          </CardContent>
+        </Card>
+      </div>
+
+      <section className="dashboard-automation" aria-label="Auto Run">
+        <div className="dashboard-automation-icon"><Settings2 className="size-5" aria-hidden /></div>
+        <div>
+          <h2>Auto Run</h2>
+          <p>Manage your automation settings and review the latest run in Workspace Settings.</p>
+        </div>
+        <Link href="/settings">Workspace Settings <ArrowUpRight className="size-4" aria-hidden /></Link>
+      </section>
     </div>
   );
 }

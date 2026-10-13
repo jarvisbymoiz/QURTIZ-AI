@@ -30,3 +30,18 @@ export function Breadcrumbs({
     />
   );
 }
+
+export function PageSchema({ name, description, path, type = "WebPage", items }: {
+  name: string; description: string; path: string;
+  type?: "WebPage" | "AboutPage" | "ContactPage" | "CollectionPage";
+  items?: { name: string; path: string }[];
+}) {
+  return <JsonLd data={{
+    "@context": "https://schema.org", "@type": type,
+    "@id": absoluteUrl(`${path}#webpage`), url: absoluteUrl(path), name, description,
+    inLanguage: "en", isPartOf: { "@type": "WebSite", name: "Qurtiz AI", url: absoluteUrl("/") },
+    ...(items ? { mainEntity: { "@type": "ItemList", itemListElement: items.map((item, i) => ({
+      "@type": "ListItem", position: i + 1, name: item.name, url: absoluteUrl(item.path),
+    })) } } : {}),
+  }} />;
+}

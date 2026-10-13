@@ -17,6 +17,18 @@ describe("model-directed lazy chat tools", () => {
     expect((await createLazyChatTools(existing, "Schedule it for tomorrow").prepareStep({ steps: [] } as never))?.activeTools).toContain("schedule_content");
     expect((await createLazyChatTools(existing, "Hi").prepareStep({ steps: [] } as never))?.activeTools).not.toContain("create_content");
   });
+  it("keeps backend web_search attached for content creation and after unrelated discovery", async () => {
+    const existing = { web_search: tool({ inputSchema: z.object({ query: z.string() }) }), get_content: tool({ inputSchema: z.object({}) }) };
+    const lazy = createLazyChatTools(existing, "Create a draft of a high engagement post about a new model", "Preserve brand context");
+    const first = await lazy.prepareStep({ steps: [] } as never);
+    expect(first?.activeTools).toContain("web_search");
+    expect(first?.system).toContain("Preserve brand context");
+    const next = await lazy.prepareStep({ steps: [{ toolResults: [{ toolName: "discover_tools", output: { enabledTools: ["get_content", "invented"] } }] }] } as never);
+    expect(next?.activeTools).toContain("web_search");
+    expect(next?.activeTools).not.toContain("invented");
+    expect(next?.system).toContain("web_search");
+  });
+
   it("discovers and executes the original action without exposing unrelated schemas", async () => {
     const execute = vi.fn(async () => ({ verifiedId: "post-123" }));
     const existing = {

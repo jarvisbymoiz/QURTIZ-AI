@@ -25,6 +25,10 @@ describe("sumTotals", () => {
     expect(t.engagementRate).toBe(6.3);
   });
 
+  it("keeps views distinct and computes rate only from rows with measured reach", () => {
+    const totals = sumTotals([row({ metrics: { views: 30, likes: 100 } }), row({ metrics: { views: 10, reach: 100, likes: 5 } })]);
+    expect(totals.views).toBe(40); expect(totals.impressions).toBe(0); expect(totals.engagement).toBe(105); expect(totals.engagementRate).toBe(5);
+  });
   it("returns zero rate when no reach data", () => {
     const t = sumTotals([row({ metrics: { likes: 5 } })]);
     expect(t.engagementRate).toBe(0);

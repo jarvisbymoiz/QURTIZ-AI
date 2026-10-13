@@ -28,6 +28,12 @@ afterEach(() => {
 });
 
 describe("BraveSearchProvider", () => {
+  it("reports malformed successful payloads as response errors without blindly retrying", async () => {
+    process.env.BRAVE_SEARCH_API_KEY = KEY;
+    const fetchImpl = vi.fn(async () => jsonResponse(200, {web:{results:{invalid:true}}}));
+    await expect(braveWebSearch({query:"valid search",fetchImpl:fetchImpl as typeof fetch})).rejects.toMatchObject({kind:"response"});
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it("is disabled and never calls fetch when the key is missing", async () => {
     const fetchImpl = vi.fn();
     expect(isBraveConfigured()).toBe(false);
@@ -71,6 +77,30 @@ describe("BraveSearchProvider", () => {
     expect(url).toContain("count=5");
     const headers = init.headers as Record<string, string>;
     expect(headers["X-Subscription-Token"]).toBe(KEY);
+  });
+
+  it.each([{ region: "Pakistan" }, { language: "en-US" }, { count: 1.5 }, { query: " " }, { query: "a ".repeat(76) }, { freshness: "2026-02-30to2026-03-01" }])("rejects invalid arguments before fetch: %j", async bad => {
+    process.env.BRAVE_SEARCH_API_KEY = KEY;
+    const fetchImpl = vi.fn();
+    const err = await braveWebSearch({ query: "ChatGPT 6.1 Sol Model", ...bad, fetchImpl }).catch(e => e);
+    expect(err.kind).toBe("invalid_request");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  it("maps the reproduced PK country failure to worldwide search", async () => {
+    process.env.BRAVE_SEARCH_API_KEY = KEY;
+    const fetchImpl = vi.fn(async () => jsonResponse(200, BRAVE_BODY));
+    await braveWebSearch({ query: "ChatGPT 6.1 Sol Astra level model low cost", region: "PK", language: "en", freshness: "pw", fetchImpl });
+    expect(String((fetchImpl.mock.calls[0] as unknown as [string])[0])).toContain("country=ALL");
+  });
+  it("reports sanitized 422 validation fields and never retries", async () => {
+    process.env.BRAVE_SEARCH_API_KEY = KEY;
+    const fetchImpl = vi.fn(async () => jsonResponse(422, { error: { detail: KEY, meta: { errors: [{ loc: ["query", "country"], input: KEY, msg: KEY }] } } }));
+    const err = await braveWebSearch({ query: "ChatGPT 6.1 Sol Model", fetchImpl }).catch(e => e);
+    expect(err.kind).toBe("invalid_request");
+    expect(err.message).toContain("country");
+    expect(err.message).toContain("not a temporary outage");
+    expect(JSON.stringify(err)).not.toContain(KEY);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("maps 401 to unauthorized and never leaks the key in the error", async () => {

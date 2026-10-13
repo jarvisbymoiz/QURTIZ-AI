@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ consumed: false, challenge: null as Record<string, unknown> | null,
   device: null as Record<string, unknown> | null, authDevice: null as Record<string, unknown> | null }));
+vi.mock("@/lib/workspace", () => ({ getMembership: async () => ({ role: "editor" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@/db", () => ({ getDb: () => ({
   select: () => ({ from: () => ({ where: () => ({ limit: async () =>

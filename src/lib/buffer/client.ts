@@ -45,7 +45,7 @@ import { getEncryptionKey } from "@/lib/crypto/tokens";
  *   Raw tokens never appear in errors or logs.
  * - The OAuth `state` marker is a stateless HMAC-signed
  *   workspaceId.userId.codeVerifier.exp token (same key derivation as
- *   lib/workspace-delete.ts) — no server-side store or cookie required.
+ *   lib/crypto/tokens.ts) — no server-side store or cookie required.
  */
 
 /**

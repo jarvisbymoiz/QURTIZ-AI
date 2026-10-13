@@ -62,6 +62,30 @@ afterEach(() => {
 });
 
 describe("shared project integration", () => {
+  it("isolates cancellation of a caller while a shared public search completes for another workspace", async () => {
+    let release: (value: Response) => void = () => {};
+    const impl = fetchMock(() => new Promise<Response>(resolve => { release = resolve; }));
+    const controller = new AbortController();
+    const chargedWorkspace = freshWs();
+    const first = searchResearch({workspaceId:chargedWorkspace,userId:USER_1,query:"shared cancellation test",signal:controller.signal});
+    const aborted = expect(first).rejects.toThrow();
+    const second = searchResearch({workspaceId:freshWs(),userId:USER_2,query:"shared cancellation test"});
+    await vi.waitFor(() => expect(impl).toHaveBeenCalledTimes(1));
+    controller.abort();
+    release(braveOk([{url:"https://example.com/shared"}]));
+    await aborted;
+    expect((await second).ok).toBe(true);
+    await vi.waitFor(() => expect(usageCalls().filter(event => event.workspaceId === chargedWorkspace && event.status === "ok" && !event.cacheHit)).toHaveLength(1));
+    expect(impl).toHaveBeenCalledTimes(1);
+  });
+  it("does not share cached answers between different requested result counts", async () => {
+    const impl = fetchMock(url => braveOk(Array.from({length:Number(new URL(url).searchParams.get("count"))},(_,i)=>({url:`https://example.com/${i}`}))));
+    const ws = freshWs();
+    const small = await searchResearch({workspaceId:ws,userId:USER_1,query:"result count test",count:2});
+    const large = await searchResearch({workspaceId:ws,userId:USER_1,query:"result count test",count:5});
+    expect(small.ok && small.count).toBe(2); expect(large.ok && large.count).toBe(5);
+    expect(impl).toHaveBeenCalledTimes(2);
+  });
   it("serves multiple users through the SAME shared key, attributed per user", async () => {
     const impl = fetchMock(() =>
       braveOk([{ title: "Result", url: "https://example.com/a", description: "info" }]),
@@ -260,6 +284,14 @@ describe("missing / invalid key and provider failures (graceful, never crashes)"
       expect(outcome.reason).toBe("provider_unavailable");
       expect(outcome.message).not.toContain(KEY);
     }
+  });
+
+  it("relays 422 as invalid_request without a transient/retry claim", async () => {
+    const impl = fetchMock(() => new Response(JSON.stringify({ error: { meta: { errors: [{ loc: ["query", "country"] }] } } }), { status: 422 }));
+    const outcome = await searchResearch({ workspaceId: WS_A, userId: USER_1, query: "invalid upstream request" });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) { expect(outcome.reason).toBe("invalid_request"); expect(outcome.message).toContain("HTTP 422"); expect(outcome.message).toContain("not a temporary outage"); }
+    expect(impl).toHaveBeenCalledTimes(1);
   });
 
   it("Brave 429 with Retry-After → quota failure carrying the retry window", async () => {

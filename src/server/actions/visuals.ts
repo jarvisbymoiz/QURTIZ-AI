@@ -1,5 +1,6 @@
 "use server";
 
+import { isWorkspaceStorageKey } from "@/lib/security/storage-key";
 import { reorderVisualUploads } from "@/lib/visuals/media-order";
 import { revalidatePath } from "next/cache";
 import { randomUUID } from "node:crypto";
@@ -24,6 +25,7 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
   const ctx = await getActiveContext("brand:write");
   if ("error" in ctx) return { ok: false, error: ctx.error };
 
+  if (!rateLimit(`brand-upload:${ctx.workspaceId}:${ctx.userId}`, 30, 10 * 60_000).allowed) return { ok: false, error: "Too many brand uploads. Try again later." };
   const kind = String(formData.get("kind") ?? "");
   if (!["logo", "avatar", "reference"].includes(kind)) {
     return { ok: false, error: "Invalid asset kind." };
@@ -55,8 +57,14 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
     await db.transaction(async tx => {
       // Serialize logo changes within this workspace. The old logo stays live
       // unless both the new Storage upload and the DB replacement succeed.
-      if (kind === "logo") await tx.select({ id: workspaces.id }).from(workspaces)
+      await tx.select({ id: workspaces.id }).from(workspaces)
         .where(eq(workspaces.id, ctx.workspaceId)).for("update");
+      if (kind === "reference") {
+        const active = await tx.select({ id: brandAssets.id, kind: brandAssets.kind }).from(brandAssets)
+          .where(and(eq(brandAssets.workspaceId, ctx.workspaceId), eq(brandAssets.kind, "reference"),
+            eq(brandAssets.cleanupStatus, "permanent"), gt(brandAssets.refCount, 0)));
+        if (active.filter(asset => asset.kind === "reference").length >= 16) throw new Error("reference_limit");
+      }
       const oldLogos = kind === "logo" ? await tx.select({ id: brandAssets.id,
         storagePath: brandAssets.storagePath, sizeBytes: brandAssets.sizeBytes })
         .from(brandAssets).where(and(eq(brandAssets.workspaceId, ctx.workspaceId),
@@ -75,11 +83,11 @@ export async function uploadBrandAssetAction(formData: FormData): Promise<Action
           graceUntil, createdBy: ctx.userId });
       }
     });
-  } catch {
+  } catch (error) {
     // The new object has no DB reference if the transaction failed. Keep the
     // old logo intact, and remove only the just-uploaded object.
     try { await supabase.storage.from("brand-assets").remove([storagePath]); } catch { /* Best effort; old logo remains live. */ }
-    return { ok: false, error: "Could not save the new asset. The existing logo was preserved." };
+    return { ok: false, error: error instanceof Error && error.message === "reference_limit" ? "Keep at most 16 active Design References. Remove an existing reference before adding another." : "Could not save the new asset. The existing logo was preserved." };
   }
 
   revalidatePath("/brand-brain");
@@ -155,7 +163,7 @@ export async function getAssetSignedUrl(storagePath: string): Promise<string | n
   // membership, not just the forgeable qurtiz_workspace cookie.
   const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return null;
-  if (!storagePath.startsWith(`${ctx.workspaceId}/`)) return null;
+  if (!isWorkspaceStorageKey(storagePath, ctx.workspaceId)) return null;
   const { createServiceClient } = await import("@/lib/supabase/service");
   const supabase = process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : await (await import("@/lib/supabase/server")).createClient();
   const { data, error } = await supabase.storage.from("brand-assets").createSignedUrl(storagePath, 3600);
@@ -166,7 +174,7 @@ export async function getAssetSignedUrl(storagePath: string): Promise<string | n
 export async function listAssetSignedUrls(paths: string[]): Promise<Record<string, string | null>> {
   const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return {};
-  const authorized = [...new Set(paths)].filter(p => p.startsWith(`${ctx.workspaceId}/`)).slice(0, 200);
+  const authorized = [...new Set(paths)].filter(p => isWorkspaceStorageKey(p, ctx.workspaceId)).slice(0, 200);
   const out: Record<string, string | null> = Object.fromEntries(authorized.map(p => [p, null]));
   if (!authorized.length) return out;
   const { createServiceClient } = await import("@/lib/supabase/service");

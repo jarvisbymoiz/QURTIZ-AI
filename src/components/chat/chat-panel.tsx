@@ -676,7 +676,7 @@ export function ChatPanel({
   }
 
   return (
-    <div className="relative flex h-[calc(100dvh-11rem)] min-h-80 flex-col gap-4">
+    <div className="relative flex min-w-0 max-w-full h-[calc(100dvh-11rem)] min-h-80 flex-col gap-4">
       {messages.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
           <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-lg">
@@ -702,7 +702,7 @@ export function ChatPanel({
         </div>
       ) : (
         <div ref={scrollRef} onScroll={handleScroll}
-          className={cn("relative flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin scroll-autohide", scrolling && "scroll-active")}>
+          className={cn("relative min-w-0 flex-1 space-y-5 overflow-y-auto pr-2 scroll-thin scroll-autohide", scrolling && "scroll-active")}>
           {messages.map((m, i) => {
             const isUser = m.role === "user";
             const isLiveMessage = !isUser && busy && i === messages.length - 1;
@@ -710,7 +710,7 @@ export function ChatPanel({
             const canRetry =
               !isUser && !busy && truth === "failed" && i === messages.length - 1;
             return (
-              <div key={m.id} data-uid={m.id} className={cn("flex gap-3", isUser && "justify-end")}>
+              <div key={m.id} data-uid={m.id} className={cn("flex min-w-0 gap-3", isUser && "justify-end")}>
                 {!isUser ? (
                   <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
                     <Brain className="size-4 text-primary" aria-hidden />
@@ -718,7 +718,7 @@ export function ChatPanel({
                 ) : null}
                 <div
                   className={cn(
-                    "min-w-0 rounded-xl border p-4",
+                    "min-w-0 max-w-full rounded-xl border p-4",
                     isUser ? "max-w-[80%] border-primary/30 bg-primary/5" : "flex-1 bg-card",
                   )}
                 >
@@ -764,8 +764,8 @@ export function ChatPanel({
       ) : null}
 
       {error ? (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
-          <p className="flex items-start gap-2 text-sm text-destructive">
+        <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <p className="flex min-w-0 items-start gap-2 text-sm text-destructive [overflow-wrap:anywhere] [&>svg]:shrink-0">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
             {errorRunTruth ? (
               errorRunTruth.status === "completed" ? (
@@ -847,7 +847,7 @@ export function ChatPanel({
         </div>
       ) : null}
 
-      <form onSubmit={handleSend} className="sticky bottom-0 flex items-end gap-2 bg-background pb-1 pt-1">
+      <form onSubmit={handleSend} className="chat-composer sticky bottom-0">
         <input
           ref={fileInputRef}
           type="file"
@@ -859,7 +859,7 @@ export function ChatPanel({
             e.target.value = "";
           }}
         />
-        <Button type="button" size="icon" variant="outline" aria-label="Attach image or PDF" disabled={busy} onClick={() => fileInputRef.current?.click()}>
+        <Button type="button" size="icon" variant="ghost" className="chat-composer-attach" aria-label="Attach image or PDF" disabled={busy} onClick={() => fileInputRef.current?.click()}>
           <Paperclip className="size-4" aria-hidden />
         </Button>
         <Textarea
@@ -871,9 +871,9 @@ export function ChatPanel({
               handleSend();
             }
           }}
-          placeholder="Message your agent… (Enter to send, Shift+Enter for a new line)"
+          placeholder="Message your agent…"
           rows={2}
-          className="max-h-40 min-h-[3rem] flex-1 resize-none"
+          className="chat-composer-input scroll-thin max-h-40 resize-none"
           disabled={busy}
           aria-label="Message"
         />
@@ -882,6 +882,7 @@ export function ChatPanel({
             type="button"
             size="icon"
             variant="outline"
+            className="chat-composer-send"
             onClick={() => { void handleStop(); }}
             disabled={stopping}
             aria-label={stopping ? "Stopping…" : "Stop generating"}
@@ -889,7 +890,7 @@ export function ChatPanel({
             <Square className="size-3 fill-current" aria-hidden />
           </Button>
         ) : (
-          <Button type="submit" size="icon" disabled={!input.trim() && attachments.length === 0} aria-label="Send message">
+          <Button type="submit" size="icon" className="chat-composer-send" disabled={!input.trim() && attachments.length === 0} aria-label="Send message">
             <ArrowUp className="size-4" aria-hidden />
           </Button>
         )}

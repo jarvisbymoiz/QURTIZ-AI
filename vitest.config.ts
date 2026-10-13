@@ -2,6 +2,8 @@ import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
+  // Test-only JSX compilation; Next keeps its production compiler unchanged.
+  oxc: { jsx: { runtime: "automatic" } },
   test: {
     include: ["src/**/*.test.ts"],
     exclude: process.env.RUN_LIVE_TESTS === "true" ? [] : ["**/*.live.test.ts"],

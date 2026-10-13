@@ -1,3 +1,4 @@
+import { referenceCounts, type ImageReference } from "./image-references";
 /** Browser-only transport. No ChatGPT account credentials or pairing key reach Qurtiz servers. */
 const BASE = "http://127.0.0.1:8788";
 // Align with Next server-action input validation so oversize results fail locally.
@@ -54,8 +55,11 @@ export async function pairLocalCompanion(userId: string, workspaceId: string): P
     try { await checkLocalCompanion(previous); return previous; }
     catch { window.sessionStorage.removeItem(key); }
   }
+  const { beginCompanionPairingAction } = await import("@/server/actions/companion-pairing");
+  const proof = await beginCompanionPairingAction();
+  if (!proof.ok) throw new Error(proof.error);
   const result = await requestLocal("/pair", null, { method: "POST",
-    body: JSON.stringify({ userId, workspaceId }) }, 6_000);
+    body: JSON.stringify({ userId, workspaceId, challenge: proof.challenge }) }, 12_000);
   if (!result.pairingKey || result.pairingKey.length < 20) throw new Error("Companion pairing failed.");
   window.sessionStorage.setItem(key, result.pairingKey);
   return result.pairingKey;
@@ -102,19 +106,23 @@ export async function generateLocalCompanionImage(args: {
   modelId?: string | null;
   prompt: string;
   size?: string;
-  references?: { mimeType: string; base64: string }[];
+  references?: ImageReference[];
 }): Promise<string> {
   if (!args.prompt.trim()) throw new Error("An image prompt is required.");
   const selectedModel = args.modelId?.trim() || undefined;
-  const reference = args.references?.[0];
+  const references = args.references ?? [];
+  if (references.reduce((total, ref) => total + ref.base64.length, 0) > 6 * 1024 * 1024) {
+    throw new Error("Use brand references totaling at most 4MB for local generation.");
+  }
   let path = "/v1/images/generations";
   let body: string;
-  if (reference) {
-    if (!/^image\/(png|jpeg|webp)$/.test(reference.mimeType) || reference.base64.length > 6 * 1024 * 1024) {
+  if (process.env.NODE_ENV === "development") console.info("[image-request]", { mode: "chatgpt-account", ...referenceCounts(references), references: references.length });
+  if (references.length) {
+    if (references.some(reference => !/^image\/(png|jpeg|webp)$/.test(reference.mimeType))) {
       throw new Error("Brand reference is too large or unsupported for the local gateway.");
     }
     body = JSON.stringify({ ...(selectedModel ? { model: selectedModel } : {}), prompt: args.prompt,
-      images: [{ image_url: `data:${reference.mimeType};base64,${reference.base64}` }],
+      images: references.map(reference => ({ image_url: `data:${reference.mimeType};base64,${reference.base64}` })),
       size: args.size ?? "1024x1024", quality: "high", response_format: "b64_json" });
     path = "/v1/images/edits";
   } else {

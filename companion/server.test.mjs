@@ -17,7 +17,10 @@ let loginWithoutQuota = false;
 let selectedTextModel = null;
 let imageRequestCount = 0;
 
+const realFetch = globalThis.fetch;
 before(async () => {
+  globalThis.fetch = (input, options) => String(input) === `${origin}/api/companion/pair/verify`
+    ? Promise.resolve(Response.json({ ok: JSON.parse(options.body).challenge === "p".repeat(43) })) : realFetch(input, options);
   upstream = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -64,12 +67,13 @@ before(async () => {
   await listenCompanion(companion, 0);
   base = `http://127.0.0.1:${companion.address().port}`;
   const pairing = await fetch(`${base}/pair`, { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" },
-    body: JSON.stringify({ userId: "00000000-0000-4000-8000-000000000001", workspaceId: "00000000-0000-4000-8000-000000000002" }) });
+    body: JSON.stringify({ userId: "00000000-0000-4000-8000-000000000001", workspaceId: "00000000-0000-4000-8000-000000000002", challenge: "p".repeat(43) }) });
   assert.equal(pairing.status, 200);
   assert.equal((await pairing.json()).pairingKey, "pairing-only-local");
 });
 
 after(async () => {
+  globalThis.fetch = realFetch;
   await new Promise((resolve) => companion.close(resolve));
   await new Promise((resolve) => upstream.close(resolve));
 });
@@ -88,7 +92,7 @@ test("restart preserves the Qurtiz owner and rejects another workspace", async (
     await listenCompanion(first, 0);
     const response = await fetch(`http://127.0.0.1:${first.address().port}/pair`, { method: "POST",
       headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "00000000-0000-0000-0000-000000000001", workspaceId: "00000000-0000-0000-0000-000000000002" }) });
+      body: JSON.stringify({ userId: "00000000-0000-0000-0000-000000000001", workspaceId: "00000000-0000-0000-0000-000000000002", challenge: "p".repeat(43) }) });
     assert.equal(response.status, 200);
   } finally { await new Promise(resolve => first.close(resolve)); }
   const second = createCompanionServer({ ...config, pairingSecret: "different-secret-after-restart" });
@@ -97,10 +101,10 @@ test("restart preserves the Qurtiz owner and rejects another workspace", async (
     const url = `http://127.0.0.1:${second.address().port}/pair`;
     const headers = { Origin: origin, "Content-Type": "application/json" };
     const denied = await fetch(url, { method: "POST", headers, body: JSON.stringify({
-      userId: "00000000-0000-0000-0000-000000000003", workspaceId: "00000000-0000-0000-0000-000000000002" }) });
+      userId: "00000000-0000-0000-0000-000000000003", workspaceId: "00000000-0000-0000-0000-000000000002", challenge: "p".repeat(43) }) });
     assert.equal(denied.status, 409);
     const allowed = await fetch(url, { method: "POST", headers, body: JSON.stringify({
-      userId: "00000000-0000-0000-0000-000000000001", workspaceId: "00000000-0000-0000-0000-000000000002" }) });
+      userId: "00000000-0000-0000-0000-000000000001", workspaceId: "00000000-0000-0000-0000-000000000002", challenge: "p".repeat(43) }) });
     assert.equal(allowed.status, 200);
     assert.equal((await allowed.json()).pairingKey, "local-pairing-for-restart-test");
   } finally {
@@ -256,4 +260,12 @@ test("disconnect rotates pairing and refuses the old key", async () => {
   const old = await fetch(`${base}/status`, { headers: { Origin: origin, "x-qurtiz-pairing": "pairing-only-local" } });
   assert.equal(old.status, 401);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("local pairing does not disclose its key for asserted owner IDs alone", async () => {
+  const response = await fetch(`${base}/pair`, { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: "00000000-0000-4000-8000-000000000001", workspaceId: "00000000-0000-4000-8000-000000000002" }) });
+  assert.equal(response.status, 403);
+  assert.doesNotMatch(await response.text(), /pairingKey|pairing-only-local/);
 });
