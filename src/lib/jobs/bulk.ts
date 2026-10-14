@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
+import { prepareContentIntelligence, type ContentIntelligence } from "@/lib/content/intelligence";
 import { retrieveAgentMemory } from "@/lib/ai/persistent-memory";
 import { boundedAgentReference } from "@/lib/ai/memory-policy";
 import "server-only";
 
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, asc, desc, eq, ne, lt } from "drizzle-orm";
 import { generateObject } from "ai";
 import { z } from "zod";
 import { getDb } from "@/db";
@@ -57,14 +59,14 @@ type PlanItem = z.infer<typeof planSchema>["items"][number];
 
 async function setStage(jobId: string, stage: BulkStage, progress?: number, total?: number): Promise<void> {
   const db = getDb();
-  const [current] = await db.select({ result: jobs.result }).from(jobs).where(eq(jobs.id, jobId));
+  const [current] = await db.select({ result: jobs.result }).from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
   const patch: Record<string, unknown> = {
     result: { ...((current?.result ?? {}) as Record<string, unknown>), stage },
     updatedAt: new Date(),
   };
   if (progress !== undefined) patch.progress = progress;
   if (total !== undefined) patch.total = total;
-  await db.update(jobs).set(patch).where(eq(jobs.id, jobId));
+  await db.update(jobs).set(patch).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
 }
 
 /**
@@ -73,149 +75,165 @@ async function setStage(jobId: string, stage: BulkStage, progress?: number, tota
  * per-post generation (with brand context + QA) -> template visual ->
  * Ready for Review. Cancellation-aware; failures tracked per item.
  */
-export async function runBulkPlan(jobId: string): Promise<void> {
+export async function runBulkPlan(jobId: string, options: { onePost?: boolean } = {}): Promise<void> {
   const db = getDb();
   const [job] = await db.update(jobs).set({ status: "running", updatedAt: new Date() })
-    .where(and(eq(jobs.id, jobId), eq(jobs.status, "queued"))).returning();
+    .where(and(eq(jobs.id, jobId), eq(jobs.type, "bulk_plan"), eq(jobs.status, "queued"))).returning();
   if (!job) return;
 
   const input = (job.input ?? {}) as { count?: number; niche?: string };
   const count = Math.min(Math.max(input.count ?? 12, 1), 30);
   const niche = input.niche?.trim() || null;
 
-  const [run] = await db
-    .insert(agentRuns)
-    .values({ workspaceId: job.workspaceId, userId: job.userId, kind: "bulk_generation", model: null })
-    .returning();
-
+  const prior = (job.result ?? {}) as Record<string, unknown>;
+  const saved = prior.checkpoint as { plan: PlanItem[]; intelligence: ContentIntelligence; runId: string; nextIndex: number } | undefined;
+  const priorRunId = saved?.runId ?? (typeof prior.preparationRunId === "string" ? prior.preparationRunId : undefined);
+  const run = priorRunId ? { id: priorRunId } : (await db.insert(agentRuns).values({ workspaceId: job.workspaceId, userId: job.userId, kind: "bulk_generation", model: null }).returning())[0];
+  let checkpoint = saved;
+  const created = Array.isArray(prior.createdIds) ? prior.createdIds as string[] : [];
+  const failedItems = Array.isArray(prior.failures) ? prior.failures as string[] : [];
+  const visualWarnings = Array.isArray(prior.visualWarnings) ? prior.visualWarnings as string[] : [];
+  let qaFailedCount = Number(prior.qaFailed ?? 0);
   try {
-    // ── 1. Brand Brain ──────────────────────────────────────────────
-    await setStage(jobId, "Analyzing Brand Brain");
-    const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, job.workspaceId));
-    const learned = await retrieveAgentMemory({ workspaceId: job.workspaceId, userId: job.userId }, "Create content strategy posts " + (niche ?? ""));
-    const pillars = await db
-      .select()
-      .from(contentPillars)
-      .where(and(eq(contentPillars.workspaceId, job.workspaceId), eq(contentPillars.active, true)));
-    if (pillars.length === 0) await ensureDefaultPillars(job.workspaceId);
+    if (!checkpoint) {
+      await db.update(jobs).set({ result: { ...prior, preparationRunId: run.id, stage: "Preparing" }, updatedAt: new Date() })
+        .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+      // ── 1. Brand Brain ──────────────────────────────────────────────
+      await setStage(jobId, "Analyzing Brand Brain");
+      const [brand] = await db.select().from(brands).where(eq(brands.workspaceId, job.workspaceId));
+      const learned = await retrieveAgentMemory({ workspaceId: job.workspaceId, userId: job.userId }, "Create content strategy posts " + (niche ?? ""));
+      const pillars = await db
+        .select()
+        .from(contentPillars)
+        .where(and(eq(contentPillars.workspaceId, job.workspaceId), eq(contentPillars.active, true)));
+      if (pillars.length === 0) await ensureDefaultPillars(job.workspaceId);
 
-    // ── 2. Content library (dedupe + prior topics) ──────────────────
-    await setStage(jobId, "Analyzing content library");
-    const existingItems = await db
-      .select({ topic: contentItems.topic, status: contentItems.status })
-      .from(contentItems)
-      .where(eq(contentItems.workspaceId, job.workspaceId))
-      .orderBy(desc(contentItems.createdAt))
-      .limit(60);
-    const existingTopics = existingItems.map((i) => i.topic);
-
-    // ── 3. Analytics (only if real data exists) ─────────────────────
-    await setStage(jobId, "Checking analytics");
-    const metricRows = await db
-      .select()
-      .from(postMetrics)
-      .where(eq(postMetrics.workspaceId, job.workspaceId))
-      .limit(100);
-    let analyticsSummary = "No analytics data yet — base decisions on brand context and best practices, stated honestly.";
-    if (metricRows.length >= 3) {
-      const items = await db
-        .select({ id: contentItems.id, format: contentItems.format, topic: contentItems.topic })
+      // ── 2. Content library (dedupe + prior topics) ──────────────────
+      await setStage(jobId, "Analyzing content library");
+      const existingItems = await db
+        .select({ topic: contentItems.topic, status: contentItems.status })
         .from(contentItems)
-        .where(eq(contentItems.workspaceId, job.workspaceId));
-      const itemById = new Map(items.map((i) => [i.id, i]));
-      const perf = metricRows.map((r) => {
-        const item = r.contentItemId ? itemById.get(r.contentItemId) : undefined;
-        const m = (r.metrics ?? {}) as Record<string, number>;
-        return {
-          format: item?.format ?? "unknown",
-          topic: (item?.topic ?? "").slice(0, 60),
-          engagement: (m.likes ?? 0) + (m.comments ?? 0) + (m.shares ?? 0) + (m.saves ?? 0),
-        };
-      });
-      const byFormat = new Map<string, { eng: number; posts: number }>();
-      for (const p of perf) {
-        const cur = byFormat.get(p.format) ?? { eng: 0, posts: 0 };
-        cur.eng += p.engagement;
-        cur.posts += 1;
-        byFormat.set(p.format, cur);
+        .where(eq(contentItems.workspaceId, job.workspaceId))
+        .orderBy(desc(contentItems.createdAt))
+        .limit(60);
+      const existingTopics = existingItems.map((i) => i.topic);
+
+      // ── 3. Analytics (only if real data exists) ─────────────────────
+      await setStage(jobId, "Checking analytics");
+      const metricRows = await db
+        .select()
+        .from(postMetrics)
+        .where(eq(postMetrics.workspaceId, job.workspaceId))
+        .limit(100);
+      let analyticsSummary = "No analytics data yet — base decisions on brand context and best practices, stated honestly.";
+      if (metricRows.length >= 3) {
+        const items = await db
+          .select({ id: contentItems.id, format: contentItems.format, topic: contentItems.topic })
+          .from(contentItems)
+          .where(eq(contentItems.workspaceId, job.workspaceId));
+        const itemById = new Map(items.map((i) => [i.id, i]));
+        const perf = metricRows.map((r) => {
+          const item = r.contentItemId ? itemById.get(r.contentItemId) : undefined;
+          const m = (r.metrics ?? {}) as Record<string, number>;
+          return {
+            format: item?.format ?? "unknown",
+            topic: (item?.topic ?? "").slice(0, 60),
+            engagement: (m.likes ?? 0) + (m.comments ?? 0) + (m.shares ?? 0) + (m.saves ?? 0),
+          };
+        });
+        const byFormat = new Map<string, { eng: number; posts: number }>();
+        for (const p of perf) {
+          const cur = byFormat.get(p.format) ?? { eng: 0, posts: 0 };
+          cur.eng += p.engagement;
+          cur.posts += 1;
+          byFormat.set(p.format, cur);
+        }
+        const top = [...perf].sort((a, b) => b.engagement - a.engagement).slice(0, 3);
+        analyticsSummary =
+          `Measured performance from ${metricRows.length} posts. ` +
+          [...byFormat.entries()].map(([f, v]) => `${f}: avg ${Math.round(v.eng / v.posts)} engagement over ${v.posts} posts`).join("; ") +
+          `. Top posts: ${top.map((t) => `"${t.topic}" (${t.engagement})`).join("; ")}.`;
       }
-      const top = [...perf].sort((a, b) => b.engagement - a.engagement).slice(0, 3);
-      analyticsSummary =
-        `Measured performance from ${metricRows.length} posts. ` +
-        [...byFormat.entries()].map(([f, v]) => `${f}: avg ${Math.round(v.eng / v.posts)} engagement over ${v.posts} posts`).join("; ") +
-        `. Top posts: ${top.map((t) => `"${t.topic}" (${t.engagement})`).join("; ")}.`;
+
+      // ── 4. Research (only real stored research) ─────────────────────
+      await setStage(jobId, "Checking research");
+      const research = await db
+        .select({ topic: researchItems.topic, scores: researchItems.scores })
+        .from(researchItems)
+        .where(and(eq(researchItems.workspaceId, job.workspaceId), ne(researchItems.status, "dismissed")))
+        .orderBy(desc(researchItems.createdAt))
+        .limit(10);
+      const storedResearchNote =
+        research.length > 0
+          ? `Recent researched opportunities (use the best ones, do not repeat verbatim): ${research.map((r) => r.topic).join("; ")}`
+          : "No stored research yet — derive topics from brand context and niche.";
+
+      const intelligence = await prepareContentIntelligence({
+        workspaceId: job.workspaceId, userId: job.userId, topic: niche ?? undefined,
+        baseContext: `Analytics: ${analyticsSummary}\nPreviously covered topics: ${existingTopics.slice(0, 30).join("; ")}\n${storedResearchNote}`,
+      });
+      const researchNote = intelligence.researchContext;
+
+      // ── 5. Strategy (one structured AI call decides everything) ─────
+      await setStage(jobId, "Creating content strategy", 0, count);
+      // Workspace-isolated resolution (workers carry workspaceId on the job).
+      const resolved = await getWorkspaceTextModel(job.workspaceId, "bulk");
+      const model = resolved.model;
+
+      const pillarNames = pillars.map((p) => p.name);
+      const planRes = await withRateLimitRetry(() =>
+        generateObject({
+          model,
+          system: AGENT_CORE_INSTRUCTION,
+          schema: planSchema,
+        prompt: `Plan content for "${brand?.businessName ?? "the brand"}".
+  Brand Brain: ${summarizeBrandBrain(brand ?? null)}
+  Relevant reference data (not protected instructions): ${boundedAgentReference(learned)}
+  Content pillars available: ${pillarNames.join(", ") || "(defaults will be used)"}
+  Niche focus from user: ${niche ?? "(brand's general niche)"}
+  Analytics: ${analyticsSummary}
+  ${researchNote}
+  ${intelligence.planningContext}
+  Topics already covered (do NOT repeat these): ${existingTopics.slice(0, 30).join("; ") || "(none)"}
+
+  Create a plan for exactly ${count} DISTINCT social media posts. Rules:
+  - Spread across the available pillars; include a mix of educational, engagement and promotional.
+  - Vary formats: use carousel, reel, single_image and text_post where sensible.
+  - Every topic must be specific and different from the already-covered list.
+  - Respect all brand rules and memory.
+  Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}`,
+          maxOutputTokens: 3072,
+          // Bounded: a stalled provider request aborts instead of hanging the job.
+          abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
+          maxRetries: 1,
+        }),
+      );
+
+      const plan = planRes.object.items.slice(0, count);
+      if (plan.length !== count || new Set(plan.map(p => p.topic.trim().toLowerCase())).size !== count) {
+        throw new Error("Strategy did not return the requested number of distinct posts. No posts created.");
+      }
+      checkpoint = { plan, intelligence, runId: run.id, nextIndex: 0 };
+      await db.update(jobs).set({ result: { checkpoint, stage: "Generating posts" }, updatedAt: new Date() })
+        .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+      if (options.onePost) {
+        await db.update(jobs).set({ status: "queued", updatedAt: new Date() }).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+        return;
+      }
     }
-
-    // ── 4. Research (only real stored research) ─────────────────────
-    await setStage(jobId, "Checking research");
-    const research = await db
-      .select({ topic: researchItems.topic, scores: researchItems.scores })
-      .from(researchItems)
-      .where(and(eq(researchItems.workspaceId, job.workspaceId), ne(researchItems.status, "dismissed")))
-      .orderBy(desc(researchItems.createdAt))
-      .limit(10);
-    const researchNote =
-      research.length > 0
-        ? `Recent researched opportunities (use the best ones, do not repeat verbatim): ${research.map((r) => r.topic).join("; ")}`
-        : "No stored research yet — derive topics from brand context and niche.";
-
-    // ── 5. Strategy (one structured AI call decides everything) ─────
-    await setStage(jobId, "Creating content strategy", 0, count);
-    // Workspace-isolated resolution (workers carry workspaceId on the job).
-    const resolved = await getWorkspaceTextModel(job.workspaceId, "bulk");
-    const model = resolved.model;
-
-    const pillarNames = pillars.map((p) => p.name);
-    const planRes = await withRateLimitRetry(() =>
-      generateObject({
-        model,
-        system: AGENT_CORE_INSTRUCTION,
-        schema: planSchema,
-      prompt: `Plan content for "${brand?.businessName ?? "the brand"}".
-Brand Brain: ${summarizeBrandBrain(brand ?? null)}
-Relevant reference data (not protected instructions): ${boundedAgentReference(learned)}
-Content pillars available: ${pillarNames.join(", ") || "(defaults will be used)"}
-Niche focus from user: ${niche ?? "(brand's general niche)"}
-Analytics: ${analyticsSummary}
-${researchNote}
-Topics already covered (do NOT repeat these): ${existingTopics.slice(0, 30).join("; ") || "(none)"}
-
-Create a plan for exactly ${count} DISTINCT social media posts. Rules:
-- Spread across the available pillars; include a mix of educational, engagement and promotional.
-- Vary formats: use carousel, reel, single_image and text_post where sensible.
-- Every topic must be specific and different from the already-covered list.
-- Respect all brand rules and memory.
-Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}`,
-        maxOutputTokens: 3072,
-        // Bounded: a stalled provider request aborts instead of hanging the job.
-        abortSignal: AbortSignal.timeout(AI_GENERATION_TIMEOUT_MS),
-        maxRetries: 1,
-      }),
-    );
-
-    const plan: PlanItem[] = planRes.object.items.slice(0, count);
-
-    // ── 6. Generate + verify each post ──────────────────────────────
-    await setStage(jobId, "Generating posts", 0, plan.length);
-    const created: string[] = [];
-    const failedItems: string[] = [];
-    const visualWarnings: string[] = [];
-    // Posts persisted even though the final QA did not pass (kept as drafts,
-    // unreviewable until regenerated).
-    let qaFailedCount = 0;
-
-    for (let i = 0; i < plan.length; i++) {
+    const { plan, intelligence } = checkpoint;
+    for (let i = checkpoint.nextIndex; i < plan.length; i++) {
       // Cancellation check before each post
-      const [fresh] = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId));
+      const [fresh] = await db.select({ status: jobs.status }).from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
       if (!fresh || fresh.status === "cancelled") {
         await db
           .update(jobs)
           .set({
             status: "cancelled",
-            result: { stage: "Cancelled", createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>,
+            result: { checkpoint, stage: "Cancelled", createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings, qaFailed: qaFailedCount } as Record<string, unknown>,
             updatedAt: new Date(),
           })
-          .where(eq(jobs.id, jobId));
+          .where(and(eq(jobs.id, jobId), eq(jobs.status, "cancelled")));
         await db
           .update(agentRuns)
           .set({ status: "cancelled", finishedAt: new Date() })
@@ -226,19 +244,25 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       const planItem = plan[i];
       await db
         .update(jobs)
-        .set({ progress: i, result: { stage: `Generating post ${i + 1}/${plan.length}: ${planItem.topic.slice(0, 60)}`,
-          createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>, updatedAt: new Date() })
-        .where(eq(jobs.id, jobId));
+        .set({ progress: i, result: { checkpoint, stage: `Generating post ${i + 1}/${plan.length}: ${planItem.topic.slice(0, 60)}`,
+          createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings, qaFailed: qaFailedCount } as Record<string, unknown>, updatedAt: new Date() })
+        .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
 
       try {
+        const postSignal = AbortSignal.timeout(240_000);
         const { itemId, qa } = await generateAndPersistContent({
           workspaceId: job.workspaceId,
           userId: job.userId,
+          contentItemId: bulkContentId(jobId, i, 0),
+          abortSignal: postSignal,
           input: {
             topic: planItem.angle ? `${planItem.topic} — ${planItem.angle}` : planItem.topic,
             objective: `Pillar: ${planItem.pillar || "general"}`,
             platforms: ["facebook", "instagram"],
             preferredFormat: planItem.format,
+            planningContext: intelligence.planningContext,
+            researchContext: intelligence.researchContext,
+            researchEvidence: intelligence.evidence,
           },
         });
 
@@ -249,26 +273,33 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         if (!qa.passed) {
           await db
             .update(jobs)
-            .set({ result: { stage: `Verifying post ${i + 1}/${plan.length}`, createdCount: created.length,
-              createdIds: created, failures: failedItems, visualWarnings } as Record<string, unknown>, updatedAt: new Date() })
-            .where(eq(jobs.id, jobId));
-          const retry = await generateAndPersistContent({
-            workspaceId: job.workspaceId,
-            userId: job.userId,
-            input: {
-              topic: planItem.angle ? `${planItem.topic} — ${planItem.angle}` : planItem.topic,
-              objective: `Pillar: ${planItem.pillar || "general"}. Previous attempt failed QA (${qa.issues.map((x) => x.message).slice(0, 3).join("; ")}). Fix those specific issues.`,
-              platforms: ["facebook", "instagram"],
-              preferredFormat: planItem.format,
-            },
-          });
-          if (retry.qa.passed || retry.qa.score > finalQa.score) {
-            supersededItemId = finalItemId;
-            finalItemId = retry.itemId;
-            finalQa = retry.qa;
-          } else {
-            supersededItemId = retry.itemId;
-          }
+            .set({ result: { checkpoint, stage: `Verifying post ${i + 1}/${plan.length}`, createdCount: created.length,
+              createdIds: created, failures: failedItems, visualWarnings, qaFailed: qaFailedCount } as Record<string, unknown>, updatedAt: new Date() })
+            .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+          try {
+            const retry = await generateAndPersistContent({
+              workspaceId: job.workspaceId,
+              userId: job.userId,
+              contentItemId: bulkContentId(jobId, i, 1),
+              abortSignal: postSignal,
+              input: {
+                topic: planItem.angle ? `${planItem.topic} — ${planItem.angle}` : planItem.topic,
+                objective: `Pillar: ${planItem.pillar || "general"}. Previous attempt failed QA (${qa.issues.map((x) => x.message).slice(0, 3).join("; ")}). Fix those specific issues.`,
+                platforms: ["facebook", "instagram"],
+                preferredFormat: planItem.format,
+                planningContext: intelligence.planningContext,
+                researchContext: intelligence.researchContext,
+                researchEvidence: intelligence.evidence,
+              },
+            });
+            if (retry.qa.passed || retry.qa.score > finalQa.score) {
+              supersededItemId = finalItemId;
+              finalItemId = retry.itemId;
+              finalQa = retry.qa;
+            } else {
+              supersededItemId = retry.itemId;
+            }
+          } catch { visualWarnings.push(`Post ${i + 1}: QA retry failed; original draft retained for review.`); }
         }
         created.push(finalItemId);
 
@@ -316,10 +347,18 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         );
       }
 
-      await db.update(jobs).set({ progress: i + 1, updatedAt: new Date() }).where(eq(jobs.id, jobId));
-      await db.update(jobs).set({ result: { stage: `Generated ${i + 1}/${plan.length}`,
+      checkpoint.nextIndex = i + 1;
+      await db.update(jobs).set({ progress: i + 1, updatedAt: new Date() }).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+      await db.update(jobs).set({ result: { checkpoint, stage: `Processed ${i + 1}/${plan.length}`,
         createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings,
-        qaFailed: qaFailedCount }, updatedAt: new Date() }).where(eq(jobs.id, jobId));
+        qaFailed: qaFailedCount }, updatedAt: new Date() }).where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+
+      // Checkpoint then release the claim; the durable maintenance cron continues.
+      if (options.onePost && i < plan.length - 1) {
+        await db.update(jobs).set({ status: "queued", updatedAt: new Date() })
+          .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
+        return;
+      }
 
       // Pace API calls: free-tier Gemini caps at ~20 requests/minute.
       // QURTIZ_BULK_INTERVAL_MS overrides (0 = no delay, paid tier).
@@ -337,10 +376,10 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         .set({
           status: "failed",
           error: reason,
-          result: { stage: "Failed", createdCount: 0, createdIds: [], failures: failedItems, visualWarnings } as Record<string, unknown>,
+          result: { checkpoint, stage: "Failed", createdCount: 0, createdIds: [], failures: failedItems, visualWarnings } as Record<string, unknown>,
           updatedAt: new Date(),
         })
-        .where(eq(jobs.id, jobId));
+        .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
       await db
         .update(agentRuns)
         .set({ status: "failed", error: reason, finishedAt: new Date() })
@@ -363,7 +402,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
       .set({
         status: "completed",
         result: {
-          stage: "Completed",
+          checkpoint, stage: "Completed",
           createdCount: created.length,
           createdIds: created,
           failures: failedItems,
@@ -372,7 +411,7 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
         } as Record<string, unknown>,
         updatedAt: new Date(),
       })
-      .where(eq(jobs.id, jobId));
+      .where(and(eq(jobs.id, jobId), eq(jobs.status, "running")));
     await db.update(agentRuns).set({ status: "completed", finishedAt: new Date() }).where(eq(agentRuns.id, run.id));
     await db.insert(notifications).values({
       workspaceId: job.workspaceId,
@@ -392,10 +431,14 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Bulk plan failed";
-    await db
+    const [failed] = await db
       .update(jobs)
-      .set({ status: "failed", error: message, result: { stage: "Failed" } as Record<string, unknown>, updatedAt: new Date() })
-      .where(eq(jobs.id, jobId));
+      .set({ status: "failed", error: message, result: { checkpoint, stage: "Failed", createdCount: created.length, createdIds: created, failures: failedItems, visualWarnings, qaFailed: qaFailedCount } as Record<string, unknown>, updatedAt: new Date() })
+      .where(and(eq(jobs.id, jobId), eq(jobs.status, "running"))).returning({ id: jobs.id });
+    if (!failed) {
+      await db.update(agentRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(agentRuns.id, run.id));
+      return;
+    }
     await db
       .update(agentRuns)
       .set({ status: "failed", error: message, finishedAt: new Date() })
@@ -414,11 +457,14 @@ Reply ONLY with the JSON object: {"items":[{"topic","pillar","angle","format"}]}
 
 async function storeVisual(workspaceId: string, contentItemId: string, png: Buffer, userId: string): Promise<void> {
   const { visualAssets } = await import("@/db/schema");
+  const db = getDb();
+  const [existing] = await db.select({ id: visualAssets.id }).from(visualAssets)
+    .where(and(eq(visualAssets.workspaceId, workspaceId), eq(visualAssets.contentItemId, contentItemId))).limit(1);
+  if (existing) return;
   const supabase = createServiceClient();
   const storagePath = `${workspaceId}/visuals/${contentItemId}-${Date.now()}.png`;
   const { error } = await supabase.storage.from("brand-assets").upload(storagePath, png, { contentType: "image/png" });
   if (error) throw new Error(`Storage upload failed: ${error.message}`);
-  const db = getDb();
   await db.insert(visualAssets).values({
     workspaceId,
     contentItemId,
@@ -455,10 +501,15 @@ export async function startBulkPlanCore(args: {
       type: "bulk_plan",
       status: "queued",
       total: args.count,
-      input: { count: args.count, days, niche: args.niche || undefined },
+      input: { count: args.count, days, niche: args.niche || undefined, executionVersion: 2 },
     })
     .returning();
   try {
+    if (process.env.VERCEL === "1") {
+      const { after } = await import("next/server");
+      after(() => runBulkPlan(job.id, { onePost: true }));
+      return { ok: true, jobId: job.id };
+    }
     const { getBoss, QUEUES } = await import("@/lib/jobs/boss");
     const boss = await getBoss();
     const queued = await boss.send(QUEUES.bulkGenerate, { jobId: job.id });
@@ -469,4 +520,23 @@ export async function startBulkPlanCore(args: {
     await db.update(jobs).set({ status: "failed", error: message, updatedAt: new Date() }).where(eq(jobs.id, job.id));
     return { ok: false, error: "Could not queue the bulk plan: " + message };
   }
+}
+
+/** Stable identities make a repeated slice safe after a serverless interruption. */
+export function bulkContentId(jobId: string, index: number, attempt: number): string {
+  const h = createHash("sha256").update(`bulk:${jobId}:${index}:${attempt}`).digest("hex");
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+}
+
+export async function runQueuedBulk(): Promise<void> {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - 10 * 60_000);
+  const stale = await db.select().from(jobs).where(and(eq(jobs.type, "bulk_plan"), eq(jobs.status, "running"), lt(jobs.updatedAt, cutoff))).limit(10);
+  for (const job of stale) {
+    if (!(job.result as Record<string, unknown> | null)?.checkpoint && (job.input as { executionVersion?: number } | null)?.executionVersion !== 2) continue;
+    await db.update(jobs).set({ status: "queued", updatedAt: new Date() })
+      .where(and(eq(jobs.id, job.id), eq(jobs.status, "running"), lt(jobs.updatedAt, cutoff)));
+  }
+  const [job] = await db.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.type, "bulk_plan"), eq(jobs.status, "queued"))).orderBy(asc(jobs.updatedAt)).limit(1);
+  if (job) await runBulkPlan(job.id, { onePost: true });
 }

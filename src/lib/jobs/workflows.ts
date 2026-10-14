@@ -402,6 +402,7 @@ export async function recoverStuckGenerationJobs(): Promise<void> {
   )).limit(20);
   for (const job of stale) {
     const prior = (job.result ?? {}) as Record<string, unknown>;
+    if (job.type === "bulk_plan" && (prior.checkpoint || (job.input as { executionVersion?: number } | null)?.executionVersion === 2)) continue; // Resumable bulk slices recover through runQueuedBulk.
     const message = "The background worker stopped before this job completed. Review the saved results, then retry the remaining items.";
     const [recovered] = await db.update(jobs).set({ status: "failed", error: message,
       result: { ...prior, stage: "Failed", recoveryRequired: true }, updatedAt: new Date() })

@@ -8,6 +8,7 @@ import {
   cancelBulkJobAction,
   getJobStatusAction,
   startBulkPlanAction,
+  retryBulkFailedAction,
 } from "@/server/actions/schedule";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -30,9 +31,12 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [stage, setStage] = useState("Preparing");
   const [jobFailed, setJobFailed] = useState<string | null>(null);
+  const [failedJobId, setFailedJobId] = useState<string | null>(null);
+  const [warning, setWarning] = useState("");
   // Polling timer must be cleared on unmount AND when the job reaches a
   // terminal state — otherwise the interval leaks and keeps calling the API.
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollInFlight = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -50,11 +54,11 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
     }
   }
 
-  function startPlan() {
+  function startPlan(retry = false) {
     stopPolling();
     setJobFailed(null);
     start(async () => {
-      const r = await startBulkPlanAction({ count, niche: niche || undefined });
+      const r = retry && failedJobId ? await retryBulkFailedAction(failedJobId) : await startBulkPlanAction({ count, niche: niche || undefined });
       if (!r.ok) {
         toast.error(r.error);
         return;
@@ -63,6 +67,7 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
         setJobId(r.jobId);
         setProgress({ done: 0, total: count });
         setStage("Preparing");
+        setWarning("");
         toast.success("Bulk plan queued — posts will appear here as Ready for Review");
         poll(r.jobId);
       }
@@ -71,7 +76,16 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
 
   function poll(id: string) {
     stopPolling();
+    const startedAt = Date.now();
     pollTimer.current = setInterval(async () => {
+      if (pollInFlight.current) return;
+      if (Date.now() - startedAt > 60 * 60_000) {
+        stopPolling();
+        toast.info("Background generation continues. Refresh Content Studio later to see saved posts.");
+        return;
+      }
+      pollInFlight.current = true;
+      try {
       const s = await getJobStatusAction(id);
       if (!s.ok) {
         stopPolling();
@@ -79,9 +93,11 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
       }
       setProgress({ done: s.progress ?? 0, total: s.total ?? 0 });
       if (s.stage) setStage(s.stage);
+      setWarning(s.warning ?? "");
       if (s.status === "completed") {
         stopPolling();
-        toast.success("Bulk plan finished — new posts are Ready for Review below");
+        toast.success("Bulk plan finished — check the saved posts and their review status below");
+        if (s.warning) toast.warning(s.warning);
         setOpen(false);
         setJobId(null);
         router.refresh();
@@ -95,8 +111,13 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
       if (s.status === "failed") {
         stopPolling();
         setJobFailed(s.error ?? "Bulk plan failed");
+        setFailedJobId(id);
         setJobId(null);
       }
+      } catch {
+        stopPolling();
+        toast.error("Could not refresh job status. The background job has not been cancelled; refresh to see saved posts.");
+      } finally { pollInFlight.current = false; }
     }, 2500);
   }
 
@@ -120,7 +141,7 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
           <DialogTitle>Bulk content plan</DialogTitle>
           <DialogDescription>
             Runs the full pipeline: Brand Brain → existing content → analytics → research → AI strategy →
-            generation → verification. Every post lands here as <strong>Ready for Review</strong> — you approve
+            generation → verification. Passing posts land here as <strong>Ready for Review</strong> — you approve
             or reject each one before anything is scheduled or published.
           </DialogDescription>
         </DialogHeader>
@@ -134,10 +155,11 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
               <div className="h-2 overflow-hidden rounded-full bg-muted">
                 <div
                   className="h-full bg-primary transition-all"
-                  style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 5}%` }}
+                  style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }}
                 />
               </div>
               <p className="text-xs text-muted-foreground">You can keep working — new posts appear below as they finish.</p>
+              {warning ? <p className="text-xs text-muted-foreground">{warning}</p> : null}
               <Button size="sm" variant="outline" onClick={cancel} disabled={pending}>
                 Cancel
               </Button>
@@ -172,12 +194,12 @@ export function BulkPlanDialog({ editable, aiConfigured }: { editable: boolean; 
               {jobFailed ? (
                 <div className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
                   <p className="text-sm text-destructive">{jobFailed}</p>
-                  <Button size="sm" variant="outline" onClick={startPlan} disabled={pending}>
+                  <Button size="sm" variant="outline" onClick={() => startPlan(true)} disabled={pending}>
                     Retry failed posts
                   </Button>
                 </div>
               ) : null}
-              <Button className="w-full" onClick={startPlan} disabled={pending}>
+              <Button className="w-full" onClick={() => startPlan()} disabled={pending}>
                 {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Sparkles className="size-4" aria-hidden />}
                 Start bulk generation
               </Button>

@@ -336,6 +336,7 @@ export async function retryBulkFailedAction(jobId: string): Promise<ActionResult
     .from(jobs)
     .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
   if (!prev) return { ok: false, error: "Job not found." };
+  if (prev.status !== "failed" && prev.status !== "completed" && prev.status !== "cancelled") return { ok: false, error: "Wait for the current job to finish before retrying." };
   const result = (prev.result ?? {}) as { createdCount?: number; failures?: string[] };
   const failedCount = (prev.total ?? 0) - (result.createdCount ?? 0);
   if (failedCount <= 0) return { ok: false, error: "Nothing to retry." };
@@ -349,6 +350,7 @@ export async function getJobStatusAction(jobId: string): Promise<{
   total?: number;
   stage?: string | null;
   error?: string;
+  warning?: string;
 }> {
   const ctx = await getActiveContext("brand:read");
   if ("error" in ctx) return { ok: false };
@@ -360,7 +362,12 @@ export async function getJobStatusAction(jobId: string): Promise<{
     .where(and(eq(jobs.id, jobId), eq(jobs.workspaceId, ctx.workspaceId), eq(jobs.type, "bulk_plan")));
   if (!job) return { ok: false };
   const stage = (job.result as { stage?: string } | null)?.stage ?? null;
-  return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined };
+  const result = (job.result ?? {}) as { qaFailed?: number; failures?: string[]; checkpoint?: { intelligence?: { evidence?: { warnings?: { strategy: string; reason: string }[] } } } };
+  const warnings = result.checkpoint?.intelligence?.evidence?.warnings ?? [];
+  const warning = [warnings.length ? `Research limitations: ${warnings.map(w => `${w.strategy}: ${w.reason}`).join("; ")}` : "",
+    result.qaFailed ? `${result.qaFailed} post(s) saved as drafts after quality checks.` : "",
+    result.failures?.length ? `${result.failures.length} post(s) failed to generate.` : ""].filter(Boolean).join(" · ");
+  return { ok: true, status: job.status, progress: job.progress, total: job.total, stage, error: job.error ?? undefined, ...(warning ? { warning } : {}) };
 }
 
 

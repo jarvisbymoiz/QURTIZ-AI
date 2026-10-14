@@ -68,7 +68,8 @@ function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[];
         preferredFormat: format as "single_image",
       });
       if (r.ok) {
-        toast.success("Content created — Ready for Review below");
+        toast.success("Content created — check its review status below");
+        if (r.warning) toast.warning(r.warning);
         setOpen(false);
         setTopic("");
         setObjective("");
@@ -86,8 +87,8 @@ function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[];
         <DialogHeader>
           <DialogTitle>Generate a post</DialogTitle>
           <DialogDescription>
-            The agent writes copy adapted per platform, checks it against your Brand
-            Brain rules, and saves it as Ready for Review. Nothing is published.
+            Uses Brand Brain, website knowledge, existing content, measured analytics and fresh
+            web/trend research to plan and verify platform-specific copy. Posts need your review.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
@@ -130,7 +131,7 @@ function NewPostDialog({ pillars, editable, aiConfigured }: { pillars: Pillar[];
           </div>
           <Button type="submit" className="w-full" disabled={pending || platforms.length === 0 || topic.trim().length < 4}>
             {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-            {pending ? "Generating (up to ~30s)…" : "Generate"}
+            {pending ? "Researching, creating and checking…" : "Generate"}
           </Button>
         </form>
       </DialogContent>

@@ -37,3 +37,15 @@ it("continues generating with saved Brand Brain when website context reports a f
   expect(mocks.generate).toHaveBeenCalledOnce();
   expect(mocks.generate.mock.calls[0][0].system).toContain("Manual brand details win");
 });
+it("passes prepared Studio strategy and research to the model without duplicating website context",async()=>{
+  await expect(generateAndPersistContent({workspaceId:"one",userId:"owner",input:{topic:"Design",platforms:["facebook"],
+    planningContext:"Measured strategy + Actual document formatting service. https://brand.example.org/services/",
+    researchContext:"Retrieved source: https://research.example.org/ — verified design guidance",
+  }})).rejects.toThrow("Test stops at the real model-request boundary");
+  expect(mocks.website).not.toHaveBeenCalled();
+  const call=mocks.generate.mock.calls[0][0];
+  expect(call.prompt).toContain("Measured strategy");
+  expect(call.prompt).toContain("https://research.example.org/");
+  expect(call.prompt.split("Actual document formatting service")).toHaveLength(2);
+  expect(call.system).toContain("Manual brand details win");
+});

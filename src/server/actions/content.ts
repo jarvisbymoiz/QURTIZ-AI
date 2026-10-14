@@ -8,6 +8,7 @@ import { contentItems, contentVariants, publishingJobs, visualAssets, mediaClean
 import { editContent } from "@/lib/content/edit";
 
 import { generateAndPersistContent } from "@/lib/ai/content";
+import { prepareContentIntelligence } from "@/lib/content/intelligence";
 import { approveItem, rejectItem, archiveItem, getItem, transitionItem } from "@/lib/content/lifecycle";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { getActiveContext } from "@/lib/workspace";
@@ -48,19 +49,29 @@ export async function createContentAction(input: {
   try {
     const { ensureDefaultPillars } = await import("@/lib/content/pillars");
     await ensureDefaultPillars(ctx.workspaceId);
+    const signal = AbortSignal.timeout(240_000);
+    const intelligence = await prepareContentIntelligence({ workspaceId: ctx.workspaceId, userId: ctx.userId, topic: parsed.data.topic, signal });
     const { itemId, qa } = await generateAndPersistContent({
       workspaceId: ctx.workspaceId,
       userId: ctx.userId,
+      abortSignal: signal,
       input: {
         topic: parsed.data.topic,
         objective: parsed.data.objective || null,
         platforms: parsed.data.platforms,
         preferredFormat: parsed.data.preferredFormat ?? null,
+        planningContext: intelligence.planningContext,
+        researchContext: intelligence.researchContext,
+        researchEvidence: intelligence.evidence,
       },
     });
     revalidatePath("/content-studio");
     revalidatePath("/dashboard");
-    return { ok: true, itemId, qaScore: qa.score };
+    const warnings = [
+      ...intelligence.evidence.warnings.map(w => `Research ${w.strategy}: ${w.reason}`),
+      ...(!qa.passed ? ["Saved as a draft: quality checks need attention."] : []),
+    ];
+    return { ok: true, itemId, qaScore: qa.score, ...(warnings.length ? { warning: warnings.join(" · ") } : {}) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed";
     return { ok: false, error: message === "CONFIGURATION_REQUIRED" ? "AI is not configured for this workspace — add your provider + API key in Workspace Settings." : message };

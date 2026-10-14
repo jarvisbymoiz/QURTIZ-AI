@@ -10,6 +10,8 @@ import { can } from "@/lib/permissions";
 import { PageHeader } from "@/components/layout/page-header";
 import { StudioClient } from "@/components/studio/studio-client";
 
+export const maxDuration = 300;
+
 export const metadata = { title: "Content Studio" };
 
 async function ContentStudioPage() {
